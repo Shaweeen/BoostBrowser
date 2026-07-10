@@ -2,8 +2,6 @@ module boost-browser
 
 go 1.22.0
 
-replace github.com/energye/systray => ./third_party/systray
-
 require (
 	github.com/energye/systray v1.0.3
 	github.com/google/uuid v1.6.0

@@ -31,6 +31,11 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertNotIn("CloakKernelSrc  = 'Z:", text)
         self.assertNotIn("GoogleKernelSrc = 'Z:", text)
 
+    def test_go_mod_does_not_replace_modules_with_missing_local_third_party_dirs(self):
+        text = self.read("go.mod")
+        self.assertNotRegex(text, r"replace\s+github\.com/energye/systray\s+=>\s+\./third_party/systray")
+        self.assertNotIn("./third_party/systray", text)
+
     def test_stage_assets_allows_optional_google_and_extensions(self):
         text = self.read("scripts/stage_assets.ps1")
         self.assertIn("required", text.lower())
