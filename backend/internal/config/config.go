@@ -113,17 +113,20 @@ type BrowserBookmark struct {
 }
 
 type BrowserConfig struct {
-	UserDataRoot           string                 `yaml:"user_data_root"`
-	DefaultFingerprintArgs []string               `yaml:"default_fingerprint_args"`
-	DefaultLaunchArgs      []string               `yaml:"default_launch_args"`
-	DefaultProxy           string                 `yaml:"default_proxy"`
-	LastMoreLoginCacheRoot string                 `yaml:"last_morelogin_cache_root,omitempty"`
-	StartReadyTimeoutMs    int                    `yaml:"start_ready_timeout_ms,omitempty"`
-	StartStableWindowMs    int                    `yaml:"start_stable_window_ms,omitempty"`
-	DefaultBookmarks       []BrowserBookmark      `yaml:"default_bookmarks,omitempty"`
-	Cores                  []BrowserCore          `yaml:"cores,omitempty"`
-	Proxies                []BrowserProxy         `yaml:"proxies,omitempty"`
-	Profiles               []BrowserProfileConfig `yaml:"profiles,omitempty"`
+	UserDataRoot               string                 `yaml:"user_data_root"`
+	DefaultFingerprintArgs     []string               `yaml:"default_fingerprint_args"`
+	DefaultLaunchArgs          []string               `yaml:"default_launch_args"`
+	DefaultProxy               string                 `yaml:"default_proxy"`
+	LastMoreLoginCacheRoot     string                 `yaml:"last_morelogin_cache_root,omitempty"`
+	StartReadyTimeoutMs        int                    `yaml:"start_ready_timeout_ms,omitempty"`
+	StartStableWindowMs        int                    `yaml:"start_stable_window_ms,omitempty"`
+	CacheAutoCleanEnabled      bool                   `yaml:"cache_auto_clean_enabled,omitempty"`
+	CacheAutoCleanIntervalDays int                    `yaml:"cache_auto_clean_interval_days,omitempty"`
+	CacheLastCleanAt           string                 `yaml:"cache_last_clean_at,omitempty"`
+	DefaultBookmarks           []BrowserBookmark      `yaml:"default_bookmarks,omitempty"`
+	Cores                      []BrowserCore          `yaml:"cores,omitempty"`
+	Proxies                    []BrowserProxy         `yaml:"proxies,omitempty"`
+	Profiles                   []BrowserProfileConfig `yaml:"profiles,omitempty"`
 	// 废弃字段，保留用于迁移
 	ChromeBinaryPath     string               `yaml:"chrome_binary_path,omitempty"`
 	ClashBinaryPath      string               `yaml:"clash_binary_path,omitempty"`
@@ -350,6 +353,9 @@ func normalizeConfig(config *Config) {
 	if config.Browser.StartStableWindowMs <= 0 {
 		config.Browser.StartStableWindowMs = defaultConfig.Browser.StartStableWindowMs
 	}
+	if config.Browser.CacheAutoCleanIntervalDays <= 0 {
+		config.Browser.CacheAutoCleanIntervalDays = defaultConfig.Browser.CacheAutoCleanIntervalDays
+	}
 	if config.Browser.DefaultBookmarks == nil {
 		config.Browser.DefaultBookmarks = []BrowserBookmark{}
 	}
@@ -407,13 +413,16 @@ func DefaultConfig() *Config {
 			GCPercent:   100, // 默认 100%
 		},
 		Browser: BrowserConfig{
-			UserDataRoot:           "data",
-			DefaultFingerprintArgs: []string{"--fingerprint-brand=Chrome", "--fingerprint-platform=windows"},
-			DefaultLaunchArgs:      []string{"--disable-sync", "--no-first-run"},
-			DefaultProxy:           "",
-			LastMoreLoginCacheRoot: "",
-			StartReadyTimeoutMs:    3000,
-			StartStableWindowMs:    1200,
+			UserDataRoot:               "data",
+			DefaultFingerprintArgs:     []string{"--fingerprint-brand=Chrome", "--fingerprint-platform=windows"},
+			DefaultLaunchArgs:          []string{"--disable-sync", "--no-first-run"},
+			DefaultProxy:               "",
+			LastMoreLoginCacheRoot:     "",
+			StartReadyTimeoutMs:        3000,
+			StartStableWindowMs:        1200,
+			CacheAutoCleanEnabled:      false,
+			CacheAutoCleanIntervalDays: 30,
+			CacheLastCleanAt:           "",
 		},
 		Logging: LoggingConfig{
 			Level:           "info",

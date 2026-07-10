@@ -1,6 +1,7 @@
 // Settings 模块 API
 import type { AppSettings } from './types'
 import { defaultSettings } from './types'
+import { getCacheCleanSettings, saveCacheCleanSettings } from '../browser/api'
 
 // 本地存储 key
 const SETTINGS_KEY = 'app_settings'
@@ -34,20 +35,33 @@ export interface BackupActionResult {
 
 // 获取设置
 export async function fetchSettings(): Promise<AppSettings> {
+  let settings = defaultSettings
   try {
     const stored = localStorage.getItem(SETTINGS_KEY)
     if (stored) {
-      return { ...defaultSettings, ...JSON.parse(stored) }
+      settings = { ...defaultSettings, ...JSON.parse(stored) }
     }
   } catch {
   }
-  return defaultSettings
+  try {
+    const cache = await getCacheCleanSettings()
+    settings = {
+      ...settings,
+      cacheAutoCleanEnabled: !!cache.autoCleanEnabled,
+      cacheAutoCleanIntervalDays: Number(cache.intervalDays) || 30,
+      cacheLastCleanAt: cache.lastCleanAt || '',
+      cacheNextCleanAt: cache.nextCleanAt || '',
+    }
+  } catch {
+  }
+  return settings
 }
 
 // 保存设置
 export async function saveSettings(settings: AppSettings): Promise<boolean> {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+    await saveCacheCleanSettings(!!settings.cacheAutoCleanEnabled)
     return true
   } catch {
 	return false

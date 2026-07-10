@@ -11,6 +11,7 @@ import { KeywordsModal } from '../components/KeywordsModal'
 import { EventsOn } from '../../../wailsjs/runtime/runtime'
 import { resolveActionErrorMessage, resolveActionFeedback } from '../utils/actionErrors'
 import {
+  cleanBrowserCache,
   copyBrowserProfile,
   deleteBrowserCore,
   deleteBrowserProfile,
@@ -267,6 +268,7 @@ export function BrowserListPage() {
   // 勾选状态
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [batchLoading, setBatchLoading] = useState(false)
+  const [cleaningCache, setCleaningCache] = useState(false)
   const [deleteModal, setDeleteModal] = useState<{ open: boolean; ids: string[]; names: string[] }>({ open: false, ids: [], names: [] })
   const [deleteCache, setDeleteCache] = useState(false)
   const [deletingProfiles, setDeletingProfiles] = useState(false)
@@ -1017,6 +1019,23 @@ export function BrowserListPage() {
     }
   }
 
+  const handleCleanCache = async () => {
+    const running = profiles.filter(p => p.running).length
+    const message = running > 0
+      ? `将清理已停止环境的网页图片缓存、小程序/网页 App 缓存和 Cookies；${running} 个运行中环境会跳过。是否继续？`
+      : '将清理所有环境的网页图片缓存、小程序/网页 App 缓存和 Cookies，不删除书签和配置。是否继续？'
+    if (!confirm(message)) return
+    setCleaningCache(true)
+    try {
+      const result = await cleanBrowserCache(false)
+      toast.success(result?.message || '缓存清理完成')
+    } catch (error: any) {
+      toast.error(error?.message || '清理缓存失败')
+    } finally {
+      setCleaningCache(false)
+    }
+  }
+
   const handleCopy = async (profileId: string) => {
     if (!copyModal.profile) return
     setCopying(true)
@@ -1261,6 +1280,9 @@ export function BrowserListPage() {
         <div className="flex gap-2">
           <Button variant="secondary" size="sm" onClick={() => setHeaderCollapsed(prev => !prev)}>{headerCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}{headerCollapsed ? '展开面板' : '收起面板'}</Button>
           <Button variant="secondary" size="sm" onClick={() => { void loadProfiles() }}><RefreshCw className="w-4 h-4" />刷新</Button>
+          <Button variant="secondary" size="sm" onClick={handleCleanCache} loading={cleaningCache} title="只清理网页图片缓存、小程序/网页 App 缓存和 Cookies；不删除配置/书签">
+            <Trash2 className="w-4 h-4" />清理缓存
+          </Button>
           <Button variant="secondary" size="sm" onClick={handleImportMoreLogin} title="导入 MoreLogin 导出的 xlsx / txt 环境文件"><Upload className="w-4 h-4" />导入环境</Button>
           <Button variant="secondary" size="sm" onClick={handleImportRunningMoreLogin} title="导入当前正在运行的 MoreLogin 环境（当前先支持一次导入 1 个）"><FolderInput className="w-4 h-4" />导入运行中环境</Button>
           <Button variant="secondary" size="sm" onClick={handleOpenExtensionModal} disabled={selectedIds.size === 0} title="先勾选实例，再输入扩展下载地址"><Download className="w-4 h-4" />导入扩展</Button>

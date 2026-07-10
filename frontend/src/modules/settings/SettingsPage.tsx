@@ -350,6 +350,29 @@ export function SettingsPage() {
         </div>
       </Card>
 
+      <Card title="缓存清理" subtitle="只清理网页/小程序 App 产生的缓存图片、Storage 和 Cookies，不删除实例配置">
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium text-[var(--color-text-primary)]">每30天自动清理</p>
+              <p className="text-xs text-[var(--color-text-muted)] mt-0.5">
+                固定周期 30 天；自动清理会跳过正在运行的浏览器环境，避免影响当前窗口。
+              </p>
+            </div>
+            <Switch
+              checked={settings.cacheAutoCleanEnabled}
+              onChange={v => handleChange('cacheAutoCleanEnabled', v)}
+            />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-[var(--color-text-muted)] rounded-lg border border-[var(--color-border-muted)] bg-[var(--color-bg-secondary)] p-3">
+            <div>清理周期：{settings.cacheAutoCleanIntervalDays || 30} 天</div>
+            <div>上次清理：{settings.cacheLastCleanAt ? new Date(settings.cacheLastCleanAt).toLocaleString('zh-CN') : '尚未清理'}</div>
+            <div>下次自动清理：{settings.cacheNextCleanAt ? new Date(settings.cacheNextCleanAt).toLocaleString('zh-CN') : '开启后按30天计算'}</div>
+            <div>范围：Cache / 图片缓存 / 小程序 Storage / Cookies</div>
+          </div>
+        </div>
+      </Card>
+
       {/* 基础设置 */}
       <Card title="基础设置" subtitle="应用的基本信息配置">
         <div className="space-y-4">

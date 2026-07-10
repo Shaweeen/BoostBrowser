@@ -691,6 +691,59 @@ export async function deleteSnapshot(profileId: string, snapshotId: string): Pro
   return true
 }
 
+export interface CacheCleanResult {
+  profilesScanned: number
+  profilesCleaned: number
+  filesRemoved: number
+  dirsRemoved: number
+  bytesRemoved: number
+  errors: number
+  skippedRunning: number
+  cleanedProfiles: string[]
+  message: string
+}
+
+export interface CacheCleanSettings {
+  autoCleanEnabled: boolean
+  intervalDays: number
+  lastCleanAt?: string
+  nextCleanAt?: string
+}
+
+export async function cleanBrowserCache(includeRunning = false): Promise<CacheCleanResult> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserCleanCache) {
+    return await bindings.BrowserCleanCache(includeRunning)
+  }
+  return {
+    profilesScanned: 0,
+    profilesCleaned: 0,
+    filesRemoved: 0,
+    dirsRemoved: 0,
+    bytesRemoved: 0,
+    errors: 0,
+    skippedRunning: 0,
+    cleanedProfiles: [],
+    message: '当前环境不支持清理缓存接口',
+  }
+}
+
+export async function getCacheCleanSettings(): Promise<CacheCleanSettings> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserGetCacheCleanSettings) {
+    return await bindings.BrowserGetCacheCleanSettings()
+  }
+  return { autoCleanEnabled: false, intervalDays: 30 }
+}
+
+export async function saveCacheCleanSettings(enabled: boolean): Promise<CacheCleanSettings> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserSaveCacheCleanSettings) {
+    return await bindings.BrowserSaveCacheCleanSettings(enabled)
+  }
+  return { autoCleanEnabled: enabled, intervalDays: 30 }
+}
+
 // ============================================================================
 // Bookmark API
 // ============================================================================
@@ -700,13 +753,7 @@ export async function fetchBookmarks(): Promise<BrowserBookmark[]> {
   if (bindings?.BookmarkList) {
     return (await bindings.BookmarkList()) || []
   }
-  return [
-    { name: 'Google', url: 'https://www.google.com/' },
-    { name: 'Gmail', url: 'https://mail.google.com/' },
-    { name: 'Claude', url: 'https://claude.ai/' },
-    { name: 'ChatGPT', url: 'https://chatgpt.com/' },
-    { name: 'YouTube', url: 'https://www.youtube.com/' },
-  ]
+  return []
 }
 
 export async function saveBookmarks(items: BrowserBookmark[]): Promise<boolean> {

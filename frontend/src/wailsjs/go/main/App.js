@@ -42,6 +42,10 @@ export function BrowserClearCookies(arg1) {
   return window['go']['main']['App']['BrowserClearCookies'](arg1);
 }
 
+export function BrowserCleanCache(arg1) {
+  return window['go']['main']['App']['BrowserCleanCache'](arg1);
+}
+
 export function BrowserCoreDelete(arg1) {
   return window['go']['main']['App']['BrowserCoreDelete'](arg1);
 }
@@ -84,6 +88,14 @@ export function BrowserGetAllTags() {
 
 export function BrowserGetCookies(arg1) {
   return window['go']['main']['App']['BrowserGetCookies'](arg1);
+}
+
+export function BrowserGetCacheCleanSettings() {
+  return window['go']['main']['App']['BrowserGetCacheCleanSettings']();
+}
+
+export function BrowserSaveCacheCleanSettings(arg1) {
+  return window['go']['main']['App']['BrowserSaveCacheCleanSettings'](arg1);
 }
 
 export function BrowserInstanceGetTabs(arg1) {

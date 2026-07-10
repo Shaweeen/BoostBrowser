@@ -25,6 +25,12 @@ export interface AppSettings {
   // 运行时设置
   maxMemoryMB: number
   gcPercent: number
+
+  // 缓存清理
+  cacheAutoCleanEnabled: boolean
+  cacheAutoCleanIntervalDays: number
+  cacheLastCleanAt?: string
+  cacheNextCleanAt?: string
 }
 
 export const defaultSettings: AppSettings = {
@@ -42,4 +48,8 @@ export const defaultSettings: AppSettings = {
   logLevel: 'info',
   maxMemoryMB: 1024,
   gcPercent: 100,
+  cacheAutoCleanEnabled: false,
+  cacheAutoCleanIntervalDays: 30,
+  cacheLastCleanAt: '',
+  cacheNextCleanAt: '',
 }

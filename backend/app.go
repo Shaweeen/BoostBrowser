@@ -282,6 +282,9 @@ func (a *App) startup(ctx context.Context) {
 	// --user-data-dir/--remote-debugging-port 重新接管运行状态，避免实例误显示“已停止”。
 	// crashfix probe: 保留首轮同步，但临时停掉常驻 reconciler，验证它是否是后台 exit_code=2 的来源。
 	a.reconcileBrowserRuntimeStateOnce()
+	if !a.panelMode {
+		a.startCacheAutoCleanScheduler()
+	}
 	// a.startBrowserRuntimeReconciler()
 
 	// v1.6.12: 暂停启动后台代理测速定时器。

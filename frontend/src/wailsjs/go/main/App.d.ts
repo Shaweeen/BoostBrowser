@@ -28,6 +28,8 @@ export function BookmarkSave(arg1:Array<config.BrowserBookmark>):Promise<void>;
 
 export function BrowserClearCookies(arg1:string):Promise<void>;
 
+export function BrowserCleanCache(arg1:boolean):Promise<Record<string, any>>;
+
 export function BrowserCoreDelete(arg1:string):Promise<void>;
 
 export function BrowserCoreDownload(arg1:string,arg2:string,arg3:string):Promise<void>;
@@ -49,6 +51,10 @@ export function BrowserExportCookies(arg1:string):Promise<string>;
 export function BrowserGetAllTags():Promise<Array<string>>;
 
 export function BrowserGetCookies(arg1:string):Promise<Array<backend.CookieInfo>>;
+
+export function BrowserGetCacheCleanSettings():Promise<Record<string, any>>;
+
+export function BrowserSaveCacheCleanSettings(arg1:boolean):Promise<Record<string, any>>;
 
 export function BrowserInstanceGetTabs(arg1:string):Promise<Array<browser.Tab>>;
 
