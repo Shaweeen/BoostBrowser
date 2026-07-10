@@ -13,7 +13,7 @@
 #   [1] 读取本仓库（C:\Users\Administrator\Desktop\Ant-Browser-update）
 #   [2] 按 include/exclude 规则 stage 到 C:\Temp\BoostBrowser_pub\
 #   [3] 写入新 README + .gitignore
-#   [4] DryRun=$false 时：git init / 强制覆盖 sdohuajia/BoostBrowser main 分支
+#   [4] DryRun=$false 时：git init / 强制覆盖 Shaweeen/BoostBrowser main 分支
 #
 # 用法：
 #   # 1. 第一次只看会传哪些文件，不 push：
@@ -32,7 +32,7 @@ param(
     [bool]$IncludeCloakCore = $false,
     [bool]$IncludeStealth   = $false,
     [bool]$IncludeTests     = $true,
-    [string]$RemoteUrl      = 'https://github.com/sdohuajia/BoostBrowser.git',
+    [string]$RemoteUrl      = 'https://github.com/Shaweeen/BoostBrowser.git',
     [string]$Branch         = 'main',
     [string]$CommitMessage  = 'Replace Python prototype with Wails/Go production source'
 )
@@ -296,7 +296,7 @@ A Wails/Go-based fingerprint browser with Chromium 146 kernel and built-in proxy
 
 ## Download
 
-Get the latest installer from [Releases](https://github.com/sdohuajia/BoostBrowser/releases/latest).
+Get the latest installer from [Releases](https://github.com/Shaweeen/BoostBrowser/releases/latest).
 
 ## Build from source
 

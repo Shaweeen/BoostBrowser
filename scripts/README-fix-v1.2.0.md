@@ -17,7 +17,7 @@ v1.3.0 已修复（`backend/app_updater.go` 加了 `cmd.Process.Release()` + 同
 脚本会：
 
 1. 结束所有残留 `boost-browser.exe` / `updater.exe` 进程
-2. 从 GitHub `sdohuajia/BoostBrowser` v1.3.0 release 下载 `boost-browser.exe` + `updater.exe`
+2. 从 GitHub `Shaweeen/BoostBrowser` v1.3.0 release 下载 `boost-browser.exe` + `updater.exe`
 3. 比对 sha256（GitHub 提供的 `.sha256` asset）
 4. 把当前 v1.2.0 的两个 .exe 重命名为 `*.v1.2.0.bak`
 5. 安装新版
@@ -40,7 +40,7 @@ v1.3.0 已修复（`backend/app_updater.go` 加了 `cmd.Process.Release()` + 同
 gh release upload v1.3.0 \
   scripts/fix-update-from-v1.2.0.ps1 \
   scripts/fix-update-from-v1.2.0.bat \
-  --repo sdohuajia/BoostBrowser
+  --repo Shaweeen/BoostBrowser
 ```
 
 公告里贴一句：

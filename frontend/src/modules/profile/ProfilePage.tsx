@@ -6,7 +6,6 @@ import {
   MessageSquare,
   Calendar,
   MapPin,
-  Coffee,
   Terminal,
   ExternalLink,
 } from 'lucide-react'
@@ -112,21 +111,10 @@ export function ProfilePage() {
             </div>
           </div>
 
-          <div className="flex flex-wrap gap-3 lg:justify-end">
-            {authorInfo.github ? (
-              <Button
-                variant="ghost"
-                className="h-11 rounded-2xl border border-transparent px-4 text-[var(--color-text-primary)] hover:border-[var(--color-border-default)] hover:bg-[var(--color-bg-muted)]"
-                onClick={() => openExternal(authorInfo.github)}
-              >
-                <Github className="h-4 w-4" />
-                GitHub
-              </Button>
-            ) : null}
-          </div>
         </div>
       </Card>
 
+      {authorInfo.channels.length > 0 ? (
       <div className="grid gap-4 md:grid-cols-3">
         {authorInfo.channels.map((channel) => {
           const Icon = getIcon(channel.icon)
@@ -171,6 +159,7 @@ export function ProfilePage() {
           )
         })}
       </div>
+      ) : null}
 
       <Card
         title="技术栈"
@@ -187,7 +176,7 @@ export function ProfilePage() {
 
       <Card
         title="关于本项目"
-        actions={<Coffee className="h-4 w-4 text-[var(--color-text-muted)]" />}
+        actions={<Terminal className="h-4 w-4 text-[var(--color-text-muted)]" />}
         className="rounded-[24px]"
         padding="lg"
       >
@@ -204,8 +193,9 @@ export function ProfilePage() {
             ))}
           </div>
           <p>{projectInfo.description}</p>
-          <div className="flex flex-wrap items-center gap-3 pt-2">
-            {projectInfo.actions.map((action) => {
+          {projectInfo.actions.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-3 pt-2">
+              {projectInfo.actions.map((action) => {
               const Icon = getIcon(action.icon)
               return (
                 <Button
@@ -220,7 +210,8 @@ export function ProfilePage() {
                 </Button>
               )
             })}
-          </div>
+            </div>
+          ) : null}
         </div>
       </Card>
     </div>

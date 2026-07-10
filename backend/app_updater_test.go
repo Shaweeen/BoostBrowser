@@ -14,7 +14,7 @@ func TestFetchLatestReleaseFallsBackToGithubLatestRedirectWhenAPIRateLimited(t *
 		http.Error(w, "API rate limit exceeded", http.StatusForbidden)
 	})
 	mux.HandleFunc("/releases/latest", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/sdohuajia/BoostBrowser/releases/tag/v9.9.9", http.StatusFound)
+		http.Redirect(w, r, "/Shaweeen/BoostBrowser/releases/tag/v9.9.9", http.StatusFound)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

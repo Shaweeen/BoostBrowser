@@ -26,8 +26,6 @@ import { projectConfig, navigationConfig } from '../../config'
 import { OpenWindowSyncPanel } from '../../wailsjs/go/main/App'
 import { toast } from '../components'
 
-// 导入应用logo
-import logoImage from '../../resources/images/logo.png'
 
 const iconMap: Record<string, LucideIcon> = {
   LayoutDashboard,
@@ -76,18 +74,8 @@ export function Sidebar() {
       )}>
         {!sidebarCollapsed ? (
           <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-full overflow-hidden flex-shrink-0 bg-[var(--color-accent)] flex items-center justify-center">
-              <img 
-                src={logoImage} 
-                alt="应用Logo" 
-                className="w-full h-full object-cover"
-                onError={(e) => {
-                  // 图片加载失败时显示首字母
-                  e.currentTarget.style.display = 'none';
-                  e.currentTarget.parentElement?.classList.add('fallback-logo');
-                }}
-              />
-              <span className="text-xs font-bold text-[var(--color-text-inverse)] hidden fallback-content">
+            <div className="w-6 h-6 rounded-full flex-shrink-0 bg-[var(--color-accent)] flex items-center justify-center">
+              <span className="text-xs font-bold text-[var(--color-text-inverse)]">
                 {projectConfig.shortName.charAt(0)}
               </span>
             </div>
@@ -96,18 +84,8 @@ export function Sidebar() {
             </h2>
           </div>
         ) : (
-          <div className="w-8 h-8 rounded-full overflow-hidden bg-[var(--color-accent)] flex items-center justify-center">
-            <img 
-              src={logoImage} 
-              alt="应用Logo" 
-              className="w-full h-full object-cover"
-              onError={(e) => {
-                // 图片加载失败时显示首字母
-                e.currentTarget.style.display = 'none';
-                e.currentTarget.parentElement?.classList.add('fallback-logo');
-              }}
-            />
-            <span className="text-xs font-bold text-[var(--color-text-inverse)] hidden fallback-content">
+          <div className="w-8 h-8 rounded-full bg-[var(--color-accent)] flex items-center justify-center">
+            <span className="text-xs font-bold text-[var(--color-text-inverse)]">
               {projectConfig.shortName.charAt(0)}
             </span>
           </div>

@@ -41,8 +41,8 @@ import (
 // =============================================================================
 
 const (
-	// GitHub 仓库：https://github.com/sdohuajia/BoostBrowser
-	githubOwner = "sdohuajia"
+	// GitHub 仓库：https://github.com/Shaweeen/BoostBrowser
+	githubOwner = "Shaweeen"
 	githubRepo  = "BoostBrowser"
 
 	updateDirName  = "updates"

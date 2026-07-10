@@ -11,7 +11,7 @@
 param(
     [string] $InstallRoot = '',
     [string] $TargetVersion = 'v1.3.0',
-    [string] $GitHubOwner = 'sdohuajia',
+    [string] $GitHubOwner = 'Shaweeen',
     [string] $GitHubRepo  = 'BoostBrowser'
 )
 
