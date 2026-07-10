@@ -1,116 +1,46 @@
 # build_installer.ps1
-# 完整安装包构建脚本 —— 给新用户首次安装用的 Setup.exe
-#
-# 与 build_release.ps1（升级用 38MB 主程序）配合使用：
-#   - build_release.ps1   产出 boost-browser.exe / .sha256 / updater.exe（自动升级链路）
-#   - build_installer.ps1 产出 BoostBrowser-Setup-vX.X.X.exe（新用户首次安装，含完整 chromium 内核）
-#
-# 用法：
-#   1. 先跑 build_release.ps1 生成最新 boost-browser.exe + updater.exe
-#   2. 再跑 build_installer.ps1 打包安装包
-#   3. 最终 build\release\ 下会有 4 个文件，全部上传到 GitHub Release
+# Build full self-use NSIS installer for Boost Browser.
+# Produces build\release\BoostBrowser-Setup-vX.X.X.exe.
 
 $ErrorActionPreference = 'Stop'
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
-# 1. 读版本号
-$wailsJson = Get-Content "$RepoRoot\wails.json" -Raw | ConvertFrom-Json
-$Version = $wailsJson.info.productVersion
-if (-not $Version) { throw "wails.json 中未找到 info.productVersion" }
-Write-Host "==> 当前版本: v$Version" -ForegroundColor Cyan
-
-# 2. 路径定义
-$ReleaseDir   = "$RepoRoot\build\release"
-$BoostExe     = "$ReleaseDir\boost-browser.exe"
-$UpdaterExe   = "$ReleaseDir\updater.exe"
-$Stage        = "C:\Temp\BoostBrowser_installer_staging"
-$Publish      = "$RepoRoot\publish\output"
-$NsiPath      = "$RepoRoot\publish\boost-browser-installer.nsi"
-$NshPath      = "$RepoRoot\publish\boost_nsis_files.nsh"
-$OutExe       = "$ReleaseDir\BoostBrowser-Setup-v$Version.exe"
-$Icon         = "$RepoRoot\build\windows\icon.ico"
-$SidebarBmp   = "$RepoRoot\publish\boost_sidebar.bmp"
-$HeaderBmp    = "$RepoRoot\publish\boost_header.bmp"
-
-# 标准资产源：默认使用仓库根目录；如内核放在其它盘，用 BOOST_KERNEL_SRC 覆盖。
-# 目录布局：
-#   $AssetRoot\chrome\cloak-146.0.7680.177\chrome.exe   必需：CloakBrowser 指纹 Chromium
-#   $AssetRoot\chrome\google-148.0.7778.167\chrome.exe  可选：普通 Chrome 备用
-#   $AssetRoot\bin\                                      可选：xray / sing-box
-$AssetRoot      = if ($env:BOOST_KERNEL_SRC) { $env:BOOST_KERNEL_SRC } else { $RepoRoot }
-$CloakKernelSrc = "$AssetRoot\chrome\cloak-146.0.7680.177"
-$GoogleKernelSrc = "$AssetRoot\chrome\google-148.0.7778.167"
-$BinSrc         = "$AssetRoot\bin"
-$ConfigSrc      = "$RepoRoot\config.yaml"
-$AppIconSrc     = if (Test-Path "$AssetRoot\app.ico") { "$AssetRoot\app.ico" } else { "$RepoRoot\build\windows\icon.ico" }
-$AppPngSrc      = if (Test-Path "$AssetRoot\app.png") { "$AssetRoot\app.png" } else { "$RepoRoot\build\appicon.png" }
-
-# 3. 前置校验
-if (-not (Test-Path $BoostExe))        { throw "缺少 $BoostExe，请先运行 build_release.ps1" }
-if (-not (Test-Path $UpdaterExe))      { throw "缺少 $UpdaterExe，请先运行 build_release.ps1" }
-if (-not (Test-Path "$CloakKernelSrc\chrome.exe"))  { throw "缺少 CloakBrowser 指纹内核: $CloakKernelSrc\chrome.exe。请先运行 scripts\install_cloakbrowser_kernel.ps1" }
-if (-not (Test-Path $Icon))            { throw "缺少图标: $Icon" }
-Write-Host "==> 资产源: $AssetRoot" -ForegroundColor Cyan
-New-Item -ItemType Directory -Force -Path $Publish | Out-Null
-
-# 4. Stage 文件（拷到 C:\Temp，避免 NSIS 处理含点目录/长路径时不稳定）
-Write-Host "==> [1/6] Staging 到 $Stage ..." -ForegroundColor Yellow
-Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path $Stage | Out-Null
-
-# 主程序 + updater
-Copy-Item -LiteralPath $BoostExe   -Destination "$Stage\boost-browser.exe" -Force
-Copy-Item -LiteralPath $UpdaterExe -Destination "$Stage\updater.exe"       -Force
-
-# 配置 / 图标
-if (Test-Path $ConfigSrc)  { Copy-Item -LiteralPath $ConfigSrc  -Destination "$Stage\config.yaml" -Force }
-if (Test-Path $AppIconSrc) { Copy-Item -LiteralPath $AppIconSrc -Destination $Stage -Force }
-if (Test-Path $AppPngSrc)  { Copy-Item -LiteralPath $AppPngSrc  -Destination $Stage -Force }
-
-# bin（xray、sing-box）
-if (Test-Path $BinSrc) {
-    Copy-Item -LiteralPath $BinSrc -Destination $Stage -Recurse -Force
+function Require-Path([string]$Path, [string]$Message) {
+    if (-not (Test-Path -LiteralPath $Path)) { throw $Message }
 }
 
-# helper 扩展：优先使用资产源里的 extensions；缺失时使用仓库内嵌的安全清理版。
-$ExtensionSrc = "$AssetRoot\extensions\chromium-web-store"
-if (-not (Test-Path $ExtensionSrc)) { $ExtensionSrc = "$RepoRoot\backend\embedded_extensions\chromium-web-store" }
-if (Test-Path $ExtensionSrc) {
-    New-Item -ItemType Directory -Force -Path "$Stage\extensions" | Out-Null
-    Copy-Item -LiteralPath $ExtensionSrc -Destination "$Stage\extensions" -Recurse -Force
+function Copy-Dir([string]$Source, [string]$Destination) {
+    if (Test-Path -LiteralPath $Destination) {
+        Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
+    Copy-Item -LiteralPath $Source -Destination $Destination -Recurse -Force
 }
 
-# chrome 内核（CloakBrowser 默认 + Google Chrome 备用）
-$ChromeStage = "$Stage\chrome"
-New-Item -ItemType Directory -Force -Path $ChromeStage | Out-Null
-Copy-Item -LiteralPath $CloakKernelSrc -Destination $ChromeStage -Recurse -Force
-if (-not (Test-Path "$ChromeStage\cloak-146.0.7680.177\chrome.exe")) {
-    throw "CloakBrowser 内核复制失败：缺少 $ChromeStage\cloak-146.0.7680.177\chrome.exe"
-}
-if (Test-Path $GoogleKernelSrc) {
-    Copy-Item -LiteralPath $GoogleKernelSrc -Destination $ChromeStage -Recurse -Force
-} else {
-    Write-Host "   可选备用内核缺失，跳过: $GoogleKernelSrc" -ForegroundColor Yellow
+function Escape-Nsis([string]$Value) {
+    return $Value.Replace('$', '$$').Replace('`', '``')
 }
 
-# 留空 data 目录，安装后第一次启动时 app 自己创建数据库
-New-Item -ItemType Directory -Force -Path "$Stage\data" | Out-Null
+function Add-NsisDir([string]$Dir, [string]$RelPath, $Out) {
+    if ($RelPath -eq '') {
+        $Out.Add('SetOutPath "$INSTDIR"') | Out-Null
+    } else {
+        $Out.Add('SetOutPath "$INSTDIR\' + (Escape-Nsis $RelPath) + '"') | Out-Null
+    }
 
-# 清掉残留 lock / log / tmp
-Get-ChildItem $Stage -Recurse -File -Force | Where-Object {
-    $_.Name -in @('LOCK','LOG','LOG.old') -or $_.Name -like '*.tmp'
-} | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath $Dir -File -Force | Sort-Object Name | ForEach-Object {
+        $Out.Add('File "' + (Escape-Nsis $_.FullName) + '"') | Out-Null
+    }
+    Get-ChildItem -LiteralPath $Dir -Directory -Force | Sort-Object Name | ForEach-Object {
+        $childRel = if ($RelPath -eq '') { $_.Name } else { $RelPath + '\' + $_.Name }
+        Add-NsisDir $_.FullName $childRel $Out
+    }
+}
 
-$stageBytes = (Get-ChildItem $Stage -Recurse -File -Force | Measure-Object -Property Length -Sum).Sum
-$stageFiles = (Get-ChildItem $Stage -Recurse -File -Force | Measure-Object).Count
-Write-Host ("   Stage: {0:N0} files, {1:N1} MB" -f $stageFiles, ($stageBytes / 1MB)) -ForegroundColor Green
-
-# 5. 生成品牌 BMP（NSIS 欢迎页 + 头图）
-Write-Host "==> [2/6] 生成 NSIS 品牌图..." -ForegroundColor Yellow
-Add-Type -AssemblyName System.Drawing
-function New-GradientBitmap([string]$Path, [int]$Width, [int]$Height, [bool]$Header) {
+function New-BrandBitmap([string]$Path, [int]$Width, [int]$Height, [bool]$Header, [string]$Version) {
+    Add-Type -AssemblyName System.Drawing
     $bmp = New-Object System.Drawing.Bitmap $Width, $Height
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
@@ -145,31 +75,85 @@ function New-GradientBitmap([string]$Path, [int]$Width, [int]$Height, [bool]$Hea
     $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Bmp)
     $bmp.Dispose()
 }
-New-GradientBitmap $SidebarBmp 164 314 $false
-New-GradientBitmap $HeaderBmp  150  57 $true
 
-# 6. 生成显式 File 指令（解决 NSIS File /r 在含点号目录上的静默失败）
-Write-Host "==> [3/6] 生成 NSIS 文件清单..." -ForegroundColor Yellow
-$out = New-Object System.Collections.Generic.List[string]
-function Escape-Nsis([string]$s) { return $s.Replace('$', '$$').Replace('`', '``') }
-function Process-Dir([string]$dir, [string]$relPath) {
-    if ($relPath -eq '') { $out.Add('SetOutPath "$INSTDIR"') }
-    else { $out.Add('SetOutPath "$INSTDIR\' + (Escape-Nsis $relPath) + '"') }
+$wailsJson = Get-Content "$RepoRoot\wails.json" -Raw | ConvertFrom-Json
+$Version = $wailsJson.info.productVersion
+if (-not $Version) { throw 'Missing info.productVersion in wails.json' }
+Write-Host "==> Version: v$Version" -ForegroundColor Cyan
 
-    Get-ChildItem -LiteralPath $dir -File -Force | Sort-Object Name | ForEach-Object {
-        $out.Add('File "' + (Escape-Nsis $_.FullName) + '"')
-    }
-    Get-ChildItem -LiteralPath $dir -Directory -Force | Sort-Object Name | ForEach-Object {
-        $childRel = if ($relPath -eq '') { $_.Name } else { $relPath + '\' + $_.Name }
-        Process-Dir $_.FullName $childRel
-    }
+$ReleaseDir = "$RepoRoot\build\release"
+$BoostExe = "$ReleaseDir\boost-browser.exe"
+$UpdaterExe = "$ReleaseDir\updater.exe"
+$Stage = 'C:\Temp\BoostBrowser_installer_staging'
+$Publish = "$RepoRoot\publish\output"
+$NsiPath = "$RepoRoot\publish\boost-browser-installer.nsi"
+$NshPath = "$RepoRoot\publish\boost_nsis_files.nsh"
+$OutExe = "$ReleaseDir\BoostBrowser-Setup-v$Version.exe"
+$Icon = "$RepoRoot\build\windows\icon.ico"
+$SidebarBmp = "$RepoRoot\publish\boost_sidebar.bmp"
+$HeaderBmp = "$RepoRoot\publish\boost_header.bmp"
+
+$AssetRoot = if ($env:BOOST_KERNEL_SRC) { $env:BOOST_KERNEL_SRC } else { $RepoRoot }
+$CloakKernelSrc = "$AssetRoot\chrome\cloak-146.0.7680.177"
+$GoogleKernelSrc = "$AssetRoot\chrome\google-148.0.7778.167"
+$BinSrc = "$AssetRoot\bin"
+$ExtensionSrc = "$AssetRoot\extensions\chromium-web-store"
+if (-not (Test-Path -LiteralPath $ExtensionSrc)) { $ExtensionSrc = "$RepoRoot\backend\embedded_extensions\chromium-web-store" }
+$ConfigSrc = "$RepoRoot\config.yaml"
+$AppIconSrc = if (Test-Path -LiteralPath "$AssetRoot\app.ico") { "$AssetRoot\app.ico" } else { "$RepoRoot\build\windows\icon.ico" }
+$AppPngSrc = if (Test-Path -LiteralPath "$AssetRoot\app.png") { "$AssetRoot\app.png" } else { "$RepoRoot\build\appicon.png" }
+
+Require-Path $BoostExe "Missing $BoostExe. Run scripts\build_release.ps1 first."
+Require-Path $UpdaterExe "Missing $UpdaterExe. Run scripts\build_release.ps1 first."
+Require-Path "$CloakKernelSrc\chrome.exe" "Missing CloakBrowser kernel: $CloakKernelSrc\chrome.exe"
+Require-Path $Icon "Missing icon: $Icon"
+New-Item -ItemType Directory -Force -Path $Publish | Out-Null
+New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
+
+Write-Host "==> Asset root: $AssetRoot" -ForegroundColor Cyan
+Write-Host "==> [1/6] Staging files to $Stage" -ForegroundColor Yellow
+Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $Stage | Out-Null
+
+Copy-Item -LiteralPath $BoostExe -Destination "$Stage\boost-browser.exe" -Force
+Copy-Item -LiteralPath $UpdaterExe -Destination "$Stage\updater.exe" -Force
+if (Test-Path -LiteralPath $ConfigSrc) { Copy-Item -LiteralPath $ConfigSrc -Destination "$Stage\config.yaml" -Force }
+if (Test-Path -LiteralPath $AppIconSrc) { Copy-Item -LiteralPath $AppIconSrc -Destination $Stage -Force }
+if (Test-Path -LiteralPath $AppPngSrc) { Copy-Item -LiteralPath $AppPngSrc -Destination $Stage -Force }
+if (Test-Path -LiteralPath $BinSrc) { Copy-Dir $BinSrc "$Stage\bin" }
+if (Test-Path -LiteralPath $ExtensionSrc) {
+    New-Item -ItemType Directory -Force -Path "$Stage\extensions" | Out-Null
+    Copy-Dir $ExtensionSrc "$Stage\extensions\chromium-web-store"
 }
-Process-Dir $Stage ''
-Set-Content -Path $NshPath -Value $out -Encoding Unicode
-Write-Host ("   写入 {0} 条 NSIS 指令" -f $out.Count) -ForegroundColor Green
 
-# 7. 生成 .nsi 脚本（UTF-16 LE 让 NSIS 正确解析中文）
-Write-Host "==> [4/6] 生成 NSIS 脚本..." -ForegroundColor Yellow
+New-Item -ItemType Directory -Force -Path "$Stage\chrome" | Out-Null
+Copy-Dir $CloakKernelSrc "$Stage\chrome\cloak-146.0.7680.177"
+if (Test-Path -LiteralPath $GoogleKernelSrc) {
+    Copy-Dir $GoogleKernelSrc "$Stage\chrome\google-148.0.7778.167"
+} else {
+    Write-Host "Optional Google fallback missing; skipped: $GoogleKernelSrc" -ForegroundColor Yellow
+}
+New-Item -ItemType Directory -Force -Path "$Stage\data" | Out-Null
+
+Get-ChildItem $Stage -Recurse -File -Force | Where-Object {
+    $_.Name -in @('LOCK','LOG','LOG.old') -or $_.Name -like '*.tmp'
+} | Remove-Item -Force -ErrorAction SilentlyContinue
+
+$stageBytes = (Get-ChildItem $Stage -Recurse -File -Force | Measure-Object -Property Length -Sum).Sum
+$stageFiles = (Get-ChildItem $Stage -Recurse -File -Force | Measure-Object).Count
+Write-Host ("   Stage: {0:N0} files, {1:N1} MB" -f $stageFiles, ($stageBytes / 1MB)) -ForegroundColor Green
+
+Write-Host '==> [2/6] Generating NSIS bitmaps' -ForegroundColor Yellow
+New-BrandBitmap $SidebarBmp 164 314 $false $Version
+New-BrandBitmap $HeaderBmp 150 57 $true $Version
+
+Write-Host '==> [3/6] Generating NSIS file manifest' -ForegroundColor Yellow
+$out = New-Object System.Collections.Generic.List[string]
+Add-NsisDir $Stage '' $out
+Set-Content -Path $NshPath -Value $out -Encoding Unicode
+Write-Host ("   Wrote {0:N0} NSIS lines" -f $out.Count) -ForegroundColor Green
+
+Write-Host '==> [4/6] Generating NSIS script' -ForegroundColor Yellow
 $nsi = @"
 Unicode True
 !define PRODUCT_NAME "Boost Browser"
@@ -198,63 +182,25 @@ UninstallIcon "`${APP_ICON}"
 !define MUI_HEADERIMAGE_BITMAP "`${HEADER_BMP}"
 !define MUI_HEADERIMAGE_UNBITMAP "`${HEADER_BMP}"
 !define MUI_ABORTWARNING
+!define MUI_FINISHPAGE_RUN "`$INSTDIR\`${PRODUCT_EXE}"
+!define MUI_FINISHPAGE_RUN_TEXT "Start Boost Browser"
 
-!define MUI_WELCOMEPAGE_TITLE "欢迎安装 Boost Browser v$Version"
-!define MUI_WELCOMEPAGE_TEXT "Boost Browser 是一款指纹浏览器，自带 Chromium 146 内核（默认）和 Google Chrome 148 备用内核，附带 xray / sing-box 代理工具。`$\r`$\n`$\r`$\n安装完成后即可使用，所有用户数据保存在安装目录。`$\r`$\n`$\r`$\n本版本支持自动升级，未来新版本会在启动时自动提示。"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_FINISHPAGE_RUN "`$INSTDIR\`${PRODUCT_EXE}"
-!define MUI_FINISHPAGE_RUN_TEXT "立即启动 Boost Browser"
-!define MUI_FINISHPAGE_TITLE "安装完成"
-!define MUI_FINISHPAGE_TEXT "默认内核 Chromium 146 已就绪。`$\r`$\n如需切换内核，可在应用内的内核管理界面操作。"
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
 Function CloseBoostProcesses
-retry_close:
   IfFileExists "`$INSTDIR" 0 done
-
   ExecWait '"`$SYSDIR\taskkill.exe" /F /T /IM chrome.exe'
   ExecWait '"`$SYSDIR\taskkill.exe" /F /T /IM xray.exe'
   ExecWait '"`$SYSDIR\taskkill.exe" /F /T /IM sing-box.exe'
   ExecWait '"`$SYSDIR\taskkill.exe" /F /T /IM updater.exe'
   ExecWait '"`$SYSDIR\taskkill.exe" /F /T /IM `${PRODUCT_EXE}'
-  Sleep 600
-
-  ; PowerShell 强制解锁 + 等待文件可独占打开（避免 chrome.dll 锁住）
-  FileOpen `$9 "`$TEMP\boost_unlock.ps1" w
-  FileWrite `$9 "param([string]`$`$InstallDir)`$\r`$\n"
-  FileWrite `$9 "`$`$ErrorActionPreference = 'SilentlyContinue'`$\r`$\n"
-  FileWrite `$9 "`$`$root = [IO.Path]::GetFullPath(`$`$InstallDir).TrimEnd('\\')`$\r`$\n"
-  FileWrite `$9 "`$`$rootSlash = `$`$root + '\\'`$\r`$\n"
-  FileWrite `$9 "`$`$critical = @([IO.Path]::Combine(`$`$root, 'boost-browser.exe'))`$\r`$\n"
-  FileWrite `$9 "Get-ChildItem -LiteralPath ([IO.Path]::Combine(`$`$root, 'chrome')) -Directory -ErrorAction SilentlyContinue | ForEach-Object { `$`$critical += [IO.Path]::Combine(`$`$_.FullName, 'chrome.exe'); `$`$critical += [IO.Path]::Combine(`$`$_.FullName, 'chrome.dll') }`$\r`$\n"
-  FileWrite `$9 "for (`$`$round = 0; `$`$round -lt 5; `$`$round++) {`$\r`$\n"
-  FileWrite `$9 "  `$`$procs = Get-CimInstance Win32_Process | Where-Object { `$`$_.ExecutablePath -and ([IO.Path]::GetFullPath(`$`$_.ExecutablePath).StartsWith(`$`$rootSlash, [StringComparison]::OrdinalIgnoreCase)) }`$\r`$\n"
-  FileWrite `$9 "  if (`$`$procs.Count -eq 0) { break }`$\r`$\n"
-  FileWrite `$9 "  foreach (`$`$p in `$`$procs) { try { & `$`$env:WINDIR\System32\taskkill.exe /F /T /PID `$`$p.ProcessId 2>&1 | Out-Null } catch {} }`$\r`$\n"
-  FileWrite `$9 "  Start-Sleep -Milliseconds 800`$\r`$\n"
-  FileWrite `$9 "}`$\r`$\n"
-  FileWrite `$9 "for (`$`$i = 0; `$`$i -lt 60; `$`$i++) { `$`$locked = `$`$false; foreach (`$`$t in `$`$critical) { if (Test-Path -LiteralPath `$`$t) { try { `$`$fs = [IO.File]::Open(`$`$t, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); `$`$fs.Close() } catch { `$`$locked = `$`$true; break } } }; if (-not `$`$locked) { exit 0 }; Start-Sleep -Milliseconds 500 }`$\r`$\n"
-  FileWrite `$9 "exit 11`$\r`$\n"
-  FileClose `$9
-
-  nsExec::ExecToStack '"`$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "`$TEMP\boost_unlock.ps1" "`$INSTDIR"'
-  Pop `$0
-  Pop `$1
-  Delete "`$TEMP\boost_unlock.ps1"
-
-  `${If} `$0 != 0
-    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Boost Browser 或内置 Chromium 仍在运行。请关闭所有浏览器窗口、扩展弹窗后重试。" IDRETRY retry_close IDCANCEL abort_install
-  `${EndIf}
-  Sleep 300
-  Goto done
-
-abort_install:
-  Abort
+  Sleep 800
 done:
 FunctionEnd
 
@@ -265,18 +211,16 @@ Section "Boost Browser" SecMain
   !include "$NshPath"
   SetOutPath "`$INSTDIR"
   WriteUninstaller "`$INSTDIR\Uninstall.exe"
-
   CreateDirectory "`$SMPROGRAMS\`${PRODUCT_NAME}"
   CreateShortcut "`$SMPROGRAMS\`${PRODUCT_NAME}\`${PRODUCT_NAME}.lnk" "`$INSTDIR\`${PRODUCT_EXE}" "" "`$INSTDIR\`${PRODUCT_EXE}" 0
   CreateShortcut "`$SMPROGRAMS\`${PRODUCT_NAME}\Uninstall `${PRODUCT_NAME}.lnk" "`$INSTDIR\Uninstall.exe"
   CreateShortcut "`$DESKTOP\`${PRODUCT_NAME}.lnk" "`$INSTDIR\`${PRODUCT_EXE}" "" "`$INSTDIR\`${PRODUCT_EXE}" 0
-
-  WriteRegStr   HKCU "`${UNINSTALL_KEY}" "DisplayName"     "`${PRODUCT_NAME}"
-  WriteRegStr   HKCU "`${UNINSTALL_KEY}" "DisplayVersion"  "`${PRODUCT_VERSION}"
-  WriteRegStr   HKCU "`${UNINSTALL_KEY}" "Publisher"       "Boost Browser"
-  WriteRegStr   HKCU "`${UNINSTALL_KEY}" "InstallLocation" "`$INSTDIR"
-  WriteRegStr   HKCU "`${UNINSTALL_KEY}" "UninstallString" "`$INSTDIR\Uninstall.exe"
-  WriteRegStr   HKCU "`${UNINSTALL_KEY}" "DisplayIcon"     "`$INSTDIR\`${PRODUCT_EXE}"
+  WriteRegStr HKCU "`${UNINSTALL_KEY}" "DisplayName" "`${PRODUCT_NAME}"
+  WriteRegStr HKCU "`${UNINSTALL_KEY}" "DisplayVersion" "`${PRODUCT_VERSION}"
+  WriteRegStr HKCU "`${UNINSTALL_KEY}" "Publisher" "Boost Browser"
+  WriteRegStr HKCU "`${UNINSTALL_KEY}" "InstallLocation" "`$INSTDIR"
+  WriteRegStr HKCU "`${UNINSTALL_KEY}" "UninstallString" "`$INSTDIR\Uninstall.exe"
+  WriteRegStr HKCU "`${UNINSTALL_KEY}" "DisplayIcon" "`$INSTDIR\`${PRODUCT_EXE}"
   WriteRegDWORD HKCU "`${UNINSTALL_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "`${UNINSTALL_KEY}" "NoRepair" 1
 SectionEnd
@@ -291,45 +235,43 @@ Section "Uninstall"
   Delete "`$DESKTOP\`${PRODUCT_NAME}.lnk"
   Delete "`$SMPROGRAMS\`${PRODUCT_NAME}\`${PRODUCT_NAME}.lnk"
   Delete "`$SMPROGRAMS\`${PRODUCT_NAME}\Uninstall `${PRODUCT_NAME}.lnk"
-  RMDir  "`$SMPROGRAMS\`${PRODUCT_NAME}"
+  RMDir "`$SMPROGRAMS\`${PRODUCT_NAME}"
   RMDir /r "`$INSTDIR"
   DeleteRegKey HKCU "`${UNINSTALL_KEY}"
 SectionEnd
 "@
 Set-Content -Path $NsiPath -Value $nsi -Encoding Unicode
 
-# 8. makensis 编译
-Write-Host "==> [5/6] 调用 makensis 编译..." -ForegroundColor Yellow
+Write-Host '==> [5/6] Running makensis' -ForegroundColor Yellow
 $makensisCandidates = @(
     'C:\Program Files (x86)\NSIS\makensis.exe',
     'C:\Program Files\NSIS\makensis.exe'
 )
-$makensis = $makensisCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $makensis) { throw 'makensis.exe 未找到，请先安装 NSIS（https://nsis.sourceforge.io/）' }
+$makensis = $makensisCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $makensis) {
+    $cmd = Get-Command makensis -ErrorAction SilentlyContinue
+    if ($cmd) { $makensis = $cmd.Source }
+}
+if (-not $makensis) { throw 'makensis.exe not found. Install NSIS from https://nsis.sourceforge.io/Download' }
 
 Remove-Item -Force $OutExe -ErrorAction SilentlyContinue
 & $makensis $NsiPath
-if ($LASTEXITCODE -ne 0) { throw "makensis 失败: exit $LASTEXITCODE" }
+if ($LASTEXITCODE -ne 0) { throw "makensis failed: exit $LASTEXITCODE" }
+Require-Path $OutExe "Installer was not generated: $OutExe"
 Unblock-File $OutExe -ErrorAction SilentlyContinue
 
-# 9. 输出汇总
-Write-Host "==> [6/6] 完成 ✓" -ForegroundColor Green
+Write-Host '==> [6/6] Done' -ForegroundColor Green
 $hash = (Get-FileHash $OutExe -Algorithm SHA256).Hash.ToLower()
 $size = (Get-Item $OutExe).Length
-
-Write-Host ""
-Write-Host "================================================================" -ForegroundColor Cyan
-Write-Host "  完整安装包打包完成" -ForegroundColor Cyan
-Write-Host "================================================================" -ForegroundColor Cyan
-Write-Host ("  文件: $OutExe")
-Write-Host ("  大小: {0:N1} MB" -f ($size / 1MB))
-Write-Host ("  SHA256: $hash")
-Write-Host ""
-Write-Host "build\release\ 完整列表（4 个文件，全部传 GitHub Release）：" -ForegroundColor Yellow
+Write-Host ''
+Write-Host '================================================================' -ForegroundColor Cyan
+Write-Host '  Full installer build completed' -ForegroundColor Cyan
+Write-Host '================================================================' -ForegroundColor Cyan
+Write-Host "  File: $OutExe"
+Write-Host ("  Size: {0:N1} MB" -f ($size / 1MB))
+Write-Host "  SHA256: $hash"
+Write-Host ''
+Write-Host 'build\release contents:' -ForegroundColor Yellow
 Get-ChildItem $ReleaseDir | Sort-Object Name | ForEach-Object {
-    Write-Host ("  - {0,-40} {1,12:N0} bytes" -f $_.Name, $_.Length) -ForegroundColor White
+    Write-Host ("  - {0,-45} {1,12:N0} bytes" -f $_.Name, $_.Length) -ForegroundColor White
 }
-Write-Host ""
-Write-Host "用户使用方式：" -ForegroundColor Yellow
-Write-Host "  - 自用完整安装：下载 BoostBrowser-Setup-v$Version.exe 双击安装"
-Write-Host "  - 老版本升级：上传 boost-browser.exe / boost-browser.exe.sha256 / updater.exe 到 Release"

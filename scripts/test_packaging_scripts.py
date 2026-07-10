@@ -24,7 +24,11 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertRegex(text, r"chrome\\cloak-146\.0\.7680\.177")
 
     def test_installer_uses_repo_local_standard_asset_layout(self):
-        text = self.read("scripts/build_installer.ps1")
+        raw = (ROOT / "scripts/build_installer.ps1").read_bytes()
+        # Windows PowerShell 5.1 can misread UTF-8 without BOM. Keep this
+        # script ASCII-only so localized text cannot corrupt quotes/braces.
+        self.assertTrue(all(byte < 128 for byte in raw), "build_installer.ps1 must remain ASCII-only")
+        text = raw.decode("ascii")
         self.assertRegex(text, r"\$AssetRoot\s*=\s*if \(\$env:BOOST_KERNEL_SRC\)")
         self.assertRegex(text, r"chrome\\cloak-146\.0\.7680\.177")
         self.assertRegex(text, r"chrome\\google-148\.0\.7778\.167")
