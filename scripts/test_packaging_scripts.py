@@ -37,6 +37,18 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("optional", text.lower())
         self.assertIn("backend\\embedded_extensions\\chromium-web-store", text)
         self.assertIn("if (-not (Test-Path $src))", text)
+
+    def test_one_click_windows_build_orchestrates_standard_flow(self):
+        text = self.read("scripts/build_windows_selfuse.ps1")
+        self.assertIn("install_cloakbrowser_kernel.ps1", text)
+        self.assertIn("npm ci", text)
+        self.assertIn("npm run build", text)
+        self.assertIn("go mod download", text)
+        self.assertIn("build_release.ps1", text)
+        self.assertIn("build_installer.ps1", text)
+        self.assertIn("BOOST_KERNEL_SRC", text)
+        self.assertIn("google-148.0.7778.167", text)
+
     def test_no_active_script_keeps_old_machine_specific_paths(self):
         for path in (ROOT / "scripts").rglob("*"):
             if not path.is_file() or path.name == "test_packaging_scripts.py":

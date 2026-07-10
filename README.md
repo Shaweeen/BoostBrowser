@@ -18,6 +18,12 @@ For the Windows self-use package with CloakBrowser Chromium, see `WINDOWS_BUILD.
 Quick Windows flow:
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_windows_selfuse.ps1
+```
+
+Manual Windows flow:
+
+```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install_cloakbrowser_kernel.ps1
 cd frontend
 npm ci

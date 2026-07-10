@@ -25,6 +25,19 @@ BoostBrowser
 
 不要把 CloakBrowser 源码复制进 BoostBrowser。BoostBrowser 只需要它 Release 里的 Windows Chromium zip。
 
+## 最简单：一键自用完整打包
+
+```powershell
+cd D:\BoostBrowser-main
+powershell -ExecutionPolicy Bypass -File scripts\build_windows_selfuse.ps1
+```
+
+如果已经手动下载了 CloakBrowser zip：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_windows_selfuse.ps1 -SourceZip C:\Users\admin\Downloads\cloakbrowser-windows-x64.zip
+```
+
 ## 一键准备 CloakBrowser 内核
 
 在 Windows PowerShell 里执行：
