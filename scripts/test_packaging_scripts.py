@@ -36,6 +36,21 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertNotRegex(text, r"replace\s+github\.com/energye/systray\s+=>\s+\./third_party/systray")
         self.assertNotIn("./third_party/systray", text)
 
+    def test_backend_cloak_helpers_restore_windows_build_symbols(self):
+        text = self.read("backend/cloak_integration_helpers.go")
+        for symbol in [
+            "func resolveCloakGeoArgs",
+            "func isCloakCore",
+            "func buildEffectiveFingerprintArgs",
+            "func seedDefaultSearchEngine",
+            "func launchArgKey",
+            "func seedDefaultSearchEngineViaCDPWithRetry",
+            "func injectStealthToAllPagesWithUA",
+            "func (a *App) StartInstance",
+            "func (a *App) StartInstanceWithParams",
+        ]:
+            self.assertIn(symbol, text)
+
     def test_stage_assets_allows_optional_google_and_extensions(self):
         text = self.read("scripts/stage_assets.ps1")
         self.assertIn("required", text.lower())
