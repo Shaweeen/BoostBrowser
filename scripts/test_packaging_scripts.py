@@ -74,6 +74,7 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("npm ci", text)
         self.assertIn("npm run build", text)
         self.assertIn("go mod download", text)
+        self.assertIn("go test -c", text)
         self.assertIn("build_release.ps1", text)
         self.assertIn("build_installer.ps1", text)
         self.assertIn("BOOST_KERNEL_SRC", text)

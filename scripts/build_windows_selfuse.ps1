@@ -112,9 +112,26 @@ Run-Step "Building frontend" {
     }
 }
 
-Run-Step "Preparing Go dependencies" {
+Run-Step "Preparing Go dependencies and preflight compile" {
     go mod download
     if ($LASTEXITCODE -ne 0) { throw "go mod download failed" }
+
+    # Fast preflight: catch missing Go symbols before the slower Wails build.
+    # This compiles the same Windows/amd64 targets but does not run tests.
+    $preflightDir = Join-Path $env:TEMP "boost-browser-preflight"
+    New-Item -ItemType Directory -Force -Path $preflightDir | Out-Null
+    $targets = @(
+        @{ Package = "."; Output = "boost-main.test.exe" },
+        @{ Package = "./backend"; Output = "boost-backend.test.exe" },
+        @{ Package = "./backend/cmd/updater"; Output = "boost-updater.test.exe" }
+    )
+    foreach ($target in $targets) {
+        $out = Join-Path $preflightDir $target.Output
+        Write-Host "Preflight compiling $($target.Package) ..." -ForegroundColor Yellow
+        & go test -c $target.Package -o $out
+        if ($LASTEXITCODE -ne 0) { throw "Go preflight compile failed for $($target.Package)" }
+    }
+
     if ($RunGoTests) {
         go test ./...
         if ($LASTEXITCODE -ne 0) { throw "go test ./... failed" }
