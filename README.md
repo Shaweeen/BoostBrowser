@@ -13,8 +13,18 @@ A Wails/Go-based fingerprint browser with Chromium kernel and built-in proxy too
 
 Prerequisites: Go 1.22+, Node 20+, Wails CLI v2.
 
-```bash
-wails build
+For the Windows self-use package with CloakBrowser Chromium, see `WINDOWS_BUILD.md`.
+
+Quick Windows flow:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_cloakbrowser_kernel.ps1
+cd frontend
+npm ci
+npm run build
+cd ..
+powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1
+powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1
 ```
 
 ## Project layout

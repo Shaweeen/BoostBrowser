@@ -23,12 +23,8 @@ $ReleaseDir = "$RepoRoot\build\release"
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 Get-ChildItem $ReleaseDir | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
 
-# 3. Stage chromium 内核 + 代理二进制 + 资源文件，并生成 bb_files.nsh
-Write-Host "==> Stage assets (scripts\stage_assets.ps1) ..." -ForegroundColor Yellow
-& powershell -ExecutionPolicy Bypass -File "$RepoRoot\scripts\stage_assets.ps1"
-if ($LASTEXITCODE -ne 0) { throw "stage_assets.ps1 failed" }
-
-# 4. 编译主程序（仅产出 boost-browser.exe，不打安装包）
+# 3. 编译主程序（仅产出 boost-browser.exe，不打安装包）
+# 完整 Chromium 内核只在 build_installer.ps1 阶段打进 Setup.exe；升级包保持轻量。
 Write-Host "==> 编译 boost-browser.exe (wails build) ..." -ForegroundColor Yellow
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"

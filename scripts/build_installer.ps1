@@ -1,4 +1,4 @@
-﻿# build_installer.ps1
+# build_installer.ps1
 # 完整安装包构建脚本 —— 给新用户首次安装用的 Setup.exe
 #
 # 与 build_release.ps1（升级用 38MB 主程序）配合使用：
@@ -34,22 +34,28 @@ $Icon         = "$RepoRoot\build\windows\icon.ico"
 $SidebarBmp   = "$RepoRoot\publish\boost_sidebar.bmp"
 $HeaderBmp    = "$RepoRoot\publish\boost_header.bmp"
 
-# Chrome 内核源（复用 cloak_test 已部署的，不重新下载）
-$CloakKernelSrc  = 'Z:\BoostBrowser_v110_test\chrome\cloak-146.0.7680.177'
-$GoogleKernelSrc = 'Z:\BoostBrowser_v110_test\chrome\google-148.0.7778.167'
-$BinSrc          = 'Z:\BoostBrowser_v110_test\bin'             # xray / sing-box
-$ConfigSrc       = "$RepoRoot\config.yaml"                     # 用仓库内干净的 config（不含 extensions、默认 cloak-146）
-$AppIconSrc      = 'Z:\BoostBrowser_v110_test\app.ico'
-$AppPngSrc       = 'Z:\BoostBrowser_v110_test\app.png'
+# 标准资产源：默认使用仓库根目录；如内核放在其它盘，用 BOOST_KERNEL_SRC 覆盖。
+# 目录布局：
+#   $AssetRoot\chrome\cloak-146.0.7680.177\chrome.exe   必需：CloakBrowser 指纹 Chromium
+#   $AssetRoot\chrome\google-148.0.7778.167\chrome.exe  可选：普通 Chrome 备用
+#   $AssetRoot\bin\                                      可选：xray / sing-box
+$AssetRoot      = if ($env:BOOST_KERNEL_SRC) { $env:BOOST_KERNEL_SRC } else { $RepoRoot }
+$CloakKernelSrc = "$AssetRoot\chrome\cloak-146.0.7680.177"
+$GoogleKernelSrc = "$AssetRoot\chrome\google-148.0.7778.167"
+$BinSrc         = "$AssetRoot\bin"
+$ConfigSrc      = "$RepoRoot\config.yaml"
+$AppIconSrc     = if (Test-Path "$AssetRoot\app.ico") { "$AssetRoot\app.ico" } else { "$RepoRoot\build\windows\icon.ico" }
+$AppPngSrc      = if (Test-Path "$AssetRoot\app.png") { "$AssetRoot\app.png" } else { "$RepoRoot\build\appicon.png" }
 
 # 3. 前置校验
 if (-not (Test-Path $BoostExe))        { throw "缺少 $BoostExe，请先运行 build_release.ps1" }
 if (-not (Test-Path $UpdaterExe))      { throw "缺少 $UpdaterExe，请先运行 build_release.ps1" }
-if (-not (Test-Path $CloakKernelSrc))  { throw "缺少 cloak 内核: $CloakKernelSrc" }
+if (-not (Test-Path "$CloakKernelSrc\chrome.exe"))  { throw "缺少 CloakBrowser 指纹内核: $CloakKernelSrc\chrome.exe。请先运行 scripts\install_cloakbrowser_kernel.ps1" }
 if (-not (Test-Path $Icon))            { throw "缺少图标: $Icon" }
+Write-Host "==> 资产源: $AssetRoot" -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $Publish | Out-Null
 
-# 4. Stage 文件（拷到 C:\Temp 比直接从 Z: 网络盘做 NSIS 稳）
+# 4. Stage 文件（拷到 C:\Temp，避免 NSIS 处理含点目录/长路径时不稳定）
 Write-Host "==> [1/6] Staging 到 $Stage ..." -ForegroundColor Yellow
 Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
@@ -68,15 +74,25 @@ if (Test-Path $BinSrc) {
     Copy-Item -LiteralPath $BinSrc -Destination $Stage -Recurse -Force
 }
 
-# 注意：故意不拷 extensions/，初始安装版无内置扩展，由用户自行加载
-# （Z 盘的 extensions 是开发机调试用的，路径硬编码在那份 config.yaml 里，给新用户会报错）
+# helper 扩展：优先使用资产源里的 extensions；缺失时使用仓库内嵌的安全清理版。
+$ExtensionSrc = "$AssetRoot\extensions\chromium-web-store"
+if (-not (Test-Path $ExtensionSrc)) { $ExtensionSrc = "$RepoRoot\backend\embedded_extensions\chromium-web-store" }
+if (Test-Path $ExtensionSrc) {
+    New-Item -ItemType Directory -Force -Path "$Stage\extensions" | Out-Null
+    Copy-Item -LiteralPath $ExtensionSrc -Destination "$Stage\extensions" -Recurse -Force
+}
 
-# chrome 内核（cloak 默认 + google 备用）
+# chrome 内核（CloakBrowser 默认 + Google Chrome 备用）
 $ChromeStage = "$Stage\chrome"
 New-Item -ItemType Directory -Force -Path $ChromeStage | Out-Null
 Copy-Item -LiteralPath $CloakKernelSrc -Destination $ChromeStage -Recurse -Force
+if (-not (Test-Path "$ChromeStage\cloak-146.0.7680.177\chrome.exe")) {
+    throw "CloakBrowser 内核复制失败：缺少 $ChromeStage\cloak-146.0.7680.177\chrome.exe"
+}
 if (Test-Path $GoogleKernelSrc) {
     Copy-Item -LiteralPath $GoogleKernelSrc -Destination $ChromeStage -Recurse -Force
+} else {
+    Write-Host "   可选备用内核缺失，跳过: $GoogleKernelSrc" -ForegroundColor Yellow
 }
 
 # 留空 data 目录，安装后第一次启动时 app 自己创建数据库
@@ -315,5 +331,5 @@ Get-ChildItem $ReleaseDir | Sort-Object Name | ForEach-Object {
 }
 Write-Host ""
 Write-Host "用户使用方式：" -ForegroundColor Yellow
-Write-Host "  - 新用户首次安装：下载 BoostBrowser-Setup-v$Version.exe 双击安装"
-Write-Host "  - 老用户自动升级：app 启动后 5s 自动检查，弹窗下载 boost-browser.exe（38MB）"
+Write-Host "  - 自用完整安装：下载 BoostBrowser-Setup-v$Version.exe 双击安装"
+Write-Host "  - 老版本升级：上传 boost-browser.exe / boost-browser.exe.sha256 / updater.exe 到 Release"

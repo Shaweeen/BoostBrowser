@@ -1,13 +1,15 @@
 # stage_assets.ps1
-# Stage chromium kernels + proxy binaries + resource files to C:\Temp\BB_dist
-# then generate build/windows/installer/bb_files.nsh (explicit NSIS File list).
+# Stage Chromium kernels + optional proxy/helper assets to C:\Temp\BB_dist,
+# then generate build/windows/installer/bb_files.nsh with explicit NSIS File lines.
 #
-# Why not File /r ?
-#   1. NSIS File /r silently fails on paths containing dots
-#      -> stage to C:\Temp\BB_dist (no dots in parent path) avoids that.
-#   2. NSIS File /r does NOT match files without extension
-#      (chrome has "First Run", "ABOUT" etc.)
-#      -> emit explicit File commands enumerating every file.
+# Standard local layout:
+#   <BOOST_KERNEL_SRC or repo root>\chrome\cloak-146.0.7680.177\chrome.exe   REQUIRED
+#   <BOOST_KERNEL_SRC or repo root>\chrome\google-148.0.7778.167\chrome.exe  OPTIONAL fallback
+#   <BOOST_KERNEL_SRC or repo root>\bin\                                      OPTIONAL proxy tools
+#   <BOOST_KERNEL_SRC or repo root>\extensions\chromium-web-store\            OPTIONAL helper extension
+#
+# If the helper extension is missing from BOOST_KERNEL_SRC, this script falls
+# back to backend\embedded_extensions\chromium-web-store from the repo.
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -15,55 +17,67 @@ Set-Location $RepoRoot
 
 $StageRoot = "C:\Temp\BB_dist"
 $NshFile   = "$RepoRoot\build\windows\installer\bb_files.nsh"
+$AssetRoot = if ($env:BOOST_KERNEL_SRC) { $env:BOOST_KERNEL_SRC } else { $RepoRoot }
 
-# Source = a known-working deployment
-$SrcDeploy = if ($env:BOOST_KERNEL_SRC) { $env:BOOST_KERNEL_SRC } else { 'Z:\Boost Browser' }
+$RequiredKernels = @("cloak-146.0.7680.177")
+$OptionalKernels = @("google-148.0.7778.167")
+
+function Copy-Tree([string]$src, [string]$dst, [string]$Label, [bool]$Required) {
+    if (-not (Test-Path $src)) {
+        if ($Required) { throw "required asset not found: $src" }
+        Write-Host "    optional missing, skip: $Label ($src)" -ForegroundColor Yellow
+        return $false
+    }
+    Write-Host "    $Label ..." -ForegroundColor Gray
+    New-Item -ItemType Directory -Force -Path $dst | Out-Null
+    robocopy $src $dst /E /NFL /NDL /NJH /NJS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "robocopy failed (exit=$LASTEXITCODE) $src -> $dst" }
+    return $true
+}
 
 Write-Host "==> Stage assets to $StageRoot" -ForegroundColor Cyan
+Write-Host "    asset root: $AssetRoot" -ForegroundColor Gray
 
 if (Test-Path $StageRoot) {
     Write-Host "    cleaning old stage dir ..." -ForegroundColor Yellow
     Remove-Item -Recurse -Force $StageRoot
 }
 New-Item -ItemType Directory -Force -Path $StageRoot | Out-Null
-
-# ---- 1. chrome kernels ----
-$kernels = @(
-    "cloak-146.0.7680.177",
-    "google-148.0.7778.167"
-)
 New-Item -ItemType Directory -Force -Path "$StageRoot\chrome" | Out-Null
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $NshFile) | Out-Null
 
-foreach ($k in $kernels) {
-    $src = "$SrcDeploy\chrome\$k"
+foreach ($k in $RequiredKernels) {
+    $src = "$AssetRoot\chrome\$k"
     $dst = "$StageRoot\chrome\$k"
-    if (-not (Test-Path $src)) {
-        throw "source not found: $src"
-    }
-    Write-Host "    chrome\$k ..." -ForegroundColor Gray
-    robocopy $src $dst /E /NFL /NDL /NJH /NJS /NP | Out-Null
-    if ($LASTEXITCODE -ge 8) { throw "robocopy failed (exit=$LASTEXITCODE) $src -> $dst" }
+    Copy-Tree $src $dst "chrome\$k (required)" $true | Out-Null
+    if (-not (Test-Path "$dst\chrome.exe")) { throw "required chrome.exe missing after staging: $dst\chrome.exe" }
 }
 
-# ---- 2. bin proxy binaries ----
-Write-Host "    bin\ ..." -ForegroundColor Gray
-robocopy "$SrcDeploy\bin" "$StageRoot\bin" /E /NFL /NDL /NJH /NJS /NP | Out-Null
-if ($LASTEXITCODE -ge 8) { throw "robocopy bin failed" }
+foreach ($k in $OptionalKernels) {
+    $src = "$AssetRoot\chrome\$k"
+    $dst = "$StageRoot\chrome\$k"
+    Copy-Tree $src $dst "chrome\$k (optional)" $false | Out-Null
+}
 
-# ---- 3. extensions/chromium-web-store ----
-Write-Host "    extensions\chromium-web-store ..." -ForegroundColor Gray
-New-Item -ItemType Directory -Force -Path "$StageRoot\extensions" | Out-Null
-robocopy "$SrcDeploy\extensions\chromium-web-store" "$StageRoot\extensions\chromium-web-store" /E /NFL /NDL /NJH /NJS /NP | Out-Null
-if ($LASTEXITCODE -ge 8) { throw "robocopy extensions failed" }
+Copy-Tree "$AssetRoot\bin" "$StageRoot\bin" "bin\ proxy tools (optional)" $false | Out-Null
 
-# ---- 4. top-level loose files ----
+$extensionSource = "$AssetRoot\extensions\chromium-web-store"
+if (-not (Test-Path $extensionSource)) {
+    $extensionSource = "$RepoRoot\backend\embedded_extensions\chromium-web-store"
+}
+Copy-Tree $extensionSource "$StageRoot\extensions\chromium-web-store" "extensions\chromium-web-store (optional)" $false | Out-Null
+
 Write-Host "    top-level files ..." -ForegroundColor Gray
-foreach ($f in @("app.ico", "app.png", ".boost-license.json")) {
-    $src = "$SrcDeploy\$f"
-    if (Test-Path $src) {
-        Copy-Item $src "$StageRoot\$f" -Force
-    } else {
-        Write-Host "    WARN: $src missing, skip" -ForegroundColor Yellow
+$looseFiles = @(
+    @{ Source = "$AssetRoot\app.ico"; Destination = "$StageRoot\app.ico"; Required = $false },
+    @{ Source = "$AssetRoot\app.png"; Destination = "$StageRoot\app.png"; Required = $false },
+    @{ Source = "$RepoRoot\build\windows\icon.ico"; Destination = "$StageRoot\app.ico"; Required = $false },
+    @{ Source = "$RepoRoot\build\appicon.png"; Destination = "$StageRoot\app.png"; Required = $false },
+    @{ Source = "$AssetRoot\.boost-license.json"; Destination = "$StageRoot\.boost-license.json"; Required = $false }
+)
+foreach ($item in $looseFiles) {
+    if ((Test-Path $item.Source) -and -not (Test-Path $item.Destination)) {
+        Copy-Item $item.Source $item.Destination -Force
     }
 }
 
@@ -86,28 +100,21 @@ $lines.Add("!macro bb.bundleAssets")
 $allFiles = Get-ChildItem $StageRoot -Recurse -File
 $grouped = $allFiles | Group-Object { $_.DirectoryName }
 
-# Top-level files first
 $rootFiles = $allFiles | Where-Object { $_.DirectoryName -eq $StageRoot }
 if ($rootFiles) {
     $lines.Add('    SetOutPath "$INSTDIR"')
-    foreach ($f in $rootFiles) {
-        $lines.Add('    File "' + $f.FullName + '"')
-    }
+    foreach ($f in $rootFiles) { $lines.Add('    File "' + $f.FullName + '"') }
 }
 
-# Subdirectories (chrome/, bin/, extensions/...)
 foreach ($g in $grouped | Sort-Object Name) {
     if ($g.Name -eq $StageRoot) { continue }
     $relDir = $g.Name.Substring($StageRoot.Length).TrimStart('\')
     $nsisDir = '$INSTDIR\' + $relDir
     $lines.Add('    SetOutPath "' + $nsisDir + '"')
-    foreach ($f in $g.Group) {
-        $lines.Add('    File "' + $f.FullName + '"')
-    }
+    foreach ($f in $g.Group) { $lines.Add('    File "' + $f.FullName + '"') }
 }
 
 $lines.Add("!macroend")
-
 [System.IO.File]::WriteAllLines($NshFile, $lines, [System.Text.Encoding]::ASCII)
 
 $nshLines = (Get-Content $NshFile).Count

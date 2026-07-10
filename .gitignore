@@ -20,11 +20,13 @@ logs/
 *.tmp
 *.bak
 
-# Binaries
+# Binaries / local browser kernels
 *.exe
 *.dll
 *.so
 *.dylib
+/chrome/
+/bin/
 
 # IDE
 .idea/
