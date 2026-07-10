@@ -58,6 +58,9 @@ class PackagingScriptsTest(unittest.TestCase):
             "func hasCLIArg",
             "func takeoverExistingMainInstanceForPostUpdate",
             "func restoreNativeMainWindowBounds",
+            "func (a *App) IsWindowSyncPanelMode",
+            "func (a *App) SaveNativeMainWindowBounds",
+            "func (a *App) OpenWindowSyncPanel",
         ]:
             self.assertIn(symbol, text)
 
