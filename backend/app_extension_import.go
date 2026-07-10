@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -112,6 +113,9 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 
 	extID := extractExtensionID(downloadAddress)
 	downloadURL := resolveExtensionDownloadURL(downloadAddress, extID)
+	if err := validateExtensionDownloadURL(downloadURL); err != nil {
+		return nil, err
+	}
 	payload, err := downloadExtensionPayload(downloadURL)
 	if err != nil {
 		return nil, err
@@ -178,6 +182,35 @@ func resolveExtensionDownloadURL(input string, extID string) string {
 	return input
 }
 
+func validateExtensionDownloadURL(rawURL string) error {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("扩展下载地址无效")
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("扩展下载地址必须使用 HTTPS")
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return fmt.Errorf("扩展下载地址缺少主机名")
+	}
+	if isBlockedExtensionDownloadHost(host) {
+		return fmt.Errorf("扩展下载地址不允许指向本机或内网地址")
+	}
+	return nil
+}
+
+func isBlockedExtensionDownloadHost(host string) bool {
+	lower := strings.ToLower(strings.Trim(host, "[]"))
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
+		return true
+	}
+	if ip := net.ParseIP(lower); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+	}
+	return false
+}
+
 func downloadExtensionPayload(downloadURL string) ([]byte, error) {
 	client := &http.Client{Timeout: 90 * time.Second}
 	req, err := http.NewRequest(http.MethodGet, downloadURL, nil)
@@ -233,6 +266,18 @@ func unzipBytes(data []byte, dest string) error {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return fmt.Errorf("扩展 ZIP 解析失败：%w", err)
+	}
+	const maxExtensionFiles = 20000
+	const maxUnpackedExtensionBytes = 1024 * 1024 * 1024
+	if len(zr.File) > maxExtensionFiles {
+		return fmt.Errorf("扩展 ZIP 文件数量过多")
+	}
+	var unpackedBytes uint64
+	for _, f := range zr.File {
+		unpackedBytes += f.UncompressedSize64
+		if unpackedBytes > maxUnpackedExtensionBytes {
+			return fmt.Errorf("扩展 ZIP 解压后体积过大")
+		}
 	}
 	cleanDest, err := filepath.Abs(dest)
 	if err != nil {
@@ -337,6 +382,9 @@ func (a *App) InstallExtensionFromCRXURL(profileID string, crxURL string) (strin
 	}
 
 	extID := extractExtensionID(crxURL)
+	if err := validateExtensionDownloadURL(crxURL); err != nil {
+		return extID, "", err
+	}
 	payload, err := downloadExtensionPayload(crxURL)
 	if err != nil {
 		return extID, "", err

@@ -31,30 +31,7 @@ const modeLabel: Record<DistributionMode, string> = {
   global: '全局使用',
 }
 
-const defaultExtensions: ManagedExtension[] = [
-  {
-    id: 'builtin-metamask',
-    name: 'MetaMask',
-    description: '以太坊/Web3 钱包扩展，可分配到指定浏览器实例',
-    developer: 'metamask.io',
-    downloadAddress: 'nkbihfbeogaeaoehlefnkodbefgpgknn',
-    platform: 'google',
-    distributionMode: 'manual',
-    profileIds: [],
-    updatedAt: new Date().toISOString(),
-  },
-  {
-    id: 'builtin-okx',
-    name: 'OKX Wallet',
-    description: 'OKX Web3 钱包扩展，适合批量实例统一加载',
-    developer: 'okx.com',
-    downloadAddress: 'mcohilncbfahbmgdjkbpemcciiolgcge',
-    platform: 'google',
-    distributionMode: 'global',
-    profileIds: [],
-    updatedAt: new Date().toISOString(),
-  },
-]
+const defaultExtensions: ManagedExtension[] = []
 
 function loadExtensions(): ManagedExtension[] {
   try {
@@ -262,7 +239,7 @@ export function ExtensionManagementPage() {
           <Puzzle className="w-5 h-5 text-[var(--color-accent)]" />
           <div>
             <h1 className="text-lg font-semibold text-[var(--color-text-primary)]">扩展管理</h1>
-            <p className="text-xs text-[var(--color-text-muted)] mt-0.5">统一添加扩展，并分配到指定浏览器实例</p>
+            <p className="text-xs text-[var(--color-text-muted)] mt-0.5">仅添加你信任的扩展，并分配到指定浏览器实例</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -272,7 +249,7 @@ export function ExtensionManagementPage() {
       </div>
 
       <div className="px-6 py-3 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 text-sm border-b border-[var(--color-border-default)]">
-        添加后的扩展可一键写入实例启动参数；已启动实例需要重启后生效。不会切换官方 Chrome，不影响当前指纹内核。
+        安全提示：扩展可读取网页内容、剪贴板或钱包页面数据。只安装来自可信来源的扩展；已启动实例需要重启后生效。
       </div>
 
       <div className="p-6 space-y-4 overflow-auto">
@@ -383,8 +360,8 @@ export function ExtensionManagementPage() {
           <FormItem label="扩展说明">
             <Input value={form.description} onChange={e => setForm(prev => ({ ...prev, description: e.target.value }))} placeholder="显示在扩展列表中的简短描述" />
           </FormItem>
-          <FormItem label="扩展程序下载地址" required hint="支持 Chrome Web Store 详情页、32位扩展ID、直接 .crx/.zip 下载地址">
-            <Textarea rows={3} value={form.downloadAddress} onChange={e => setForm(prev => ({ ...prev, downloadAddress: e.target.value }))} placeholder="例如：https://chromewebstore.google.com/detail/.../扩展ID 或 nkbihfbeogaeaoehlefnkodbefgpgknn" />
+          <FormItem label="扩展程序下载地址" required hint="支持 Chrome Web Store 详情页、32位扩展ID、HTTPS .crx/.zip 下载地址；请只使用可信来源">
+            <Textarea rows={3} value={form.downloadAddress} onChange={e => setForm(prev => ({ ...prev, downloadAddress: e.target.value }))} placeholder="例如：https://chromewebstore.google.com/detail/.../扩展ID 或 32位扩展ID" />
           </FormItem>
           <div className="grid grid-cols-2 gap-4">
             <FormItem label="平台">
