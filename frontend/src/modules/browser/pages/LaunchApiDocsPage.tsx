@@ -16,8 +16,8 @@ const DOC_OVERVIEW = `# 自动化接口文档（重构版）
 
 本页聚焦 **外部脚本 / 调度器通过 HTTP 创建并唤起实例** 的场景，重点回答 5 个问题：
 
-1. 如何通过 HTTP 创建实例配置，并写入代理 / 标签 / 关键字 / 分组等信息
-2. 如何通过 Code 或关键字直接唤起实例
+1. 如何通过 HTTP 创建环境，并写入代理 / 标签 / 关键字 / 分组等信息
+2. 如何通过 Code 或关键字直接唤起环境
 3. 如何通过 \`profileId / profileName / keyword / tags / groupId\` 选择实例
 4. 如何带参数启动，并拿到固定 \`cdpUrl\` 接入 CDP
 5. 如何通过日志排查选择器命中和启动失败问题
@@ -57,7 +57,7 @@ const DOC_OVERVIEW = `# 自动化接口文档（重构版）
 
 - Boost Browser 应用已启动
 - Launch 服务监听本机（地址见本页顶部）
-- 如启用了 API 认证，请准备好请求头 \`X-Boost-Api-Key: <your-api-key>\`
+- 如启用了 API 认证，请准备好请求头 \`X-Boost-Api-Key: ***
 - 如果你要用 \`key / keyword / tags\` 选择实例，需要先在实例配置里维护这些字段
 - 如果你要用 \`groupId\`，请保证脚本拿到的是分组 ID，不是分组展示名
 
@@ -65,7 +65,7 @@ const DOC_OVERVIEW = `# 自动化接口文档（重构版）
 
 \`\`\`
 任意语言客户端 / 调度器
-  -> POST /api/profiles（可选：先创建实例配置）
+  -> POST /api/profiles（可选：先创建环境）
   -> POST /api/launch
   -> 选择器解析实例
   -> 启动浏览器
@@ -104,7 +104,7 @@ const DOC_QUICKSTART = `# 快速接入（3 分钟）
 所有 \`/api/*\` 请求都需要追加认证头：
 
 \`\`\`bash
-curl -H "X-Boost-Api-Key: <your-api-key>" http://127.0.0.1:19876/api/health
+curl -H "X-Boost-Api-Key: *** http://127.0.0.1:19876/api/health
 \`\`\`
 
 ## 第二步：选择创建触发方式
@@ -255,8 +255,8 @@ const DOC_SELECTOR = `# 目标实例选择器
 | 值 | 含义 |
 |----|------|
 | \`unique\` | 显式要求唯一。命中 0 个返回 404，命中多个返回 409 |
-| \`first\` | 当命中多个实例时，按后端稳定顺序取第一个；\`key / keyword / keywords\` 默认就是这个行为 |
-| \`all\` | 当命中多个实例时，按后端稳定顺序依次启动全部实例，并返回 \`items[]\` |
+| \`first\` | 当命中多个环境时，按后端稳定顺序取第一个；\`key / keyword / keywords\` 默认就是这个行为 |
+| \`all\` | 当命中多个环境时，按后端稳定顺序依次启动全部实例，并返回 \`items[]\` |
 
 ## 什么时候该用哪个字段
 
@@ -274,8 +274,8 @@ const DOC_API_INDEX = `# 接口总览
 | 能力 | 方法 | 路径 | 用途 |
 |------|------|------|------|
 | 健康检查 | GET | \`/api/health\` | 检查 Launch 服务是否可用 |
-| 实例配置管理 | GET / POST | \`/api/profiles\` | 查询实例列表，或创建包含代理/标签/关键字/分组的实例配置 |
-| 单实例配置管理 | GET / PUT / DELETE | \`/api/profiles/{profileId}\` | 查询、更新、删除指定实例配置 |
+| 环境管理 | GET / POST | \`/api/profiles\` | 查询环境列表，或创建包含代理/标签/关键字/分组的环境 |
+| 单环境管理 | GET / PUT / DELETE | \`/api/profiles/{profileId}\` | 查询、更新、删除指定环境 |
 | 按 Code 启动 | GET | \`/api/launch/{code}\` | 兼容旧版、最快捷的唤起方式 |
 | 选择器启动 | POST | \`/api/launch\` | 支持 code / profileId / 名称 / 关键字 / 标签 / 分组 |
 | CDP 统一入口 | GET / WS | \`/json/version\`、\`/json/list\`、\`/devtools/...\` | 将非 \`/api\` 请求代理到当前活动实例 |
@@ -283,7 +283,7 @@ const DOC_API_INDEX = `# 接口总览
 
 说明：
 
-- 如已启用 API 认证，所有 \`/api/*\` 请求都需要追加 \`X-Boost-Api-Key: <your-api-key>\`
+- 如已启用 API 认证，所有 \`/api/*\` 请求都需要追加 \`X-Boost-Api-Key: ***
 - CDP 统一入口仍只受 localhost 限制，不额外读取 API Key
 `
 
@@ -308,7 +308,7 @@ curl http://127.0.0.1:19876/api/health
 \`\`\`
 `
 
-const DOC_API_PROFILES = `# 接口：实例配置管理
+const DOC_API_PROFILES = `# 接口：环境管理
 
 \`\`\`
 GET    /api/profiles
@@ -352,8 +352,8 @@ DELETE /api/profiles/{profileId}
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| \`profile\` | object | 是 | 实例配置对象 |
-| \`profile.profileName\` | string | 是 | 实例名称 |
+| \`profile\` | object | 是 | 环境对象 |
+| \`profile.profileName\` | string | 是 | 环境名称 |
 | \`profile.userDataDir\` | string | 否 | 用户数据目录；为空时自动生成 |
 | \`profile.coreId\` | string | 否 | 指定浏览器内核 |
 | \`profile.fingerprintArgs\` | string[] | 否 | 持久化指纹参数 |
@@ -459,7 +459,7 @@ curl -X POST http://127.0.0.1:19876/api/profiles \\
 ## 示例 3：先创建，再按返回的 launchCode 单独触发启动
 
 \`\`\`bash
-# 第一步：创建实例配置
+# 第一步：创建环境
 curl -X POST http://127.0.0.1:19876/api/profiles \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -545,7 +545,7 @@ curl -X PUT http://127.0.0.1:19876/api/profiles/550e8400-e29b-41d4-a716-44665544
 - \`PUT\` 采用“整份配置更新”语义，建议先 \`GET /api/profiles/{profileId}\` 再修改后回写
 - 如果 \`launchCode\` 冲突，后端会回滚本次更新，避免配置部分落库
 
-## 删除实例配置
+## 删除环境
 
 \`\`\`bash
 curl -X DELETE http://127.0.0.1:19876/api/profiles/550e8400-e29b-41d4-a716-446655440000
@@ -653,7 +653,7 @@ curl -X POST http://127.0.0.1:19876/api/launch \\
 
 - 先按真实 LaunchCode 查
 - 查不到就把 \`buyer-001\` 当关键字去匹配实例
-- 如果命中多个实例，默认取第一个
+- 如果命中多个环境，默认取第一个
 
 ## 示例 1C：\`code\` 传关键字，并把所有命中实例都启动
 
@@ -989,7 +989,7 @@ const DOC_ERRORS = `# 错误码与重试策略
 | 403 | 非 localhost 访问 | 改为本机请求 |
 | 404 | GET 的 Code 不存在 / POST 的 code 关键字兜底后仍未命中 / selector 没命中实例 | 检查 code、keywords、tags、groupId |
 | 405 | 方法错误 | 使用正确 HTTP 方法 |
-| 409 | selector 命中多个实例 / 创建或更新时 launchCode 冲突 / 达到实例上限 / 删除运行中实例 | 收窄条件、换一个 launchCode，或先停掉实例后重试 |
+| 409 | selector 命中多个环境 / 创建或更新时 launchCode 冲突 / 达到环境上限 / 删除运行中环境 | 收窄条件、换一个 launchCode，或先停掉实例后重试 |
 | 500 | 启动失败 | 查 \`/api/launch/logs\` + 应用日志 |
 | 503 | 访问 CDP 统一入口时还没有活动实例，或启动响应仍处于 \`debugReady=false\` | 先确认启动接口成功，再等待 \`debugReady=true\` 后访问 \`cdpUrl\` |
 
@@ -1204,7 +1204,7 @@ const DOC_TROUBLESHOOT = `# 常见问题
 
 - 说明当前已经启用 API 认证
 - 你没有传认证头，或传错了 API Key
-- 请检查请求头 \`X-Boost-Api-Key: <your-api-key>\` 是否正确
+- 请检查请求头 \`X-Boost-Api-Key: *** 是否正确
 
 ## Q6：返回 \`forbidden: only localhost is allowed\`
 

@@ -117,8 +117,8 @@ export function BatchCreatePage() {
     <div className="space-y-5 animate-fade-in">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold text-[var(--color-text-primary)]">批量创建实例</h1>
-          <p className="text-sm text-[var(--color-text-muted)] mt-1">按前缀+序号批量创建多个指纹浏览器实例</p>
+          <h1 className="text-xl font-semibold text-[var(--color-text-primary)]">批量创建环境</h1>
+          <p className="text-sm text-[var(--color-text-muted)] mt-1">按前缀+序号批量创建多个指纹浏览器环境</p>
         </div>
         <div className="flex gap-2">
           <Button variant="secondary" size="sm" onClick={handleBack}>返回列表</Button>

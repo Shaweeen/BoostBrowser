@@ -118,7 +118,7 @@ export function SnapshotTab({ profileId, running }: Props) {
               size="sm"
               variant="ghost"
               disabled={running}
-              title={running ? '请先停止实例' : '恢复此快照'}
+              title={running ? '请先停止环境' : '恢复此快照'}
               onClick={() => setConfirmRestore(sid)}
             >
               <RotateCcw className="w-3.5 h-3.5" />

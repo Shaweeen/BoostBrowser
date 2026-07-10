@@ -104,10 +104,10 @@ export function BrowserEditPage() {
     try {
       if (isCreate) {
         await createBrowserProfile(payload)
-        toast.success('配置已创建')
+        toast.success('环境已创建')
       } else if (id) {
         await updateBrowserProfile(id, payload)
-        toast.success('配置已更新')
+        toast.success('环境已更新')
       }
       setIsDirty(false)
       navigate('/browser/list')
@@ -140,19 +140,19 @@ export function BrowserEditPage() {
     <div className="space-y-5 animate-fade-in">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold text-[var(--color-text-primary)]">{isCreate ? '新建配置' : '编辑配置'}</h1>
+          <h1 className="text-xl font-semibold text-[var(--color-text-primary)]">{isCreate ? '创建环境' : '编辑环境'}</h1>
           <p className="text-sm text-[var(--color-text-muted)] mt-1">完善指纹与启动参数</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="secondary" size="sm" onClick={handleBack}>返回列表</Button>
-          <Button size="sm" onClick={handleSave} loading={saving}>保存配置</Button>
+          <Button variant="secondary" size="sm" onClick={handleBack}>返回环境列表</Button>
+          <Button size="sm" onClick={handleSave} loading={saving}>保存环境</Button>
         </div>
       </div>
 
-      <Card title="基础信息" subtitle="实例与配置名称">
+      <Card title="基础信息" subtitle="环境名称与数据目录">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <FormItem label="配置名称" required>
-            <Input value={formData.profileName} onChange={e => handleChange('profileName', e.target.value)} placeholder="请输入配置名称" />
+          <FormItem label="环境名称" required>
+            <Input value={formData.profileName} onChange={e => handleChange('profileName', e.target.value)} placeholder="请输入环境名称" />
           </FormItem>
           <FormItem label="用户数据目录（留空自动生成）">
             <div className="flex gap-2">

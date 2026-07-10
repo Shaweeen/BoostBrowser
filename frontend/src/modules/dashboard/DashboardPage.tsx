@@ -27,7 +27,7 @@ function StatCard({ title, value, icon, color }: StatCardProps) {
 }
 
 const QUICK_LINKS = [
-  { to: '/browser/list', icon: <Monitor className="w-5 h-5" />, label: '浏览器实例', desc: '管理所有指纹浏览器' },
+  { to: '/browser/list', icon: <Monitor className="w-5 h-5" />, label: '浏览器环境', desc: '管理所有指纹浏览器环境' },
   { to: '/browser/proxy-pool', icon: <Shield className="w-5 h-5" />, label: '代理池', desc: '配置和测试代理节点' },
   { to: '/browser/cores', icon: <Cpu className="w-5 h-5" />, label: '内核管理', desc: '管理 Chrome 内核版本' },
   { to: '/settings', icon: <Settings className="w-5 h-5" />, label: '系统设置', desc: '全局参数配置' },
@@ -71,7 +71,7 @@ export function DashboardPage() {
       {/* 统计卡片 */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
-          title="实例总数"
+          title="环境总数"
           value={v(stats.totalInstances)}
           icon={<Monitor className="w-4 h-4 text-blue-500" />}
           color="bg-blue-50 dark:bg-blue-900/20"
@@ -128,7 +128,7 @@ export function DashboardPage() {
               { label: '运行环境', value: 'Wails v2 + React' },
               { label: '数据存储', value: 'SQLite + YAML' },
               { label: '内存占用', value: loading ? '-' : `${stats.memUsedMB} MB` },
-              { label: '实例运行', value: loading ? '-' : `${stats.runningInstances} / ${stats.totalInstances}` },
+              { label: '环境运行', value: loading ? '-' : `${stats.runningInstances} / ${stats.totalInstances}` },
             ].map(item => (
               <div
                 key={item.label}

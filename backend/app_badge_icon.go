@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -291,28 +292,18 @@ func overlayBadgeNumber(img *image.NRGBA, number int) *image.NRGBA {
 	if len(numStr) > 4 {
 		numStr = numStr[len(numStr)-4:]
 	}
-	digits := map[byte][]string{
-		'0': {"01110", "10001", "10001", "10001", "10001", "10001", "01110"},
-		'1': {"00100", "01100", "00100", "00100", "00100", "00100", "01110"},
-		'2': {"01110", "10001", "00001", "00110", "01000", "10000", "11111"},
-		'3': {"01110", "10001", "00001", "00110", "00001", "10001", "01110"},
-		'4': {"00010", "00110", "01010", "10010", "11111", "00010", "00010"},
-		'5': {"11111", "10000", "11110", "00001", "00001", "10001", "01110"},
-		'6': {"00110", "01000", "10000", "11110", "10001", "10001", "01110"},
-		'7': {"11111", "00001", "00010", "00100", "01000", "01000", "01000"},
-		'8': {"01110", "10001", "10001", "01110", "10001", "10001", "01110"},
-		'9': {"01110", "10001", "10001", "01111", "00001", "00010", "01100"},
-	}
-
-	pixel := 3
+	digitW := 10
+	digitH := 16
+	stroke := 3
+	gap := 2
 	if len(numStr) >= 3 {
-		pixel = 2
+		digitW = 8
+		digitH = 14
+		stroke = 2
+		gap = 1
 	}
-	fontW := 5
-	fontH := 7
-	gap := 1
-	totalFontWidth := len(numStr)*fontW*pixel + (len(numStr)-1)*gap*pixel
-	totalFontHeight := fontH * pixel
+	totalFontWidth := len(numStr)*digitW + (len(numStr)-1)*gap
+	totalFontHeight := digitH
 
 	padX := 5
 	padY := 4
@@ -336,30 +327,56 @@ func overlayBadgeNumber(img *image.NRGBA, number int) *image.NRGBA {
 	drawStartY := pillY + (pillH-totalFontHeight)/2
 	curX := drawStartX
 	for _, ch := range []byte(numStr) {
-		font, ok := digits[ch]
-		if !ok {
-			continue
-		}
-		for row, line := range font {
-			for col, c := range line {
-				if c != '1' {
-					continue
-				}
-				for py := 0; py < pixel; py++ {
-					for px := 0; px < pixel; px++ {
-						ix := curX + col*pixel + px
-						iy := drawStartY + row*pixel + py
-						if ix >= 0 && ix < size && iy >= 0 && iy < size {
-							img.Set(ix, iy, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
-						}
-					}
-				}
-			}
-		}
-		curX += fontW*pixel + gap*pixel
+		drawSevenSegmentDigit(img, curX, drawStartY, digitW, digitH, stroke, ch, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+		curX += digitW + gap
 	}
 
 	return img
+}
+
+func drawSevenSegmentDigit(img *image.NRGBA, x, y, w, h, stroke int, ch byte, col color.NRGBA) {
+	segments := map[byte]string{
+		'0': "abcfed",
+		'1': "bc",
+		'2': "abged",
+		'3': "abgcd",
+		'4': "fgbc",
+		'5': "afgcd",
+		'6': "afgecd",
+		'7': "abc",
+		'8': "abcdefg",
+		'9': "abfgcd",
+	}
+	active, ok := segments[ch]
+	if !ok {
+		return
+	}
+	has := func(seg byte) bool { return strings.ContainsRune(active, rune(seg)) }
+	r := int(math.Max(1, float64(stroke)/2))
+	midY := y + h/2 - stroke/2
+	bottomY := y + h - stroke
+	rightX := x + w - stroke
+	if has('a') {
+		drawRoundedPill(img, x+stroke/2, y, w-stroke, stroke, r, col)
+	}
+	if has('g') {
+		drawRoundedPill(img, x+stroke/2, midY, w-stroke, stroke, r, col)
+	}
+	if has('d') {
+		drawRoundedPill(img, x+stroke/2, bottomY, w-stroke, stroke, r, col)
+	}
+	if has('f') {
+		drawRoundedPill(img, x, y+stroke/2, stroke, h/2, r, col)
+	}
+	if has('b') {
+		drawRoundedPill(img, rightX, y+stroke/2, stroke, h/2, r, col)
+	}
+	if has('e') {
+		drawRoundedPill(img, x, y+h/2, stroke, h/2-stroke/2, r, col)
+	}
+	if has('c') {
+		drawRoundedPill(img, rightX, y+h/2, stroke, h/2-stroke/2, r, col)
+	}
 }
 
 func drawRoundedPill(img *image.NRGBA, x, y, w, h, r int, col color.NRGBA) {
@@ -393,43 +410,72 @@ func generateBadgeIconImage(pid int, number int) *image.NRGBA {
 // ICO 文件生成
 // ============================================================================
 
-// scaleImage 将图像缩放到指定尺寸（最近邻插值）
+// scaleImage 将图像缩放到指定尺寸（面积采样），任务栏小尺寸下数字边缘更圆滑。
 func scaleImage(src *image.NRGBA, dstSize int) *image.NRGBA {
 	srcBounds := src.Bounds()
 	srcW := srcBounds.Dx()
 	srcH := srcBounds.Dy()
 	dst := image.NewNRGBA(image.Rect(0, 0, dstSize, dstSize))
-
+	scaleX := float64(srcW) / float64(dstSize)
+	scaleY := float64(srcH) / float64(dstSize)
 	for dy := 0; dy < dstSize; dy++ {
 		for dx := 0; dx < dstSize; dx++ {
-			sx := dx * srcW / dstSize
-			sy := dy * srcH / dstSize
-			dst.Set(dx, dy, src.NRGBAAt(sx, sy))
+			x0 := int(math.Floor(float64(dx) * scaleX))
+			x1 := int(math.Ceil(float64(dx+1) * scaleX))
+			y0 := int(math.Floor(float64(dy) * scaleY))
+			y1 := int(math.Ceil(float64(dy+1) * scaleY))
+			if x1 <= x0 {
+				x1 = x0 + 1
+			}
+			if y1 <= y0 {
+				y1 = y0 + 1
+			}
+			var r, g, b, a uint32
+			var count uint32
+			for sy := y0; sy < y1 && sy < srcH; sy++ {
+				for sx := x0; sx < x1 && sx < srcW; sx++ {
+					p := src.NRGBAAt(srcBounds.Min.X+sx, srcBounds.Min.Y+sy)
+					r += uint32(p.R)
+					g += uint32(p.G)
+					b += uint32(p.B)
+					a += uint32(p.A)
+					count++
+				}
+			}
+			if count == 0 {
+				continue
+			}
+			dst.SetNRGBA(dx, dy, color.NRGBA{R: uint8(r / count), G: uint8(g / count), B: uint8(b / count), A: uint8(a / count)})
 		}
 	}
 	return dst
 }
 
-// generateBadgeICO 生成带编号的 ICO 文件字节数据（包含 16x16 和 32x32 两种尺寸）。
+// generateBadgeICO 生成带编号的 ICO 文件字节数据（包含 16x16、32x32、64x64 三种尺寸）。
 func generateBadgeICO(pid int, number int) ([]byte, error) {
 	// 生成 64x64 原图（提取进程图标 + 叠加角标）
 	srcImg := generateBadgeIconImage(pid, number)
 
-	// 缩放到 16x16 和 32x32
+	// 缩放到 16x16 和 32x32，同时保留 64x64 原图，Windows 高 DPI 任务栏优先取高清层。
 	img16 := scaleImage(srcImg, 16)
 	img32 := scaleImage(srcImg, 32)
+	img64 := srcImg
 
 	// 编码为 PNG
-	var buf16, buf32 bytes.Buffer
+	var buf16, buf32, buf64 bytes.Buffer
 	if err := png.Encode(&buf16, img16); err != nil {
 		return nil, err
 	}
 	if err := png.Encode(&buf32, img32); err != nil {
 		return nil, err
 	}
+	if err := png.Encode(&buf64, img64); err != nil {
+		return nil, err
+	}
 
 	png16Data := buf16.Bytes()
 	png32Data := buf32.Bytes()
+	png64Data := buf64.Bytes()
 
 	// ICO 文件格式
 	// 参考：https://en.wikipedia.org/wiki/ICO_(file_format)
@@ -453,9 +499,10 @@ func generateBadgeICO(pid int, number int) ([]byte, error) {
 	header := icoDirHeader{
 		Reserved:  0,
 		ImageType: 1, // ICON
-		NumImages: 2,
+		NumImages: 3,
 	}
 
+	entriesOffset := uint32(binary.Size(header) + binary.Size(icoDirEntry{})*3)
 	entry16 := icoDirEntry{
 		Width:       16,
 		Height:      16,
@@ -464,7 +511,7 @@ func generateBadgeICO(pid int, number int) ([]byte, error) {
 		Planes:      1,
 		BitCount:    32,
 		BytesInRes:  uint32(len(png16Data)),
-		ImageOffset: uint32(binary.Size(header) + binary.Size(icoDirEntry{})*2),
+		ImageOffset: entriesOffset,
 	}
 	entry32 := icoDirEntry{
 		Width:       32,
@@ -476,13 +523,25 @@ func generateBadgeICO(pid int, number int) ([]byte, error) {
 		BytesInRes:  uint32(len(png32Data)),
 		ImageOffset: entry16.ImageOffset + uint32(len(png16Data)),
 	}
+	entry64 := icoDirEntry{
+		Width:       64,
+		Height:      64,
+		ColorCount:  0,
+		Reserved:    0,
+		Planes:      1,
+		BitCount:    32,
+		BytesInRes:  uint32(len(png64Data)),
+		ImageOffset: entry32.ImageOffset + uint32(len(png32Data)),
+	}
 
 	var result bytes.Buffer
 	_ = binary.Write(&result, binary.LittleEndian, header)
 	_ = binary.Write(&result, binary.LittleEndian, entry16)
 	_ = binary.Write(&result, binary.LittleEndian, entry32)
+	_ = binary.Write(&result, binary.LittleEndian, entry64)
 	result.Write(png16Data)
 	result.Write(png32Data)
+	result.Write(png64Data)
 
 	return result.Bytes(), nil
 }

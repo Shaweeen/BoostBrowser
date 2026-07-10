@@ -88,7 +88,7 @@ export function QuickLaunchModal({ open, onClose }: QuickLaunchModalProps) {
         if (profilesResult.status === 'fulfilled') {
           setProfiles((profilesResult.value || []).slice().sort(sortProfiles))
         } else {
-          toast.error('加载实例列表失败')
+          toast.error('加载环境列表失败')
           setProfiles([])
         }
 
@@ -300,7 +300,7 @@ export function QuickLaunchModal({ open, onClose }: QuickLaunchModalProps) {
 
   const startProfile = async (profile: BrowserProfile) => {
     if (!profile.launchCode) {
-      toast.error('该实例尚未分配 Code，请先在实例列表设置')
+      toast.error('该环境尚未分配 Code，请先在环境列表设置')
       return
     }
     await startByCode(profile.launchCode)

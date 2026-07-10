@@ -130,7 +130,7 @@ function useWailsNotifications() {
       (data: { profileId: string; profileName: string; error: string }) => {
         addNotification({
           type: 'error',
-          title: '实例异常退出',
+          title: '环境异常退出',
           message: `「${data.profileName || data.profileId}」意外崩溃：${data.error}`,
         })
       }
@@ -153,7 +153,7 @@ function useWailsNotifications() {
         addNotification({
           type: 'warning',
           title: '连接池节点失效',
-          message: `代理节点 ${data.key} 连接中断，相关实例可能无法访问网络`,
+          message: `代理节点 ${data.key} 连接中断，相关环境可能无法访问网络`,
         })
       }
     )

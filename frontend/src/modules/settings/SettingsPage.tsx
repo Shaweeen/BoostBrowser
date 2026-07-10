@@ -350,7 +350,7 @@ export function SettingsPage() {
         </div>
       </Card>
 
-      <Card title="缓存清理" subtitle="只清理网页/小程序 App 产生的缓存图片、Storage 和 Cookies，不删除实例配置">
+      <Card title="缓存清理" subtitle="只清理网页/小程序 App 产生的缓存图片、Storage 和 Cookies，不删除环境配置">
         <div className="space-y-4">
           <div className="flex items-center justify-between gap-4">
             <div>

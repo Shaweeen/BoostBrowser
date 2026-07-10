@@ -113,7 +113,7 @@ function BatchToolbar({
             </>
           )}
         </div>
-        <Button size="sm" variant="secondary" onClick={onBatchRandomizeFingerprint} loading={batchLoading} title="批量随机指纹种子（运行中的实例会跳过）">
+        <Button size="sm" variant="secondary" onClick={onBatchRandomizeFingerprint} loading={batchLoading} title="批量随机指纹种子（运行中的环境会跳过）">
           <Wand2 className="w-3.5 h-3.5" />随机指纹
         </Button>
         <Button size="sm" variant="ghost" onClick={onBatchDelete} title="批量删除" className="text-red-500 hover:text-red-600">
@@ -634,11 +634,11 @@ export function BrowserListPage() {
       if (startedProfile?.running && !startedProfile.debugReady && startedProfile.runtimeWarning) {
         toast.warning(startedProfile.runtimeWarning)
       } else {
-        toast.success(`实例已启动${startedProfile?.profileName ? `：${startedProfile.profileName}` : ''}`)
+        toast.success(`环境已启动${startedProfile?.profileName ? `：${startedProfile.profileName}` : ''}`)
       }
       await loadProfiles({ silent: true, syncRuntimeState: true })
     } catch (error: any) {
-      const feedback = resolveActionFeedback(error, '实例启动失败')
+      const feedback = resolveActionFeedback(error, '环境启动失败')
       if (feedback.tone === 'warning') {
         toast.warning(feedback.message)
       } else {
@@ -655,10 +655,10 @@ export function BrowserListPage() {
     try {
       const stoppedProfile = await stopBrowserInstance(profileId)
       mergeProfileState(stoppedProfile)
-      toast.success('实例已停止')
+      toast.success('环境已停止')
       await loadProfiles({ silent: true, syncRuntimeState: true })
     } catch (error: any) {
-      toast.error(resolveActionErrorMessage(error, '实例停止失败'))
+      toast.error(resolveActionErrorMessage(error, '环境停止失败'))
       await loadProfiles({ silent: true, syncRuntimeState: true })
     } finally {
       updatePendingIds(setStoppingIds, profileId, false)
@@ -670,10 +670,10 @@ export function BrowserListPage() {
     try {
       const restartedProfile = await restartBrowserInstance(profileId)
       mergeProfileState(restartedProfile)
-      toast.success(`实例已重启${restartedProfile?.profileName ? `：${restartedProfile.profileName}` : ''}`)
+      toast.success(`环境已重启${restartedProfile?.profileName ? `：${restartedProfile.profileName}` : ''}`)
       await loadProfiles({ silent: true, syncRuntimeState: true })
     } catch (error: any) {
-      const feedback = resolveActionFeedback(error, '实例重启失败')
+      const feedback = resolveActionFeedback(error, '环境重启失败')
       if (feedback.tone === 'warning') {
         toast.warning(feedback.message)
       } else {
@@ -711,7 +711,7 @@ export function BrowserListPage() {
       if (ids.length > 1) {
         setSelectedIds(new Set())
       }
-      toast.success(`${ids.length > 1 ? `已删除 ${ids.length} 个实例` : '配置已删除'}${deleteCache ? '，缓存文件已删除' : ''}`)
+      toast.success(`${ids.length > 1 ? `已删除 ${ids.length} 个环境` : '配置已删除'}${deleteCache ? '，缓存文件已删除' : ''}`)
       setDeleteModal({ open: false, ids: [], names: [] })
       setDeleteCache(false)
       await loadProfiles()
@@ -762,7 +762,7 @@ export function BrowserListPage() {
         mergeProfileState(startedProfile)
         success++
       } catch (error: any) {
-        const feedback = resolveActionFeedback(error, '实例启动失败')
+        const feedback = resolveActionFeedback(error, '环境启动失败')
         if (feedback.pendingAttach) {
           pending++
           pendingMessages.push(`${profile.profileName}：${feedback.message}`)
@@ -843,7 +843,7 @@ export function BrowserListPage() {
     const profile = profiles.find(p => p.profileId === profileId)
     if (!profile) return
     if (profile.running) {
-      toast.warning('实例运行中，停止后再重置指纹')
+      toast.warning('环境运行中，停止后再重置指纹')
       return
     }
     try {
@@ -932,7 +932,7 @@ export function BrowserListPage() {
     if (!g) return
     const inGroup = profiles.filter(p => p.groupId === groupId).length
     const msg = inGroup > 0
-      ? `分组「${g.groupName}」内有 ${inGroup} 个实例。删除分组后这些实例将变为未分组（实例本身不会被删除）。确定继续？`
+      ? `分组「${g.groupName}」内有 ${inGroup} 个环境。删除分组后这些环境将变为未分组（环境本身不会被删除）。确定继续？`
       : `确定删除分组「${g.groupName}」？`
     if (!confirm(msg)) return
     try {
@@ -950,7 +950,7 @@ export function BrowserListPage() {
 
   const handleOpenExtensionModal = () => {
     if (visibleSelectedIds.size === 0) {
-      toast.warning('请先勾选要导入扩展的实例')
+      toast.warning('请先勾选要导入扩展的环境')
       return
     }
     setExtensionModalOpen(true)
@@ -960,7 +960,7 @@ export function BrowserListPage() {
     const ids = Array.from(visibleSelectedIds)
     const url = extensionUrl.trim()
     if (ids.length === 0) {
-      toast.warning('请先勾选要导入扩展的实例')
+      toast.warning('请先勾选要导入扩展的环境')
       return
     }
     if (!url) {
@@ -970,7 +970,7 @@ export function BrowserListPage() {
     setImportingExtension(true)
     try {
       const result = await importExtensionToBrowserProfiles(ids, url)
-      toast.success(result?.message || `扩展已导入到 ${ids.length} 个实例`)
+      toast.success(result?.message || `扩展已导入到 ${ids.length} 个环境`)
       setExtensionModalOpen(false)
       setExtensionUrl('')
       await loadProfiles()
@@ -1041,7 +1041,7 @@ export function BrowserListPage() {
     setCopying(true)
     try {
       await copyBrowserProfile(profileId, copyName)
-      toast.success('实例已复制')
+      toast.success('环境已复制')
       closeCopyModal()
       loadProfiles()
     } catch (error: any) {
@@ -1155,7 +1155,7 @@ export function BrowserListPage() {
     },
     {
       key: 'profileName',
-      title: '实例名称',
+      title: '环境名称',
       render: (value, record) => (
         <div className="flex flex-col gap-1">
           <Link className="text-[var(--color-accent)] text-sm font-medium hover:underline" to={`/browser/detail/${record.profileId}`}>
@@ -1232,7 +1232,7 @@ export function BrowserListPage() {
             <Button size="sm" variant="ghost" onClick={() => handleRestart(record.profileId)} title="重启" disabled={isBusy}><RotateCcw className="w-3.5 h-3.5" /></Button>
             <Button size="sm" variant="ghost" onClick={() => openKwModal(record)} title="关键字" disabled={isBusy}><Key className="w-3.5 h-3.5" /></Button>
             <Link to={`/browser/edit/${record.profileId}`}><Button size="sm" variant="ghost" title="配置" disabled={isBusy}><Settings className="w-3.5 h-3.5" /></Button></Link>
-            <Button size="sm" variant="ghost" onClick={() => handleRandomizeFingerprint(record.profileId)} title="随机指纹种子（每个实例独立隔离）" disabled={isBusy || record.running}><Wand2 className="w-3.5 h-3.5" /></Button>
+            <Button size="sm" variant="ghost" onClick={() => handleRandomizeFingerprint(record.profileId)} title="随机指纹种子（每个环境独立隔离）" disabled={isBusy || record.running}><Wand2 className="w-3.5 h-3.5" /></Button>
             <Button size="sm" variant="ghost" onClick={() => openCopyModal(record)} title="克隆" disabled={isBusy}><Copy className="w-3.5 h-3.5" /></Button>
             <Button size="sm" variant="ghost" onClick={() => handleDelete(record.profileId)} title="删除" disabled={isBusy}><Trash2 className="w-3.5 h-3.5 text-red-500" /></Button>
           </div>
@@ -1271,9 +1271,9 @@ export function BrowserListPage() {
       {/* 页头 */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold text-[var(--color-text-primary)]">实例列表</h1>
+          <h1 className="text-xl font-semibold text-[var(--color-text-primary)]">环境列表</h1>
           <p className="text-sm text-[var(--color-text-muted)] mt-1">
-            当前配置总数 {profiles.length}
+            当前环境总数 {profiles.length}
             {filteredProfiles.length !== profiles.length && <span className="ml-1 text-[var(--color-accent)]">（已筛选 {filteredProfiles.length}）</span>}
           </p>
         </div>
@@ -1285,7 +1285,7 @@ export function BrowserListPage() {
           </Button>
           <Button variant="secondary" size="sm" onClick={handleImportMoreLogin} title="导入 MoreLogin 导出的 xlsx / txt 环境文件"><Upload className="w-4 h-4" />导入环境</Button>
           <Button variant="secondary" size="sm" onClick={handleImportRunningMoreLogin} title="导入当前正在运行的 MoreLogin 环境（当前先支持一次导入 1 个）"><FolderInput className="w-4 h-4" />导入运行中环境</Button>
-          <Button variant="secondary" size="sm" onClick={handleOpenExtensionModal} disabled={selectedIds.size === 0} title="先勾选实例，再输入扩展下载地址"><Download className="w-4 h-4" />导入扩展</Button>
+          <Button variant="secondary" size="sm" onClick={handleOpenExtensionModal} disabled={selectedIds.size === 0} title="先勾选环境，再输入扩展下载地址"><Download className="w-4 h-4" />导入扩展</Button>
           <Button variant="secondary" size="sm" onClick={handleOpenSettings}><Sliders className="w-4 h-4" />基础配置</Button>
           <div className="flex items-center bg-[var(--color-bg-secondary)] rounded-md border border-[var(--color-border-default)] p-0.5 ml-2">
             <button
@@ -1304,7 +1304,7 @@ export function BrowserListPage() {
             </button>
           </div>
           <span className="w-px h-4 bg-[var(--color-border-muted)] mx-1 self-center"></span>
-          <Link to="/browser/edit/new"><Button size="sm"><Plus className="w-4 h-4" />新建配置</Button></Link>
+          <Link to="/browser/edit/new"><Button size="sm"><Plus className="w-4 h-4" />创建环境</Button></Link>
           <Link to="/browser/batch-create"><Button variant="secondary" size="sm"><Layers className="w-4 h-4" />批量创建</Button></Link>
         </div>
       </div>
@@ -1313,9 +1313,9 @@ export function BrowserListPage() {
       {!headerCollapsed && (
         <>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <StatCard title="配置总数" value={`${profiles.length}`} icon={<FileText className="w-5 h-5" />} />
-            <StatCard title="运行中实例" value={`${runningCount}`} icon={<Activity className="w-5 h-5" />} />
-            <StatCard title="停止实例" value={`${profiles.length - runningCount}`} icon={<Square className="w-5 h-5 text-gray-400" />} />
+            <StatCard title="环境总数" value={`${profiles.length}`} icon={<FileText className="w-5 h-5" />} />
+            <StatCard title="运行中环境" value={`${runningCount}`} icon={<Activity className="w-5 h-5" />} />
+            <StatCard title="停止环境" value={`${profiles.length - runningCount}`} icon={<Square className="w-5 h-5 text-gray-400" />} />
           </div>
 
           <InstanceFilterBar
@@ -1354,7 +1354,7 @@ export function BrowserListPage() {
             <div className="py-16 flex items-center justify-center text-sm text-[var(--color-text-muted)]">加载中...</div>
           ) : filteredProfiles.length === 0 ? (
             <div className="py-16 flex flex-col items-center justify-center gap-3 text-sm text-[var(--color-text-muted)]">
-              <div>{hasActiveFilters && profiles.length > 0 ? `当前筛选条件下暂无数据（总实例 ${profiles.length}）` : '暂无数据'}</div>
+              <div>{hasActiveFilters && profiles.length > 0 ? `当前筛选条件下暂无数据（总环境 ${profiles.length}）` : '暂无数据'}</div>
               {hasActiveFilters && profiles.length > 0 && (
                 <Button size="sm" variant="secondary" onClick={() => setFilters({ ...EMPTY_FILTERS, tags: new Set() })}>
                   清除筛选
@@ -1467,11 +1467,11 @@ export function BrowserListPage() {
         </div>
       </Card>
 
-      {/* 删除实例弹窗 */}
+      {/* 删除环境弹窗 */}
       <Modal
         open={deleteModal.open}
         onClose={closeDeleteModal}
-        title={deleteModal.ids.length > 1 ? '批量删除实例' : '删除实例'}
+        title={deleteModal.ids.length > 1 ? '批量删除环境' : '删除环境'}
         width="480px"
         closable={!deletingProfiles}
         footer={
@@ -1484,14 +1484,14 @@ export function BrowserListPage() {
         <div className="space-y-4">
           <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 text-sm text-[var(--color-text-secondary)]">
             <p className="font-medium text-red-500 mb-1">
-              确定删除 {deleteModal.ids.length} 个实例配置吗？
+              确定删除 {deleteModal.ids.length} 个环境吗？
             </p>
             <p>默认只删除列表里的配置记录，不删除浏览器缓存、插件、Cookie、书签等本地数据。</p>
           </div>
           {deleteModal.names.length > 0 && (
             <div className="max-h-28 overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-2 text-xs text-[var(--color-text-muted)]">
               {deleteModal.names.slice(0, 8).map(name => <div key={name} className="truncate">{name}</div>)}
-              {deleteModal.names.length > 8 && <div>另有 {deleteModal.names.length - 8} 个实例...</div>}
+              {deleteModal.names.length > 8 && <div>另有 {deleteModal.names.length - 8} 个环境...</div>}
             </div>
           )}
           <label className="flex items-start gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-3 cursor-pointer">
@@ -1505,7 +1505,7 @@ export function BrowserListPage() {
             <span className="text-sm">
               <span className="block font-medium text-[var(--color-text-primary)]">同时删除缓存文件/用户数据目录</span>
               <span className="block mt-1 text-xs leading-5 text-[var(--color-text-muted)]">
-                勾选后会删除该实例的数据文件夹，包括浏览器缓存、Cookie、已安装插件、书签等；未勾选则保留这些文件，后续仍可手动备份或清理。
+                勾选后会删除该环境的数据文件夹，包括浏览器缓存、Cookie、已安装插件、书签等；未勾选则保留这些文件，后续仍可手动备份或清理。
               </span>
             </span>
           </label>
@@ -1522,7 +1522,7 @@ export function BrowserListPage() {
         }>
         <div className="space-y-4">
           <div className="text-sm text-[var(--color-text-secondary)]">
-            已选择 <span className="font-semibold text-[var(--color-accent)]">{selectedIds.size}</span> 个实例。导入后会写入这些实例的启动参数，实例需要重启后扩展才会加载。
+            已选择 <span className="font-semibold text-[var(--color-accent)]">{selectedIds.size}</span> 个环境。导入后会写入这些环境的启动参数，环境需要重启后扩展才会加载。
           </div>
           <FormItem label="扩展程序下载地址" hint="支持 Chrome Web Store 详情页、32 位扩展 ID、直接 .crx/.zip 下载地址">
             <Textarea
@@ -1657,11 +1657,11 @@ export function BrowserListPage() {
         />
       )}
 
-      {/* 复制实例弹窗 */}
+      {/* 复制环境弹窗 */}
       <Modal
         open={copyModal.open}
         onClose={closeCopyModal}
-        title="复制实例"
+        title="复制环境"
         width="420px"
         footer={
           <>
@@ -1672,13 +1672,13 @@ export function BrowserListPage() {
       >
         <div className="space-y-4">
           <p className="text-sm text-[var(--color-text-muted)]">
-            复制实例将保留原有的代理、内核、启动参数、标签等配置，但会生成新的指纹种子。
+            复制环境将保留原有的代理、内核、启动参数、标签等配置，但会生成新的指纹种子。
           </p>
-          <FormItem label="新实例名称" required>
+          <FormItem label="新环境名称" required>
             <Input
               value={copyName}
               onChange={e => setCopyName(e.target.value)}
-              placeholder="请输入新实例名称"
+              placeholder="请输入新环境名称"
               autoFocus
             />
           </FormItem>

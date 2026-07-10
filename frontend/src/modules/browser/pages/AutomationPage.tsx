@@ -260,7 +260,7 @@ export function AutomationPage() {
       {activeTab === 'profiles' && (
         <div className="space-y-5">
           <Card
-            title="仅创建实例配置"
+            title="仅创建环境"
             subtitle="POST /api/profiles"
             actions={<CopyCodeButton text={sampleCreateRequest} />}
           >

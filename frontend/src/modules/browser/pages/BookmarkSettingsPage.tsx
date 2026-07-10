@@ -68,7 +68,7 @@ export function BookmarkSettingsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-[var(--color-text-primary)]">默认书签</h1>
-          <p className="text-sm text-[var(--color-text-muted)] mt-1">新建实例首次启动时自动写入书签栏，已有书签不受影响</p>
+          <p className="text-sm text-[var(--color-text-muted)] mt-1">新建环境首次启动时自动写入书签栏，已有书签不受影响</p>
         </div>
         <div className="flex gap-2">
           <Button variant="secondary" size="sm" onClick={() => setResetOpen(true)}>

@@ -115,14 +115,17 @@ func patchChromePreferencesFile(path string) error {
 	}
 
 	sessionPrefs := ensureJSONMap(prefs, "session")
-	// 5 = New Tab Page. This disables "Continue where you left off" for this
-	// managed profile so extension onboarding/options tabs are not resurrected.
-	if sessionPrefs["restore_on_startup"] != float64(5) {
-		sessionPrefs["restore_on_startup"] = 5
+	// 4 = open configured URLs. Use about:blank explicitly instead of Chrome's
+	// New Tab Page (5), because Google Chrome/Cloak can turn NTP/session restore
+	// into google.com/sorry or other large white startup pages that cover the
+	// environment list/user workspace.
+	if sessionPrefs["restore_on_startup"] != float64(4) {
+		sessionPrefs["restore_on_startup"] = 4
 		changed = true
 	}
-	if _, ok := sessionPrefs["startup_urls"]; ok {
-		delete(sessionPrefs, "startup_urls")
+	startupURLs, ok := sessionPrefs["startup_urls"].([]any)
+	if !ok || len(startupURLs) != 1 || startupURLs[0] != "about:blank" {
+		sessionPrefs["startup_urls"] = []any{"about:blank"}
 		changed = true
 	}
 
@@ -153,7 +156,7 @@ func patchChromePreferencesFile(path string) error {
 // ensureDefaultSearchProvider 已废弃。改用 seedDefaultSearchEngine
 // （chrome_search_engine_seed.go）—— 那条路径会同时写 Web Data 和
 // Preferences 的 mirrored_template_url_data，与 cloak 内核 UI 操作
-//一致。保留空实现避免历史调用方编译失败。
+// 一致。保留空实现避免历史调用方编译失败。
 func ensureDefaultSearchProvider(prefs map[string]any) bool {
 	return false
 }

@@ -36,11 +36,12 @@ func TestPatchChromePreferencesFileDisablesSessionRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := out["session"].(map[string]any)
-	if got := session["restore_on_startup"]; got != float64(5) {
-		t.Fatalf("restore_on_startup=%v, want 5", got)
+	if got := session["restore_on_startup"]; got != float64(4) {
+		t.Fatalf("restore_on_startup=%v, want 4", got)
 	}
-	if _, ok := session["startup_urls"]; ok {
-		t.Fatalf("startup_urls should be removed")
+	startupURLs, ok := session["startup_urls"].([]any)
+	if !ok || len(startupURLs) != 1 || startupURLs[0] != "about:blank" {
+		t.Fatalf("startup_urls=%#v, want [about:blank]", session["startup_urls"])
 	}
 	profile := out["profile"].(map[string]any)
 	if profile["exited_cleanly"] != true || profile["exit_type"] != "Normal" {
