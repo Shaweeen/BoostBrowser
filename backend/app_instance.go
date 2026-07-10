@@ -461,8 +461,8 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		}
 
 		// chromium-web-store helper 注入：cloak/ungoogled-chromium 默认禁用了
-		// CWS inline install（"添加至 Chrome"按钮变成下载 .crx）。NeverDecaf 写的
-		// chromium-web-store helper 扩展能恢复这个能力。
+		// CWS inline install（"添加至 Chrome"按钮变成下载 .crx）。内置 helper
+		// 扩展用于恢复这一安装链路。
 		//
 		// 之前 v1.1.0 把 helper 路径硬编码成开发机 Z:\BoostBrowser_cloak_test\... ，
 		// 一旦用户那边路径不存在 → helper 加载失败 → Web Store 装扩展直接报
