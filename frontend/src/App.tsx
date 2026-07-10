@@ -22,7 +22,6 @@ function lazyNamed<TModule extends Record<string, ComponentType<any>>>(
   })
 }
 
-const DashboardPage = lazyNamed(() => import('./modules/dashboard/DashboardPage'), 'DashboardPage')
 const SettingsPage = lazyNamed(() => import('./modules/settings/SettingsPage'), 'SettingsPage')
 const ProfilePage = lazyNamed(() => import('./modules/profile/ProfilePage'), 'ProfilePage')
 
@@ -474,7 +473,7 @@ function App() {
                 </>
               ) : (
                 <>
-                  <Route path="/" element={<DashboardPage />} />
+                  <Route path="/" element={<Navigate to="/browser/list" replace />} />
                   <Route path="/charts" element={<ChartsPage />} />
                   <Route path="/settings" element={<SettingsPage />} />
                   <Route path="/profile" element={<ProfilePage />} />

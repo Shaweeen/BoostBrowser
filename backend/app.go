@@ -169,15 +169,9 @@ func (a *App) startup(ctx context.Context) {
 	}
 
 	if !a.panelMode {
-		// 部署内置 chromium-web-store helper 扩展到 <appRoot>/extensions/。
-		// cloak 内核启动时会自动按 appRoot 拼路径注入到 --load-extension。
-		// 失败不阻塞启动，只是该 cloak 实例在 Web Store 装扩展时会回到下载 .crx 的状态。
-		if extPath, err := ensureEmbeddedCloakExtensions(a.appRoot); err != nil {
-			log.Warn("部署内置扩展失败（不影响启动）", logger.F("error", err.Error()))
-		} else {
-			log.Info("内置扩展已就位", logger.F("path", extPath))
-		}
-
+		// Self-use clean build: do not deploy the bundled chromium-web-store helper
+		// extension by default. Users can still import/install their own extensions
+		// manually; no default/search helper extension should appear on startup.
 		a.ensureDefaultCores()
 	} else {
 		log.Info("同步面板子进程启动：跳过主窗口扩展部署与默认内核维护")
@@ -258,13 +252,7 @@ func (a *App) startup(ctx context.Context) {
 				logger.F("url", fmt.Sprintf("http://127.0.0.1:%d", a.launchServer.Port())),
 				logger.F("preferred_port", port),
 			)
-			// 把 LaunchServer 端口写到 helper 扩展目录里，让 chromium-web-store
-			// helper 能通过 boost_endpoint.json 找到本地 install endpoint。
-			// 必须在 LaunchServer 起来之后写，因为端口可能是随机分配的。
 			a.launchServer.SetExtensionInstaller(a)
-			if err := writeHelperBoostEndpoint(a.appRoot, a.launchServer.Port(), a.launchServer.APIAuthHeader(), a.launchServer.APIAuthKey()); err != nil {
-				log.Warn("写入 helper boost_endpoint.json 失败（不影响启动）", logger.F("error", err.Error()))
-			}
 		}
 	} else {
 		log.Info("同步面板子进程启动：跳过 LaunchServer / LaunchCode 常驻服务")
@@ -1471,23 +1459,14 @@ func (a *App) migrateToSQLite() {
 		}
 	}
 
-	// 迁移/初始化书签
+	// 迁移/初始化书签：clean self-use builds do not seed promotional/default bookmarks.
 	if bookmarks, err := a.browserMgr.BookmarkDAO.List(); err == nil && len(bookmarks) == 0 {
-		src := a.config.Browser.DefaultBookmarks
-		if len(src) == 0 {
-			// 初始化默认书签
-			src = []config.BrowserBookmark{
-				{Name: "Google", URL: "https://www.google.com/"},
-				{Name: "Gmail", URL: "https://mail.google.com/"},
-				{Name: "Claude", URL: "https://claude.ai/"},
-				{Name: "ChatGPT", URL: "https://chatgpt.com/"},
-				{Name: "YouTube", URL: "https://www.youtube.com/"},
+		if len(a.config.Browser.DefaultBookmarks) > 0 {
+			if err := a.browserMgr.BookmarkDAO.ReplaceAll(filterKnownDefaultBookmarks(a.config.Browser.DefaultBookmarks)); err != nil {
+				log.Error("书签迁移失败", logger.F("error", err))
 			}
-		}
-		if err := a.browserMgr.BookmarkDAO.ReplaceAll(src); err != nil {
-			log.Error("书签迁移失败", logger.F("error", err))
 		} else {
-			log.Info("书签数据已迁移", logger.F("count", len(src)))
+			log.Info("默认书签为空，跳过书签初始化")
 		}
 	}
 }

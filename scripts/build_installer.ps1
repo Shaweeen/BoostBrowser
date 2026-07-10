@@ -97,8 +97,8 @@ $AssetRoot = if ($env:BOOST_KERNEL_SRC) { $env:BOOST_KERNEL_SRC } else { $RepoRo
 $CloakKernelSrc = "$AssetRoot\chrome\cloak-146.0.7680.177"
 $GoogleKernelSrc = "$AssetRoot\chrome\google-148.0.7778.167"
 $BinSrc = "$AssetRoot\bin"
-$ExtensionSrc = "$AssetRoot\extensions\chromium-web-store"
-if (-not (Test-Path -LiteralPath $ExtensionSrc)) { $ExtensionSrc = "$RepoRoot\backend\embedded_extensions\chromium-web-store" }
+# Optional helper extension is intentionally not staged for the self-use clean
+# build. Users requested no default/search helper extension in packaged installs.
 $ConfigSrc = "$RepoRoot\config.yaml"
 $AppIconSrc = if (Test-Path -LiteralPath "$AssetRoot\app.ico") { "$AssetRoot\app.ico" } else { "$RepoRoot\build\windows\icon.ico" }
 $AppPngSrc = if (Test-Path -LiteralPath "$AssetRoot\app.png") { "$AssetRoot\app.png" } else { "$RepoRoot\build\appicon.png" }
@@ -121,10 +121,7 @@ if (Test-Path -LiteralPath $ConfigSrc) { Copy-Item -LiteralPath $ConfigSrc -Dest
 if (Test-Path -LiteralPath $AppIconSrc) { Copy-Item -LiteralPath $AppIconSrc -Destination $Stage -Force }
 if (Test-Path -LiteralPath $AppPngSrc) { Copy-Item -LiteralPath $AppPngSrc -Destination $Stage -Force }
 if (Test-Path -LiteralPath $BinSrc) { Copy-Dir $BinSrc "$Stage\bin" }
-if (Test-Path -LiteralPath $ExtensionSrc) {
-    New-Item -ItemType Directory -Force -Path "$Stage\extensions" | Out-Null
-    Copy-Dir $ExtensionSrc "$Stage\extensions\chromium-web-store"
-}
+# Helper extension is intentionally not bundled in the clean self-use package.
 
 New-Item -ItemType Directory -Force -Path "$Stage\chrome" | Out-Null
 Copy-Dir $CloakKernelSrc "$Stage\chrome\cloak-146.0.7680.177"

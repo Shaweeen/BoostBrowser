@@ -5,17 +5,14 @@ import (
 	"testing"
 )
 
-func TestBuildLaunchArgsAppendsDefaultVerificationURLs(t *testing.T) {
+func TestBuildLaunchArgsKeepsStartupBlankByDefault(t *testing.T) {
 	t.Parallel()
 
 	baseArgs := []string{"--disable-sync"}
 	got := BuildLaunchArgs(append([]string{}, baseArgs...), &Profile{})
-	want := []string{
-		"--disable-sync",
-		"https://ippure.com/",
-	}
+	want := []string{"--disable-sync"}
 
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("BuildLaunchArgs 结果错误:\n got=%v\nwant=%v", got, want)
+		t.Fatalf("BuildLaunchArgs result mismatch:\n got=%v\nwant=%v", got, want)
 	}
 }

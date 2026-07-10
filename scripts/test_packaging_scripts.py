@@ -68,12 +68,10 @@ class PackagingScriptsTest(unittest.TestCase):
         ]:
             self.assertIn(symbol, text)
 
-    def test_stage_assets_allows_optional_google_and_extensions(self):
-        text = self.read("scripts/stage_assets.ps1")
-        self.assertIn("required", text.lower())
-        self.assertIn("optional", text.lower())
-        self.assertIn("backend\\embedded_extensions\\chromium-web-store", text)
-        self.assertIn("if (-not (Test-Path $src))", text)
+    def test_stage_assets_keeps_helper_extension_out_of_clean_package(self):
+        installer = self.read("scripts/build_installer.ps1")
+        self.assertIn("Helper extension is intentionally not bundled", installer)
+        self.assertNotIn("embedded_extensions\\chromium-web-store", installer)
 
     def test_one_click_windows_build_orchestrates_standard_flow(self):
         text = self.read("scripts/build_windows_selfuse.ps1")

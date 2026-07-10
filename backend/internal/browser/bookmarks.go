@@ -19,7 +19,7 @@ func toChromiumTime(t time.Time) string {
 // EnsureDefaultBookmarks 将默认书签合并到书签栏（已存在的 URL 不重复添加）
 func EnsureDefaultBookmarks(userDataDir string, bookmarks []config.BrowserBookmark) error {
 	if len(bookmarks) == 0 {
-		return nil
+		return RemoveKnownDefaultBookmarks(userDataDir)
 	}
 
 	profileDir := filepath.Join(userDataDir, "Default")
@@ -79,6 +79,72 @@ func EnsureDefaultBookmarks(userDataDir string, bookmarks []config.BrowserBookma
 		return fmt.Errorf("序列化书签失败: %w", err)
 	}
 	return os.WriteFile(bookmarksPath, out, 0644)
+}
+
+// RemoveKnownDefaultBookmarks deletes the old seeded promotional/default
+// bookmarks from existing profiles while preserving user-created bookmarks.
+func RemoveKnownDefaultBookmarks(userDataDir string) error {
+	bookmarksPath := filepath.Join(userDataDir, "Default", "Bookmarks")
+	data, err := os.ReadFile(bookmarksPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var root map[string]interface{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		return nil
+	}
+	removed := removeKnownDefaultBookmarkNodes(root)
+	if !removed {
+		return nil
+	}
+	out, err := json.MarshalIndent(root, "", "   ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(bookmarksPath, out, 0644)
+}
+
+func removeKnownDefaultBookmarkNodes(root map[string]interface{}) bool {
+	roots, ok := root["roots"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	bar, ok := roots["bookmark_bar"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	children, ok := bar["children"].([]interface{})
+	if !ok {
+		return false
+	}
+	known := map[string]bool{
+		"https://www.google.com/":  true,
+		"https://mail.google.com/": true,
+		"https://claude.ai/":       true,
+		"https://chatgpt.com/":     true,
+		"https://www.youtube.com/": true,
+	}
+	filtered := children[:0]
+	removed := false
+	for _, child := range children {
+		node, ok := child.(map[string]interface{})
+		if ok && node["type"] == "url" {
+			if url, _ := node["url"].(string); known[url] {
+				removed = true
+				continue
+			}
+		}
+		filtered = append(filtered, child)
+	}
+	if removed {
+		bar["children"] = filtered
+		roots["bookmark_bar"] = bar
+		root["roots"] = roots
+	}
+	return removed
 }
 
 // newEmptyBookmarkRoot 构建一个空的书签根结构

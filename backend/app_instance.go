@@ -460,55 +460,9 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			)
 		}
 
-		// chromium-web-store helper 注入：cloak/ungoogled-chromium 默认禁用了
-		// CWS inline install（"添加至 Chrome"按钮变成下载 .crx）。内置 helper
-		// 扩展用于恢复这一安装链路。
-		//
-		// 之前 v1.1.0 把 helper 路径硬编码成开发机 Z:\BoostBrowser_cloak_test\... ，
-		// 一旦用户那边路径不存在 → helper 加载失败 → Web Store 装扩展直接报
-		// "无法从该网站添加应用、扩展程序"。
-		//
-		// 修复：startup 已经把 helper 解压到 <appRoot>/extensions/chromium-web-store，
-		// 这里把所有 --load-extension= 里的旧 helper 路径替换成规范路径，再 dedupe。
-		canonicalHelper := cloakWebStoreHelperPath(a.appRoot)
-		if canonicalHelper != "" {
-			cleaned := args[:0]
-			helperReplaced := false
-			for _, arg := range args {
-				trimmed := strings.TrimSpace(arg)
-				if strings.HasPrefix(trimmed, "--load-extension=") {
-					value := strings.TrimPrefix(trimmed, "--load-extension=")
-					kept := []string{}
-					for _, part := range strings.Split(value, ",") {
-						p := strings.TrimSpace(part)
-						if p == "" {
-							continue
-						}
-						if looksLikeStaleCloakExtensionPath(p, a.appRoot) {
-							helperReplaced = true
-							continue
-						}
-						kept = append(kept, p)
-					}
-					if len(kept) > 0 {
-						cleaned = append(cleaned, "--load-extension="+strings.Join(kept, ","))
-					}
-					continue
-				}
-				cleaned = append(cleaned, arg)
-			}
-			args = cleaned
-			// 始终把规范 helper 路径加进去（normalizeLoadExtensionArgs 后续会 dedupe）
-			if _, err := os.Stat(canonicalHelper); err == nil {
-				args = append(args, "--load-extension="+canonicalHelper)
-				if helperReplaced {
-					log.Info("已用内置规范路径替换旧的 chromium-web-store 扩展路径",
-						logger.F("profile_id", profileId),
-						logger.F("helper", canonicalHelper),
-					)
-				}
-			}
-		}
+		// Do not inject the bundled chromium-web-store helper extension in self-use
+		// builds. User requested a clean browser with no default/search helper
+		// extensions visible in chrome://extensions or toolbar.
 	}
 
 	args = normalizeLoadExtensionArgs(args)
@@ -521,6 +475,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	// 这解决了 Chrome Web Store 首次请求时 Sec-CH-UA 仍为 "Chromium" 导致
 	// 显示「切换到 Chrome」横幅的问题。
 	targetURLs := buildTargetURLs(profile, normalizedStartURLs, skipDefaultStartURLs)
+	args = append(args, "about:blank")
 
 	cmd := exec.Command(chromeBinaryPath, args...)
 	cmd.Dir = filepath.Dir(chromeBinaryPath)
@@ -1156,17 +1111,12 @@ func appendLaunchTargets(args []string, profile *BrowserProfile, startURLs []str
 	return args
 }
 
-// buildTargetURLs 收集浏览器启动后需要导航到的目标 URL 列表。
-// 优先级：本次显式传入 startURLs > 上次保存的普通网页标签页 > 默认验证页。
+// buildTargetURLs returns only URLs explicitly requested for this launch.
+// We intentionally do not restore last tabs or open verification/ad pages by
+// default; new instances should start from a clean blank page.
 func buildTargetURLs(profile *BrowserProfile, startURLs []string, skipDefaultStartURLs bool) []string {
 	if len(startURLs) > 0 {
 		return startURLs
-	}
-	if !skipDefaultStartURLs {
-		if profile != nil && len(profile.LastTabs) > 0 {
-			return append([]string{}, profile.LastTabs...)
-		}
-		return browser.GetDefaultVerificationURLs()
 	}
 	return nil
 }

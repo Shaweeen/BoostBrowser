@@ -1,8 +1,8 @@
 package browser
 
-var defaultVerificationURLs = []string{
-	"https://ippure.com/",
-}
+// No default verification/ad/start URLs. New browser instances start on a
+// blank page unless the caller explicitly passes startURLs.
+var defaultVerificationURLs = []string{}
 
 // BuildLaunchArgs 构建启动参数
 func BuildLaunchArgs(args []string, profile *Profile) []string {

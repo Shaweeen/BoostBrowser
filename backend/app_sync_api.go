@@ -46,9 +46,10 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 	result := make([]SyncProfileInfo, 0, len(profiles))
 
 	for _, p := range profiles {
-		// 只返回运行中的实例，未启动的不展示；
-		// 对暂时没恢复出 PID/窗口的运行实例，仍返回 no_window 让前端能显示问题状态。
-		if !p.Running {
+		// Return any profile that has a live runtime handle. Older builds could leave
+		// Running=false after app restart while the browser window was still open;
+		// sync panel must still surface those windows after reconciliation.
+		if !p.Running && p.Pid <= 0 && p.DebugPort <= 0 {
 			continue
 		}
 

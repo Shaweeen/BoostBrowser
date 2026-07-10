@@ -7,26 +7,41 @@ import (
 
 type BrowserBookmark = config.BrowserBookmark
 
-var defaultBookmarkList = []BrowserBookmark{
-	{Name: "Google", URL: "https://www.google.com/"},
-	{Name: "Gmail", URL: "https://mail.google.com/"},
-	{Name: "Claude", URL: "https://claude.ai/"},
-	{Name: "ChatGPT", URL: "https://chatgpt.com/"},
-	{Name: "YouTube", URL: "https://www.youtube.com/"},
-}
+// defaultBookmarkList is intentionally empty: packaged self-use builds must not
+// seed Google/Gmail/Claude/ChatGPT/YouTube or any other advertisement/bookmark
+// into new browser profiles.
+var defaultBookmarkList = []BrowserBookmark{}
 
 // BookmarkList 获取默认书签列表（优先 SQLite，降级 config.yaml）
 func (a *App) BookmarkList() []BrowserBookmark {
 	if a.browserMgr.BookmarkDAO != nil {
 		list, err := a.browserMgr.BookmarkDAO.List()
 		if err == nil && len(list) > 0 {
-			return list
+			return filterKnownDefaultBookmarks(list)
 		}
 	}
 	if len(a.config.Browser.DefaultBookmarks) > 0 {
 		return append([]BrowserBookmark{}, a.config.Browser.DefaultBookmarks...)
 	}
 	return append([]BrowserBookmark{}, defaultBookmarkList...)
+}
+
+func filterKnownDefaultBookmarks(items []BrowserBookmark) []BrowserBookmark {
+	known := map[string]bool{
+		"https://www.google.com/":  true,
+		"https://mail.google.com/": true,
+		"https://claude.ai/":       true,
+		"https://chatgpt.com/":     true,
+		"https://www.youtube.com/": true,
+	}
+	out := make([]BrowserBookmark, 0, len(items))
+	for _, item := range items {
+		if known[item.URL] {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 // BookmarkSave 保存默认书签列表（优先 SQLite，降级 config.yaml）
