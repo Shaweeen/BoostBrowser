@@ -440,7 +440,7 @@ func DefaultConfig() *Config {
 		LaunchServer: LaunchServerConfig{
 			Port: DefaultLaunchServerPort,
 			Auth: LaunchServerAuthConfig{
-				Enabled: false,
+				Enabled: true,
 				APIKey:  "",
 				Header:  DefaultLaunchServerAPIKeyHeader,
 			},

@@ -9,6 +9,8 @@ import (
 	"boost-browser/backend/internal/logger"
 	"boost-browser/backend/internal/proxy"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -97,6 +99,18 @@ func (a *App) appVersion() string {
 	return version
 }
 
+func (a *App) ensureLaunchServerAPIKey(cfg *config.Config) {
+	if cfg == nil || !cfg.LaunchServer.Auth.Enabled || strings.TrimSpace(cfg.LaunchServer.Auth.APIKey) != "" {
+		return
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return
+	}
+	cfg.LaunchServer.Auth.APIKey = hex.EncodeToString(buf)
+	_ = cfg.Save(a.resolveAppPath("config.yaml"))
+}
+
 // startup 应用启动时调用
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
@@ -113,6 +127,7 @@ func (a *App) startup(ctx context.Context) {
 	if err != nil {
 		cfg = config.DefaultConfig()
 	}
+	a.ensureLaunchServerAPIKey(cfg)
 	a.config = cfg
 	a.applyRuntimeConfig(cfg.Runtime)
 
@@ -301,6 +316,7 @@ func (a *App) ReloadConfig() error {
 		return fmt.Errorf("重载配置文件失败: %w", err)
 	}
 
+	a.ensureLaunchServerAPIKey(cfg)
 	a.config = cfg
 	a.applyRuntimeConfig(cfg.Runtime)
 	// Update browser manager config reference
