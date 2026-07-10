@@ -51,6 +51,16 @@ class PackagingScriptsTest(unittest.TestCase):
         ]:
             self.assertIn(symbol, text)
 
+    def test_main_runtime_helpers_restore_clean_checkout_build_symbols(self):
+        text = self.read("main_runtime_helpers.go")
+        for symbol in [
+            "var syncPanelMode",
+            "func hasCLIArg",
+            "func takeoverExistingMainInstanceForPostUpdate",
+            "func restoreNativeMainWindowBounds",
+        ]:
+            self.assertIn(symbol, text)
+
     def test_stage_assets_allows_optional_google_and_extensions(self):
         text = self.read("scripts/stage_assets.ps1")
         self.assertIn("required", text.lower())
