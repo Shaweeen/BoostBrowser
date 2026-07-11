@@ -60,17 +60,7 @@ const PANEL_COMPACT_STATUS_COLLAPSED_SIZE = { width: 448, height: 120, minWidth:
 const PANEL_COMPACT_FUNCTION_SIZE = { width: 520, height: 120, minWidth: 520, minHeight: 120 }
 const PANEL_TOP_MARGIN_PX = 8
 const PANEL_COMPACT_EDGE_PADDING_PX = 0
-const SYNC_SELECTED_STORAGE_KEY = 'browserstudio.sync.selected-profile-ids'
-const SYNC_MASTER_STORAGE_KEY = 'browserstudio.sync.master-profile-id'
-
-function loadStoredSelectedIds(): Set<string> {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(SYNC_SELECTED_STORAGE_KEY) || '[]')
-    return new Set(Array.isArray(parsed) ? parsed.filter(item => typeof item === 'string') : [])
-  } catch {
-    return new Set()
-  }
-}
+const PANEL_MINI_SIZE = { width: 176, height: 56, minWidth: 176, minHeight: 56 }
 
 export function WindowSyncPage() {
   const compactPanelRef = useRef<HTMLDivElement | null>(null)
@@ -80,9 +70,8 @@ export function WindowSyncPage() {
   const [panelPresentation, setPanelPresentation] = useState<'minimized' | 'compact' | 'full'>('full')
   const [showSyncControls, setShowSyncControls] = useState(false)
   const [profiles, setProfiles] = useState<SyncProfileInfo[]>([])
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(loadStoredSelectedIds)
-  const selectedIdsRef = useRef(selectedIds)
-  const [masterId, setMasterId] = useState<string | null>(() => localStorage.getItem(SYNC_MASTER_STORAGE_KEY) || null)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
+  const [masterId, setMasterId] = useState<string | null>(null)
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
   const [starting, setStarting] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
@@ -138,13 +127,7 @@ export function WindowSyncPage() {
         })
         return next
       })
-      setMasterId(prev => {
-        if (prev && runningIds.has(prev)) return prev
-        // A stopped profile named "default" is not a valid controller. Recover
-        // to a real browser window so reopening the assistant is immediately usable.
-        const firstSelectedRunning = sorted.find(item => runningIds.has(item.profileId) && selectedIdsRef.current.has(item.profileId))
-        return firstSelectedRunning?.profileId || sorted.find(item => item.status === 'running')?.profileId || null
-      })
+      setMasterId(prev => (prev && runningIds.has(prev) ? prev : null))
     } finally {
       if (!silent) {
         pendingManualRefreshes.current = Math.max(0, pendingManualRefreshes.current - 1)
@@ -154,16 +137,6 @@ export function WindowSyncPage() {
       }
     }
   }, [])
-
-  useEffect(() => {
-    selectedIdsRef.current = selectedIds
-    localStorage.setItem(SYNC_SELECTED_STORAGE_KEY, JSON.stringify(Array.from(selectedIds)))
-  }, [selectedIds])
-
-  useEffect(() => {
-    if (masterId) localStorage.setItem(SYNC_MASTER_STORAGE_KEY, masterId)
-    else localStorage.removeItem(SYNC_MASTER_STORAGE_KEY)
-  }, [masterId])
 
   useEffect(() => {
     let cancelled = false
@@ -317,7 +290,7 @@ export function WindowSyncPage() {
       const target = compactSyncStatusMode
           ? (syncControlsVisible ? PANEL_COMPACT_STATUS_SIZE : PANEL_COMPACT_STATUS_COLLAPSED_SIZE)
           : minimizedPanelMode
-            ? { width: 64, height: 64, minWidth: 64, minHeight: 64 }
+            ? PANEL_MINI_SIZE
           : compactFunctionPanelMode
             ? PANEL_COMPACT_FUNCTION_SIZE
             : PANEL_EXPANDED_SIZE
@@ -562,19 +535,25 @@ export function WindowSyncPage() {
 
   if (minimizedPanelMode) {
     return (
-      <div className="relative h-16 w-16 overflow-hidden rounded-[20px] border border-white/45 bg-[linear-gradient(145deg,rgba(24,39,70,.94),rgba(48,79,145,.88))] shadow-[0_14px_34px_rgba(15,23,42,.32)] backdrop-blur-xl" style={{ ['--wails-draggable' as any]: 'drag' }}>
+      <div className="relative flex h-14 w-44 items-center overflow-hidden rounded-[18px] border border-white/35 bg-[linear-gradient(135deg,rgba(15,23,42,.96),rgba(42,67,122,.94))] px-2.5 shadow-[0_12px_30px_rgba(15,23,42,.30)] backdrop-blur-xl" style={{ ['--wails-draggable' as any]: 'drag' }}>
         <button
           type="button"
-          className="flex h-full w-full flex-col items-center justify-center text-white"
+          className="flex h-10 w-full items-center gap-2.5 rounded-[13px] px-1.5 text-left text-white transition hover:bg-white/10"
           onClick={() => setPanelPresentation('compact')}
           title="展开窗口同步助手"
           aria-label="展开窗口同步助手"
           style={{ ['--wails-draggable' as any]: 'no-drag' }}
         >
-          <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-white/15 text-[17px] font-black tracking-tight shadow-inner">B</span>
-          <span className="mt-1 text-[9px] font-semibold tracking-[.12em] text-white/80">SYNC</span>
+          <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-[12px] bg-white/14 text-[17px] font-black shadow-inner">
+            B
+            <span className={`absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#263b69] ${isSyncing ? 'bg-[#4ade80]' : 'bg-[#fbbf24]'}`} />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-[12px] font-semibold leading-4">同步助手</span>
+            <span className="block truncate text-[9px] leading-3 text-white/60">{isSyncing ? `${activeSyncCount} 个环境运行中` : '点击展开控制台'}</span>
+          </span>
+          <ChevronDown className="h-4 w-4 shrink-0 -rotate-90 text-white/65" />
         </button>
-        <span className={`pointer-events-none absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full border-2 border-[#243b6b] ${isSyncing ? 'bg-[#4ade80]' : 'bg-[#fbbf24]'}`} />
       </div>
     )
   }

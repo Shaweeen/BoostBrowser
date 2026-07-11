@@ -119,8 +119,13 @@ func (a *App) reconcileBrowserRuntimeStateOnce() {
 		userDataKey := normalizeRuntimePathKey(a.browserMgr.ResolveUserDataDir(profile))
 		proc, exists := pickRuntimeProcessForSync(byUserDataDir[userDataKey])
 		if profile.Running && isBrowserProfileLive(profile, a.browserMgr.BrowserProcesses[profileId]) {
+			// Chrome may hand the visible top-level frame to a sibling process that
+			// shares the same user-data-dir. A live launcher PID is therefore not
+			// enough: keep it only while it still resolves to a real browser frame.
 			if profile.Pid > 0 {
-				continue
+				if _, windowErr := findProcessTreeWindow(profile.Pid); windowErr == nil {
+					continue
+				}
 			}
 			if !exists {
 				continue
