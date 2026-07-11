@@ -66,6 +66,7 @@ export function WindowSyncPage() {
   const compactPanelRef = useRef<HTMLDivElement | null>(null)
   const compactPanelLeaveTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
   const syncPanelWindowBootstrappedRef = useRef(false)
+  const autoCollapseTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
   const [syncPanelMode, setSyncPanelMode] = useState(false)
   const [panelPresentation, setPanelPresentation] = useState<'minimized' | 'compact' | 'full'>('full')
   const [showSyncControls, setShowSyncControls] = useState(false)
@@ -301,12 +302,14 @@ export function WindowSyncPage() {
       WindowSetAlwaysOnTop(shouldPinTop)
       WindowSetMinSize(target.minWidth, target.minHeight)
       WindowSetSize(target.width, target.height)
-      if (!syncPanelWindowBootstrappedRef.current) {
+      const isFirstShow = !syncPanelWindowBootstrappedRef.current
+      if (isFirstShow) {
         WindowShow()
         WindowUnminimise()
         syncPanelWindowBootstrappedRef.current = true
       }
-      if (shouldPinTop) {
+      // Preserve the user's dragged screen position when compacting/restoring.
+      if (shouldPinTop && isFirstShow) {
         try {
           const screens = await ScreenGetAll()
           const current = screens.find(screen => screen.isCurrent) || screens.find(screen => screen.isPrimary) || screens[0]
@@ -329,6 +332,30 @@ export function WindowSyncPage() {
     }, compactSyncStatusMode ? 40 : 0)
     return () => window.clearTimeout(timer)
   }, [compactFunctionPanelMode, compactSyncStatusMode, minimizedPanelMode, syncControlsVisible, syncPanelMode])
+
+  useEffect(() => {
+    if (!syncPanelMode || minimizedPanelMode) {
+      if (autoCollapseTimerRef.current) window.clearTimeout(autoCollapseTimerRef.current)
+      autoCollapseTimerRef.current = null
+      return
+    }
+    const resetAutoCollapse = () => {
+      if (autoCollapseTimerRef.current) window.clearTimeout(autoCollapseTimerRef.current)
+      autoCollapseTimerRef.current = window.setTimeout(() => {
+        setShowSyncControls(false)
+        setToolbarMenu(null)
+        setPanelPresentation('minimized')
+      }, 3000)
+    }
+    const events: Array<keyof WindowEventMap> = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'input']
+    events.forEach(event => window.addEventListener(event, resetAutoCollapse, { passive: true }))
+    resetAutoCollapse()
+    return () => {
+      if (autoCollapseTimerRef.current) window.clearTimeout(autoCollapseTimerRef.current)
+      autoCollapseTimerRef.current = null
+      events.forEach(event => window.removeEventListener(event, resetAutoCollapse))
+    }
+  }, [minimizedPanelMode, syncPanelMode])
 
   useEffect(() => {
     const compactClass = 'sync-panel-compact'
@@ -536,24 +563,26 @@ export function WindowSyncPage() {
 
   if (minimizedPanelMode) {
     return (
-      <div className="relative flex h-14 w-44 items-center overflow-hidden bg-[linear-gradient(135deg,#0f172a,#2a437a)] px-2.5 shadow-[0_8px_22px_rgba(15,23,42,.28)]" style={{ ['--wails-draggable' as any]: 'drag' }}>
+      <div className="relative flex h-14 w-44 items-center overflow-hidden border border-[#d8e1ef] bg-[#f7f9fc] px-2 shadow-[0_10px_28px_rgba(30,58,110,.20)]">
+        <div className="flex h-10 w-11 shrink-0 cursor-move items-center justify-center" title="拖动同步工具" style={{ ['--wails-draggable' as any]: 'drag' }}>
+          <span className="relative flex h-9 w-9 items-center justify-center rounded-[11px] bg-[#17263d] text-[16px] font-black text-white">
+            B
+            <span className={`absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#f7f9fc] ${isSyncing ? 'bg-[#22c55e]' : 'bg-[#f59e0b]'}`} />
+          </span>
+        </div>
         <button
           type="button"
-          className="flex h-10 w-full items-center gap-2.5 rounded-[13px] px-1.5 text-left text-white transition hover:bg-white/10"
+          className="ml-1 flex h-10 min-w-0 flex-1 items-center gap-2 rounded-[11px] px-2 text-left text-[#17263d] transition hover:bg-[#eaf0f8]"
           onClick={() => setPanelPresentation('compact')}
           title="展开窗口同步助手"
           aria-label="展开窗口同步助手"
           style={{ ['--wails-draggable' as any]: 'no-drag' }}
         >
-          <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-[12px] bg-white/14 text-[17px] font-black shadow-inner">
-            B
-            <span className={`absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#263b69] ${isSyncing ? 'bg-[#4ade80]' : 'bg-[#fbbf24]'}`} />
-          </span>
           <span className="min-w-0 flex-1">
-            <span className="block text-[12px] font-semibold leading-4">同步助手</span>
-            <span className="block truncate text-[9px] leading-3 text-white/60">{isSyncing ? `${activeSyncCount} 个环境运行中` : '点击展开控制台'}</span>
+            <span className="block text-[12px] font-semibold leading-4">同步工具</span>
+            <span className="block truncate text-[9px] leading-3 text-[#738199]">{isSyncing ? `${activeSyncCount} 个环境同步中` : '点击展开'}</span>
           </span>
-          <ChevronDown className="h-4 w-4 shrink-0 -rotate-90 text-white/65" />
+          <ChevronDown className="h-4 w-4 shrink-0 -rotate-90 text-[#607089]" />
         </button>
       </div>
     )
