@@ -436,6 +436,11 @@ func (a *App) setQuitMode(mode quitMode) {
 }
 
 func (a *App) shouldStopRuntimeServicesOnShutdown() bool {
+	// The sync tool never owns browser runtimes. Its exit must not mark shared
+	// live profiles as stopped in the database.
+	if a.panelMode {
+		return false
+	}
 	return a.quitMode != quitModeAppOnly
 }
 
