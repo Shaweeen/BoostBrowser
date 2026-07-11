@@ -85,6 +85,22 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("BOOST_KERNEL_SRC", text)
         self.assertIn("google-148.0.7778.167", text)
 
+    def test_public_manager_build_never_bundles_third_party_runtimes(self):
+        wrapper = self.read("scripts/build_windows_public.ps1")
+        installer = self.read("scripts/build_installer.ps1")
+        public_config = self.read("config.public.yaml")
+
+        self.assertIn("-ManagerOnly", wrapper)
+        self.assertIn("-SkipKernelInstall", wrapper)
+        self.assertIn("-SkipGoogleFallback", wrapper)
+        self.assertIn("if (-not $ManagerOnly -and (Test-Path -LiteralPath $BinSrc))", installer)
+        self.assertIn("if (-not $ManagerOnly) {", installer)
+        self.assertIn("BrowserStudio-Manager-Setup", installer)
+        self.assertRegex(public_config, r"(?m)^\s*cores:\s*\[\]\s*$")
+        self.assertRegex(public_config, r"(?m)^\s*proxies:\s*\[\]\s*$")
+        self.assertNotIn("cloak-146", public_config)
+        self.assertNotIn("google-148", public_config)
+
     def test_no_active_script_keeps_old_machine_specific_paths(self):
         for path in (ROOT / "scripts").rglob("*"):
             if not path.is_file() or path.name == "test_packaging_scripts.py":

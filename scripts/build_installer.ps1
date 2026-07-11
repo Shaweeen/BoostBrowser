@@ -1,6 +1,9 @@
 # build_installer.ps1
 # Build full self-use NSIS installer for BrowserStudio.
-# Produces build\release\BrowserStudio-Setup-vX.X.X.exe.
+# Produces a private full installer by default, or a redistributable manager
+# installer with -ManagerOnly.
+
+param([switch]$ManagerOnly)
 
 $ErrorActionPreference = 'Stop'
 
@@ -85,11 +88,15 @@ $ReleaseDir = "$RepoRoot\build\release"
 $BoostExe = "$ReleaseDir\boost-browser.exe"
 $UpdaterExe = "$ReleaseDir\updater.exe"
 $ActivationCheckExe = "$ReleaseDir\activation-check.exe"
-$Stage = 'C:\Temp\BrowserStudio_installer_staging'
+$Edition = if ($ManagerOnly) { 'Manager' } else { 'Private' }
+$ProductName = if ($ManagerOnly) { 'BrowserStudio Manager' } else { 'BrowserStudio' }
+$InstallDirName = if ($ManagerOnly) { 'BrowserStudio Manager' } else { 'BrowserStudio' }
+$UninstallKeyName = if ($ManagerOnly) { 'BrowserStudioManager' } else { 'BrowserStudio' }
+$Stage = "C:\Temp\BrowserStudio_${Edition}_installer_staging"
 $Publish = "$RepoRoot\publish\output"
 $NsiPath = "$RepoRoot\publish\boost-browser-installer.nsi"
 $NshPath = "$RepoRoot\publish\boost_nsis_files.nsh"
-$OutExe = "$ReleaseDir\BrowserStudio-Setup-v$Version.exe"
+$OutExe = if ($ManagerOnly) { "$ReleaseDir\BrowserStudio-Manager-Setup-v$Version.exe" } else { "$ReleaseDir\BrowserStudio-Private-Setup-v$Version.exe" }
 $Icon = "$RepoRoot\build\windows\icon.ico"
 $SidebarBmp = "$RepoRoot\publish\boost_sidebar.bmp"
 $HeaderBmp = "$RepoRoot\publish\boost_header.bmp"
@@ -100,13 +107,15 @@ $GoogleKernelSrc = "$AssetRoot\chrome\google-148.0.7778.167"
 $BinSrc = "$AssetRoot\bin"
 # Optional helper extension is intentionally not staged for the self-use clean
 # build. Users requested no default/search helper extension in packaged installs.
-$ConfigSrc = "$RepoRoot\config.yaml"
+$ConfigSrc = if ($ManagerOnly) { "$RepoRoot\config.public.yaml" } else { "$RepoRoot\config.yaml" }
 $AppIconSrc = if (Test-Path -LiteralPath "$AssetRoot\app.ico") { "$AssetRoot\app.ico" } else { "$RepoRoot\build\windows\icon.ico" }
 $AppPngSrc = if (Test-Path -LiteralPath "$AssetRoot\app.png") { "$AssetRoot\app.png" } else { "$RepoRoot\build\appicon.png" }
 Require-Path $BoostExe "Missing $BoostExe. Run scripts\build_release.ps1 first."
 Require-Path $UpdaterExe "Missing $UpdaterExe. Run scripts\build_release.ps1 first."
 Require-Path $ActivationCheckExe "Missing $ActivationCheckExe. Run scripts\build_release.ps1 first."
-Require-Path "$CloakKernelSrc\chrome.exe" "Missing CloakBrowser kernel: $CloakKernelSrc\chrome.exe"
+if (-not $ManagerOnly) {
+    Require-Path "$CloakKernelSrc\chrome.exe" "Missing CloakBrowser kernel: $CloakKernelSrc\chrome.exe"
+}
 Require-Path $Icon "Missing icon: $Icon"
 New-Item -ItemType Directory -Force -Path $Publish | Out-Null
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
@@ -121,15 +130,17 @@ Copy-Item -LiteralPath $UpdaterExe -Destination "$Stage\updater.exe" -Force
 if (Test-Path -LiteralPath $ConfigSrc) { Copy-Item -LiteralPath $ConfigSrc -Destination "$Stage\config.yaml" -Force }
 if (Test-Path -LiteralPath $AppIconSrc) { Copy-Item -LiteralPath $AppIconSrc -Destination $Stage -Force }
 if (Test-Path -LiteralPath $AppPngSrc) { Copy-Item -LiteralPath $AppPngSrc -Destination $Stage -Force }
-if (Test-Path -LiteralPath $BinSrc) { Copy-Dir $BinSrc "$Stage\bin" }
+if (-not $ManagerOnly -and (Test-Path -LiteralPath $BinSrc)) { Copy-Dir $BinSrc "$Stage\bin" }
 # Helper extension is intentionally not bundled in the clean self-use package.
 
-New-Item -ItemType Directory -Force -Path "$Stage\chrome" | Out-Null
-Copy-Dir $CloakKernelSrc "$Stage\chrome\cloak-146.0.7680.177"
-if (Test-Path -LiteralPath $GoogleKernelSrc) {
-    Copy-Dir $GoogleKernelSrc "$Stage\chrome\google-148.0.7778.167"
-} else {
-    Write-Host "Optional Google fallback missing; skipped: $GoogleKernelSrc" -ForegroundColor Yellow
+if (-not $ManagerOnly) {
+    New-Item -ItemType Directory -Force -Path "$Stage\chrome" | Out-Null
+    Copy-Dir $CloakKernelSrc "$Stage\chrome\cloak-146.0.7680.177"
+    if (Test-Path -LiteralPath $GoogleKernelSrc) {
+        Copy-Dir $GoogleKernelSrc "$Stage\chrome\google-148.0.7778.167"
+    } else {
+        Write-Host "Optional Google fallback missing; skipped: $GoogleKernelSrc" -ForegroundColor Yellow
+    }
 }
 New-Item -ItemType Directory -Force -Path "$Stage\data" | Out-Null
 
@@ -154,10 +165,10 @@ Write-Host ("   Wrote {0:N0} NSIS lines" -f $out.Count) -ForegroundColor Green
 Write-Host '==> [4/6] Generating NSIS script' -ForegroundColor Yellow
 $nsi = @"
 Unicode True
-!define PRODUCT_NAME "BrowserStudio"
+!define PRODUCT_NAME "$ProductName"
 !define PRODUCT_EXE "boost-browser.exe"
 !define PRODUCT_VERSION "$Version"
-!define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\BrowserStudio"
+!define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\$UninstallKeyName"
 !define APP_ICON "$Icon"
 !define SIDEBAR_BMP "$SidebarBmp"
 !define HEADER_BMP "$HeaderBmp"
@@ -168,7 +179,7 @@ Unicode True
 
 Name "`${PRODUCT_NAME} `${PRODUCT_VERSION}"
 OutFile "$OutExe"
-InstallDir "`$LOCALAPPDATA\Programs\BrowserStudio"
+InstallDir "`$LOCALAPPDATA\Programs\$InstallDirName"
 InstallDirRegKey HKCU "`${UNINSTALL_KEY}" "InstallLocation"
 RequestExecutionLevel user
 SetCompressor zlib
@@ -243,7 +254,7 @@ Function CloseBoostProcesses
 done:
 FunctionEnd
 
-Section "BrowserStudio" SecMain
+Section "$ProductName" SecMain
   SectionIn RO
   Call CloseBoostProcesses
   SetOutPath "`$INSTDIR"

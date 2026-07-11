@@ -34,7 +34,33 @@ kernels, proxy routing, automation APIs, and precise multi-window input sync.
 - Wails CLI v2
 - NSIS with `makensis.exe`
 - A local CloakBrowser kernel at
-  `chrome\cloak-146.0.7680.177\chrome.exe` when kernel installation is skipped
+  `chrome\cloak-146.0.7680.177\chrome.exe` when building the private edition
+  with kernel installation skipped
+
+## Editions and release channels
+
+BrowserStudio has two intentionally isolated packaging profiles:
+
+| Edition | Intended distribution | Bundled browser kernels | Bundled proxy executables | Installer |
+| --- | --- | --- | --- | --- |
+| Manager | Public redistribution | None | None | `BrowserStudio-Manager-Setup-v<version>.exe` |
+| Private | Internal/self-use only | Locally supplied | Locally supplied | `BrowserStudio-Private-Setup-v<version>.exe` |
+
+The public Manager edition starts without a default kernel. Users must add a
+browser executable they obtained and are licensed to use through **Kernel
+Management**. Missing optional runtimes produce actionable errors and do not
+prevent the manager UI from starting.
+
+Recommended Git and release channels:
+
+| Channel | Branch | Version example | GitHub release |
+| --- | --- | --- | --- |
+| Stable | `main` | `v1.8.0` | Latest |
+| Beta | `release/1.9` | `v1.9.0-beta.1` | Pre-release |
+| Development | `develop` | `v1.9.0-dev` | Internal artifact only |
+
+Do not publish private full installers or third-party runtime directories in a
+public GitHub Release.
 
 ## Windows system components
 
@@ -126,7 +152,13 @@ after validation.
 
 ## One-command Windows package
 
-From the repository root:
+Build the public redistributable Manager edition:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_windows_public.ps1
+```
+
+Build the private full edition from the repository root:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_windows_selfuse.ps1 -SkipKernelInstall
@@ -166,10 +198,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_installe
 
 ## Build output
 
-The complete installer is generated at:
+The installers are generated at:
 
 ```text
-build\release\BrowserStudio-Setup-v<version>.exe
+build\release\BrowserStudio-Manager-Setup-v<version>.exe
+build\release\BrowserStudio-Private-Setup-v<version>.exe
 ```
 
 The lightweight updater assets remain named `boost-browser.exe` and

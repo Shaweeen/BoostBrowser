@@ -6,6 +6,7 @@
 - Keep browser-window discovery restricted to real Chrome top-level windows.
 - Render numbered taskbar icons from a 3x source canvas with high-DPI ICO layers.
 - Keep legacy data paths and updater markers compatible during the brand migration.
+- Keep public manager artifacts free of third-party browser and proxy binaries.
 
 ## Next modules
 
@@ -14,4 +15,3 @@
 - Move input synchronization from global hooks to a serialized event worker with latency telemetry.
 - Add configurable pointer sampling profiles for large window groups.
 - Sign the application, updater, installer and activation payloads in CI.
-
