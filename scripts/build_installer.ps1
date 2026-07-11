@@ -1,6 +1,6 @@
 # build_installer.ps1
-# Build full self-use NSIS installer for Boost Browser.
-# Produces build\release\BoostBrowser-Setup-vX.X.X.exe.
+# Build full self-use NSIS installer for BrowserStudio.
+# Produces build\release\BrowserStudio-Setup-vX.X.X.exe.
 
 $ErrorActionPreference = 'Stop'
 
@@ -56,15 +56,15 @@ function New-BrandBitmap([string]$Path, [int]$Width, [int]$Height, [bool]$Header
     if ($Header) {
         $font  = New-Object System.Drawing.Font 'Segoe UI', 10, ([System.Drawing.FontStyle]::Bold)
         $font2 = New-Object System.Drawing.Font 'Segoe UI', 7
-        $g.DrawString('Boost Browser', $font, $white, 12, 7)
+        $g.DrawString('BrowserStudio', $font, $white, 12, 7)
         $g.DrawString("v$Version", $font2, $muted, 12, 29)
         $g.FillEllipse($accent, $Width-44, 10, 24, 24)
         $font.Dispose(); $font2.Dispose()
     } else {
         $font  = New-Object System.Drawing.Font 'Segoe UI', 18, ([System.Drawing.FontStyle]::Bold)
         $font2 = New-Object System.Drawing.Font 'Segoe UI', 8
-        $g.DrawString('Boost', $font, $white, 18, 32)
-        $g.DrawString('Browser', $font, $white, 18, 60)
+        $g.DrawString('Browser', $font, $white, 18, 32)
+        $g.DrawString('Studio', $font, $white, 18, 60)
         $g.DrawString('Fingerprint browser', $font2, $muted, 20, 108)
         $g.DrawString("v$Version", $font2, $muted, 20, 128)
         $g.FillEllipse($accent, 102, 180, 34, 34)
@@ -84,11 +84,11 @@ Write-Host "==> Version: v$Version" -ForegroundColor Cyan
 $ReleaseDir = "$RepoRoot\build\release"
 $BoostExe = "$ReleaseDir\boost-browser.exe"
 $UpdaterExe = "$ReleaseDir\updater.exe"
-$Stage = 'C:\Temp\BoostBrowser_installer_staging'
+$Stage = 'C:\Temp\BrowserStudio_installer_staging'
 $Publish = "$RepoRoot\publish\output"
 $NsiPath = "$RepoRoot\publish\boost-browser-installer.nsi"
 $NshPath = "$RepoRoot\publish\boost_nsis_files.nsh"
-$OutExe = "$ReleaseDir\BoostBrowser-Setup-v$Version.exe"
+$OutExe = "$ReleaseDir\BrowserStudio-Setup-v$Version.exe"
 $Icon = "$RepoRoot\build\windows\icon.ico"
 $SidebarBmp = "$RepoRoot\publish\boost_sidebar.bmp"
 $HeaderBmp = "$RepoRoot\publish\boost_header.bmp"
@@ -102,6 +102,17 @@ $BinSrc = "$AssetRoot\bin"
 $ConfigSrc = "$RepoRoot\config.yaml"
 $AppIconSrc = if (Test-Path -LiteralPath "$AssetRoot\app.ico") { "$AssetRoot\app.ico" } else { "$RepoRoot\build\windows\icon.ico" }
 $AppPngSrc = if (Test-Path -LiteralPath "$AssetRoot\app.png") { "$AssetRoot\app.png" } else { "$RepoRoot\build\appicon.png" }
+$ActivationSeed = $env:BROWSERSTUDIO_INSTALL_SEED
+if ([string]::IsNullOrWhiteSpace($ActivationSeed)) {
+    throw 'Missing BROWSERSTUDIO_INSTALL_SEED. Supply it through the process environment or CI secret store.'
+}
+$ActivationMaterial = [Text.Encoding]::UTF8.GetBytes("browserstudio-install:${ActivationSeed}:v1")
+$ActivationHasher = [Security.Cryptography.SHA256]::Create()
+try {
+    $ActivationProof = -join ($ActivationHasher.ComputeHash($ActivationMaterial) | ForEach-Object { $_.ToString('x2') })
+} finally {
+    $ActivationHasher.Dispose()
+}
 
 Require-Path $BoostExe "Missing $BoostExe. Run scripts\build_release.ps1 first."
 Require-Path $UpdaterExe "Missing $UpdaterExe. Run scripts\build_release.ps1 first."
@@ -131,6 +142,10 @@ if (Test-Path -LiteralPath $GoogleKernelSrc) {
     Write-Host "Optional Google fallback missing; skipped: $GoogleKernelSrc" -ForegroundColor Yellow
 }
 New-Item -ItemType Directory -Force -Path "$Stage\data" | Out-Null
+$ActivationMarker = @{ scheme = 'offline-installer-v1'; proof = $ActivationProof } | ConvertTo-Json -Compress
+# JSON is ASCII-only here. Windows PowerShell 5.1 writes a BOM for -Encoding
+# UTF8, which encoding/json intentionally rejects, so keep the marker BOM-free.
+Set-Content -LiteralPath "$Stage\.browserstudio-activation.json" -Value $ActivationMarker -Encoding ASCII
 
 Get-ChildItem $Stage -Recurse -File -Force | Where-Object {
     $_.Name -in @('LOCK','LOG','LOG.old') -or $_.Name -like '*.tmp'
@@ -153,10 +168,10 @@ Write-Host ("   Wrote {0:N0} NSIS lines" -f $out.Count) -ForegroundColor Green
 Write-Host '==> [4/6] Generating NSIS script' -ForegroundColor Yellow
 $nsi = @"
 Unicode True
-!define PRODUCT_NAME "Boost Browser"
+!define PRODUCT_NAME "BrowserStudio"
 !define PRODUCT_EXE "boost-browser.exe"
 !define PRODUCT_VERSION "$Version"
-!define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoostBrowser"
+!define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\BrowserStudio"
 !define APP_ICON "$Icon"
 !define SIDEBAR_BMP "$SidebarBmp"
 !define HEADER_BMP "$HeaderBmp"
@@ -166,7 +181,7 @@ Unicode True
 
 Name "`${PRODUCT_NAME} `${PRODUCT_VERSION}"
 OutFile "$OutExe"
-InstallDir "`$LOCALAPPDATA\Programs\Boost Browser"
+InstallDir "`$LOCALAPPDATA\Programs\BrowserStudio"
 InstallDirRegKey HKCU "`${UNINSTALL_KEY}" "InstallLocation"
 RequestExecutionLevel user
 SetCompressor zlib
@@ -180,7 +195,7 @@ UninstallIcon "`${APP_ICON}"
 !define MUI_HEADERIMAGE_UNBITMAP "`${HEADER_BMP}"
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "`$INSTDIR\`${PRODUCT_EXE}"
-!define MUI_FINISHPAGE_RUN_TEXT "Start Boost Browser"
+!define MUI_FINISHPAGE_RUN_TEXT "Start BrowserStudio"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -201,7 +216,7 @@ Function CloseBoostProcesses
 done:
 FunctionEnd
 
-Section "Boost Browser" SecMain
+Section "BrowserStudio" SecMain
   SectionIn RO
   Call CloseBoostProcesses
   SetOutPath "`$INSTDIR"
@@ -214,7 +229,7 @@ Section "Boost Browser" SecMain
   CreateShortcut "`$DESKTOP\`${PRODUCT_NAME}.lnk" "`$INSTDIR\`${PRODUCT_EXE}" "" "`$INSTDIR\`${PRODUCT_EXE}" 0
   WriteRegStr HKCU "`${UNINSTALL_KEY}" "DisplayName" "`${PRODUCT_NAME}"
   WriteRegStr HKCU "`${UNINSTALL_KEY}" "DisplayVersion" "`${PRODUCT_VERSION}"
-  WriteRegStr HKCU "`${UNINSTALL_KEY}" "Publisher" "Boost Browser"
+  WriteRegStr HKCU "`${UNINSTALL_KEY}" "Publisher" "BrowserStudio"
   WriteRegStr HKCU "`${UNINSTALL_KEY}" "InstallLocation" "`$INSTDIR"
   WriteRegStr HKCU "`${UNINSTALL_KEY}" "UninstallString" "`$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "`${UNINSTALL_KEY}" "DisplayIcon" "`$INSTDIR\`${PRODUCT_EXE}"

@@ -6,7 +6,7 @@
       name="BoostBrowser.Updater"
       type="win32"
   />
-  <description>Boost Browser Updater</description>
+  <description>BrowserStudio Updater</description>
   <!-- 关键：requestedExecutionLevel=asInvoker 显式声明不需要管理员，
        覆盖 Windows UAC Installer Detection 对 updater.exe 文件名的自动 elevation 判定。 -->
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">

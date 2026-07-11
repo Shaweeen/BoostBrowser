@@ -61,10 +61,6 @@ type InputSyncer struct {
 	keyCount     int32
 	hookInstalls int32
 
-	// 滚轮速度微调：每4格额外补3次方向键，平均 1.75 次/格
-	wheelRemainder int32
-	lastWheelDir   int32
-
 	lifecycleLogger func(event string, fields ...string)
 }
 
@@ -149,8 +145,6 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	atomic.StoreInt32(&s.moveCount, 0)
 	atomic.StoreInt32(&s.wheelCount, 0)
 	atomic.StoreInt32(&s.keyCount, 0)
-	atomic.StoreInt32(&s.wheelRemainder, 0)
-	atomic.StoreInt32(&s.lastWheelDir, 0)
 
 	log := logger.New("InputSyncer")
 	log.Info("输入同步已启动",
@@ -409,6 +403,27 @@ func mapCoordsViaClientArea(screenX, screenY int, masterHwnd, followerHwnd windo
 	return MAKELONG(uint16(int16(clientX)), uint16(int16(clientY))), true
 }
 
+// mapScreenPointToFollower maps a physical screen point from the master client
+// to the equivalent physical screen point in a follower. WM_MOUSEWHEEL requires
+// screen coordinates (unlike button and move messages, which use client
+// coordinates), so reusing mapCoordsChromeManager here causes DPI-dependent
+// drift and incorrect scrolling targets.
+func mapScreenPointToFollower(screenX, screenY int, masterHwnd, followerHwnd windows.HWND) (int, int, bool) {
+	mClientX, mClientY := screenToClient(masterHwnd, screenX, screenY)
+	mW, mH, ok := getClientSize(masterHwnd)
+	if !ok || mW <= 0 || mH <= 0 || mClientX < 0 || mClientY < 0 || mClientX > mW || mClientY > mH {
+		return 0, 0, false
+	}
+	fW, fH, ok := getClientSize(followerHwnd)
+	if !ok || fW <= 0 || fH <= 0 {
+		return 0, 0, false
+	}
+	x := int(float64(mClientX) / float64(mW) * float64(fW))
+	y := int(float64(mClientY) / float64(mH) * float64(fH))
+	left, top, _, _ := getWindowRect(followerHwnd)
+	return int(left) + x, int(top) + y, true
+}
+
 var procEnumChildWindows = user32dll.NewProc("EnumChildWindows")
 
 func mapCoordsViaRenderContent(screenX, screenY int, masterHwnd, followerHwnd windows.HWND) (uintptr, bool) {
@@ -634,87 +649,43 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 
 	case WM_MOUSEWHEEL:
 		atomic.AddInt32(&s.wheelCount, 1)
-		delta := int16(hook.MouseData >> 16) // Windows 原始值，通常 ±120 (WHEEL_DELTA)
-
-		// Ctrl+滚轮 → 缩放
+		// Preserve the exact signed delta, including high-resolution trackpad
+		// values smaller than WHEEL_DELTA. Keyboard approximation loses both
+		// magnitude and cursor target and makes followers scroll at a different
+		// speed. Modifier state is carried in the low word as Win32 expects.
+		wheelDelta := uint16(hook.MouseData >> 16)
+		keyState := uint16(0)
 		if isKeyDown(VK_CONTROL) {
-			for _, hwnd := range followers {
-				if !isWindow(hwnd) {
-					continue
-				}
-				if delta > 0 {
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, VK_CONTROL, makeKeyLParam(VK_CONTROL, true))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, 0xBB, makeKeyLParam(0xBB, true))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, 0xBB, makeKeyLParam(0xBB, false))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, VK_CONTROL, makeKeyLParam(VK_CONTROL, false))
-				} else {
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, VK_CONTROL, makeKeyLParam(VK_CONTROL, true))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, 0xBD, makeKeyLParam(0xBD, true))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, 0xBD, makeKeyLParam(0xBD, false))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, VK_CONTROL, makeKeyLParam(VK_CONTROL, false))
-				}
-			}
-			return callNextHook(nCode, wParam, lParam)
+			keyState |= MK_CONTROL
 		}
-
-		// Windows delta 通常为 ±120 (WHEEL_DELTA)。跟随速度调为：平均 1 notch = 2.5次方向键。
-		// 实现方式：每格至少2次方向键，每累计2格额外补1次；不使用 PageUp/PageDown，避免跳太远。
-		scrollUp := delta > 0
-		notches := int(delta) / 120
-		if notches == 0 {
-			notches = 1 // 高精度滚轮不足120时，也按1格处理
+		if isKeyDown(VK_SHIFT) {
+			keyState |= MK_SHIFT
 		}
-		if notches < 0 {
-			notches = -notches
-		}
-
-		dir := int32(1)
-		if !scrollUp {
-			dir = -1
-		}
-		if atomic.LoadInt32(&s.lastWheelDir) != dir {
-			atomic.StoreInt32(&s.wheelRemainder, 0)
-			atomic.StoreInt32(&s.lastWheelDir, dir)
-		}
-
-		keyPresses := notches * 2
-		rem := atomic.AddInt32(&s.wheelRemainder, int32(notches))
-		if rem >= 2 {
-			extra := rem / 2
-			keyPresses += int(extra)
-			atomic.AddInt32(&s.wheelRemainder, -extra*2)
-		}
-		if keyPresses > 20 {
-			keyPresses = 20
-		}
-
-		vk := uint32(VK_UP)
-		if !scrollUp {
-			vk = VK_DOWN
-		}
-
+		wheelWParam := uintptr(uint32(keyState) | uint32(wheelDelta)<<16)
 		for _, hwnd := range followers {
 			if !isWindow(hwnd) {
 				continue
 			}
-			for i := 0; i < keyPresses; i++ {
-				procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, uintptr(vk), makeKeyLParam(vk, true))
-				procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, uintptr(vk), makeKeyLParam(vk, false))
+			targetX, targetY, ok := mapScreenPointToFollower(screenX, screenY, s.masterHwnd, hwnd)
+			if !ok || targetX < -32768 || targetX > 32767 || targetY < -32768 || targetY > 32767 {
+				continue
 			}
+			wheelLParam := MAKELONG(uint16(int16(targetX)), uint16(int16(targetY)))
+			procPostMessageW.Call(uintptr(hwnd), WM_MOUSEWHEEL, wheelWParam, wheelLParam)
 		}
 
 	case WM_MOUSEMOVE:
 		atomic.AddInt32(&s.moveCount, 1)
 		// 跟随窗口越多，鼠标移动同步越容易把整机拖卡。
 		// 这里按窗口数动态降采样：少量窗口保留手感，多窗口优先稳。
-		throttle := 16 * time.Millisecond
+		throttle := 8 * time.Millisecond
 		switch followerCount := len(followers); {
 		case followerCount >= 10:
-			throttle = 50 * time.Millisecond
-		case followerCount >= 6:
-			throttle = 33 * time.Millisecond
-		case followerCount >= 3:
 			throttle = 24 * time.Millisecond
+		case followerCount >= 6:
+			throttle = 16 * time.Millisecond
+		case followerCount >= 3:
+			throttle = 12 * time.Millisecond
 		}
 		now := time.Now().UnixNano()
 		last := atomic.LoadInt64(&s.lastMoveTime)

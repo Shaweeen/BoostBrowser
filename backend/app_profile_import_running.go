@@ -104,7 +104,7 @@ func (a *App) importRunningMoreLoginProfile(runtimeProfile moreLoginRunningProfi
 	}
 
 	warnings := []string{
-		"已复制 MoreLogin 运行中的浏览器数据目录；首次建议先单独启动导入后的 Boost Browser 实例检查登录态。",
+		"已复制 MoreLogin 运行中的浏览器数据目录；首次建议先单独启动导入后的 BrowserStudio 实例检查登录态。",
 	}
 	if copyResult.SkippedFiles > 0 {
 		warnings = append(warnings, fmt.Sprintf("导入时已自动跳过 %d 个被占用或临时文件。", copyResult.SkippedFiles))

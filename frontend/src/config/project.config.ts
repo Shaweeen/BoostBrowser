@@ -6,7 +6,7 @@
 
 // 项目基础信息
 export const projectConfig = {
-  name: 'Boost Browser',
+  name: 'BrowserStudio',
   shortName: 'Boost',
   description: '面向多账号隔离、代理绑定和本地环境管理的桌面浏览器工具',
   primaryColor: 'primary',

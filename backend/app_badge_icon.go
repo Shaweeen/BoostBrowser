@@ -212,12 +212,12 @@ func drawCircle(img *image.NRGBA, cx, cy, r int, col color.NRGBA) {
 // generateFallbackIcon 生成固定的旧版 Boost Browser 任务栏底图：蓝色 Chrome-like 圆环。
 // 不读取 chrome.exe 自带图标，避免切到 Google Chrome 后变成官方四色 Chrome 图标。
 func generateFallbackIcon() *image.NRGBA {
-	const size = 64
+	const size = 192
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
-	cx, cy := 32.0, 32.0
-	outerR := 27.0
-	innerR := 13.0
-	centerR := 8.5
+	cx, cy := 96.0, 96.0
+	outerR := 81.0
+	innerR := 39.0
+	centerR := 25.5
 
 	blend := func(dst, src color.NRGBA, alpha float64) color.NRGBA {
 		if alpha < 0 {
@@ -286,41 +286,42 @@ func generateFallbackIcon() *image.NRGBA {
 // 旧实现固定右上角圆形 badge + 3x3 字体，多位数会被圆形裁掉，任务栏缩放后经常只剩红点看不到数字。
 // 新实现按位数自适应为右上角红色胶囊，1~4 位都尽量完整显示。
 func overlayBadgeNumber(img *image.NRGBA, number int) *image.NRGBA {
-	const size = 64
+	size := img.Bounds().Dx()
+	scale := max(1, size/64)
 
 	numStr := fmt.Sprintf("%d", number)
 	if len(numStr) > 4 {
 		numStr = numStr[len(numStr)-4:]
 	}
-	digitW := 10
-	digitH := 16
-	stroke := 3
-	gap := 2
+	digitW := 10 * scale
+	digitH := 16 * scale
+	stroke := 3 * scale
+	gap := 2 * scale
 	if len(numStr) >= 3 {
-		digitW = 8
-		digitH = 14
-		stroke = 2
-		gap = 1
+		digitW = 8 * scale
+		digitH = 14 * scale
+		stroke = 2 * scale
+		gap = scale
 	}
 	totalFontWidth := len(numStr)*digitW + (len(numStr)-1)*gap
 	totalFontHeight := digitH
 
-	padX := 5
-	padY := 4
+	padX := 5 * scale
+	padY := 4 * scale
 	pillW := totalFontWidth + padX*2
 	pillH := totalFontHeight + padY*2
 	if pillW < pillH {
 		pillW = pillH
 	}
-	pillX := size - pillW - 2
+	pillX := size - pillW - 2*scale
 	if pillX < 1 {
-		pillX = 1
+		pillX = scale
 	}
-	pillY := 2
+	pillY := 2 * scale
 	radius := pillH / 2
 
 	// 白色描边 + 红色底，做成胶囊而不是固定圆，避免 2/3/4 位数字被裁剪。
-	drawRoundedPill(img, pillX-2, pillY-2, pillW+4, pillH+4, radius+2, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+	drawRoundedPill(img, pillX-2*scale, pillY-2*scale, pillW+4*scale, pillH+4*scale, radius+2*scale, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
 	drawRoundedPill(img, pillX, pillY, pillW, pillH, radius, color.NRGBA{R: 220, G: 38, B: 38, A: 255})
 
 	drawStartX := pillX + (pillW-totalFontWidth)/2
@@ -451,18 +452,17 @@ func scaleImage(src *image.NRGBA, dstSize int) *image.NRGBA {
 	return dst
 }
 
-// generateBadgeICO 生成带编号的 ICO 文件字节数据（包含 16x16、32x32、64x64 三种尺寸）。
+// generateBadgeICO 生成多分辨率编号图标。192px 矢量式源画布是旧版的 3 倍，
+// 再分别降采样，避免先在 64px 上画数字后被 Windows 高 DPI 二次放大而失真。
 func generateBadgeICO(pid int, number int) ([]byte, error) {
-	// 生成 64x64 原图（提取进程图标 + 叠加角标）
 	srcImg := generateBadgeIconImage(pid, number)
 
-	// 缩放到 16x16 和 32x32，同时保留 64x64 原图，Windows 高 DPI 任务栏优先取高清层。
 	img16 := scaleImage(srcImg, 16)
 	img32 := scaleImage(srcImg, 32)
-	img64 := srcImg
+	img64 := scaleImage(srcImg, 64)
+	img128 := scaleImage(srcImg, 128)
 
-	// 编码为 PNG
-	var buf16, buf32, buf64 bytes.Buffer
+	var buf16, buf32, buf64, buf128 bytes.Buffer
 	if err := png.Encode(&buf16, img16); err != nil {
 		return nil, err
 	}
@@ -472,10 +472,14 @@ func generateBadgeICO(pid int, number int) ([]byte, error) {
 	if err := png.Encode(&buf64, img64); err != nil {
 		return nil, err
 	}
+	if err := png.Encode(&buf128, img128); err != nil {
+		return nil, err
+	}
 
 	png16Data := buf16.Bytes()
 	png32Data := buf32.Bytes()
 	png64Data := buf64.Bytes()
+	png128Data := buf128.Bytes()
 
 	// ICO 文件格式
 	// 参考：https://en.wikipedia.org/wiki/ICO_(file_format)
@@ -499,10 +503,10 @@ func generateBadgeICO(pid int, number int) ([]byte, error) {
 	header := icoDirHeader{
 		Reserved:  0,
 		ImageType: 1, // ICON
-		NumImages: 3,
+		NumImages: 4,
 	}
 
-	entriesOffset := uint32(binary.Size(header) + binary.Size(icoDirEntry{})*3)
+	entriesOffset := uint32(binary.Size(header) + binary.Size(icoDirEntry{})*4)
 	entry16 := icoDirEntry{
 		Width:       16,
 		Height:      16,
@@ -533,15 +537,22 @@ func generateBadgeICO(pid int, number int) ([]byte, error) {
 		BytesInRes:  uint32(len(png64Data)),
 		ImageOffset: entry32.ImageOffset + uint32(len(png32Data)),
 	}
+	entry128 := icoDirEntry{
+		Width: 128, Height: 128, Planes: 1, BitCount: 32,
+		BytesInRes:  uint32(len(png128Data)),
+		ImageOffset: entry64.ImageOffset + uint32(len(png64Data)),
+	}
 
 	var result bytes.Buffer
 	_ = binary.Write(&result, binary.LittleEndian, header)
 	_ = binary.Write(&result, binary.LittleEndian, entry16)
 	_ = binary.Write(&result, binary.LittleEndian, entry32)
 	_ = binary.Write(&result, binary.LittleEndian, entry64)
+	_ = binary.Write(&result, binary.LittleEndian, entry128)
 	result.Write(png16Data)
 	result.Write(png32Data)
 	result.Write(png64Data)
+	result.Write(png128Data)
 
 	return result.Bytes(), nil
 }
@@ -569,7 +580,7 @@ func getBadgeICOFilePath(pid int, number int) (string, error) {
 	}
 
 	// 保存到临时目录
-	tmpDir := filepath.Join(os.TempDir(), "boost_browser_badge_icons")
+	tmpDir := filepath.Join(os.TempDir(), "browserstudio_badge_icons")
 	if err := os.MkdirAll(tmpDir, 0755); err != nil {
 		return "", err
 	}

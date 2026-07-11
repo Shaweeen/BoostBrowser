@@ -398,7 +398,7 @@ func DefaultConfig() *Config {
 			},
 		},
 		App: AppConfig{
-			Name: "Boost Browser",
+			Name: "BrowserStudio",
 			Window: WindowConfig{
 				Width:     1750,
 				Height:    1000,

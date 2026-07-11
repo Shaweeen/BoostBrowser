@@ -1,6 +1,6 @@
 {
   "$schema": "https://wails.io/schemas/config.v2.json",
-  "name": "Boost Browser",
+  "name": "BrowserStudio",
   "outputfilename": "boost-browser",
   "frontend:install": "npm install && npm run ensure:native",
   "frontend:build": "npm run build",
@@ -9,8 +9,8 @@
     "email": ""
   },
   "info": {
-    "companyName": "Boost Browser",
-    "productName": "Boost Browser",
+    "companyName": "BrowserStudio",
+    "productName": "BrowserStudio",
     "productVersion": "1.7.5",
     "comments": "面向多账号隔离、代理绑定和本地环境管理的桌面浏览器工具"
   },

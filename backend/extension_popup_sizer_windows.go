@@ -733,7 +733,9 @@ func looksLikeMainBrowserWindowTitle(title string) bool {
 	if t == "" {
 		return false
 	}
-	return strings.Contains(t, " - boost browser") ||
+	return strings.Contains(t, " - browserstudio") ||
+		strings.HasSuffix(t, "browserstudio") ||
+		strings.Contains(t, " - boost browser") ||
 		strings.HasSuffix(t, "boost browser") ||
 		strings.Contains(t, " - chromium") ||
 		strings.HasSuffix(t, "chromium") ||
@@ -746,6 +748,18 @@ func looksLikeMainBrowserWindowTitle(title string) bool {
 func isKnownWalletPopupProductTitle(title string) bool {
 	t := strings.TrimSpace(strings.ToLower(title))
 	knownProductTitles := []string{
+		"okx wallet - browserstudio",
+		"petra - browserstudio",
+		"petra wallet - browserstudio",
+		"metamask - browserstudio",
+		"metamask notification - browserstudio",
+		"phantom - browserstudio",
+		"phantom wallet - browserstudio",
+		"rabby - browserstudio",
+		"rabby wallet - browserstudio",
+		"bitget wallet - browserstudio",
+		"keplr - browserstudio",
+		"keplr wallet - browserstudio",
 		"okx wallet - boost browser",
 		"petra - boost browser",
 		"petra wallet - boost browser",

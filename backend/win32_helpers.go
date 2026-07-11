@@ -30,6 +30,8 @@ const (
 	WM_SYSKEYUP    = 0x0105
 	MK_LBUTTON     = 0x0001
 	MK_RBUTTON     = 0x0002
+	MK_SHIFT       = 0x0004
+	MK_CONTROL     = 0x0008
 	MK_MBUTTON     = 0x0010
 	MK_NONE        = 0x0000
 	SWP_NOZORDER   = 0x0004
@@ -218,23 +220,20 @@ func findProcessWindow(pid int) (windows.HWND, error) {
 		if isAuxiliaryIMEWindowTitleOrClass(title, className) {
 			return 1
 		}
-		if title == "" && !strings.HasPrefix(className, "Chrome_WidgetWin_") {
+		// Only a real Chrome top-level browser frame may participate in sync.
+		// Chrome_WidgetWin_0 and titled renderer/extension helper HWNDs can be
+		// visible transiently; selecting one makes tiling/show operations surface
+		// an undecorated white window over the page.
+		if !strings.EqualFold(className, "Chrome_WidgetWin_1") && !strings.EqualFold(className, "Chrome_MainWindow") {
+			return 1
+		}
+		clientW, clientH, ok := getClientSize(hwnd)
+		if !ok || clientW < 320 || clientH < 240 || clientW > 10000 || clientH > 10000 {
 			return 1
 		}
 
 		score := len(title)
-		if strings.HasPrefix(className, "Chrome_WidgetWin_") {
-			score += 10000
-			if title == "" {
-				// 新版浏览器窗口有时会在启动后一段时间内保持空标题，但仍然是可见的主窗口。
-				// 允许这类 Chrome 顶层窗口参与候选，避免同步页误判为“无窗口”。
-				score += 50
-			}
-		}
-		if strings.EqualFold(className, "Chrome_WidgetWin_0") {
-			// Chrome_WidgetWin_0 更常见于辅助/隐藏窗口，仍可兜底但不要优先。
-			score -= 100
-		}
+		score += 10000 + clientW*clientH/1000
 		candidates = append(candidates, winCandidate{hwnd: hwnd, title: title, class: className, titleLen: len(title), score: score})
 		return 1 // 继续找
 	})

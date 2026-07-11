@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"boost-browser/backend/internal/activation"
 	"boost-browser/backend/internal/apppath"
 	"boost-browser/backend/internal/browser"
 	"boost-browser/backend/internal/config"
@@ -50,6 +51,7 @@ type App struct {
 	speedScheduler   *browser.ProxySpeedScheduler
 	appRoot          string
 	version          string
+	activationStatus activation.Status
 
 	forceQuit        bool       // 强制退出标志，用于跳过 OnBeforeClose 的拦截
 	quitMode         quitMode   // 退出模式：全量退出 / 仅退出应用
@@ -88,7 +90,7 @@ func (a *App) appName() string {
 			return name
 		}
 	}
-	return "Boost Browser"
+	return "BrowserStudio"
 }
 
 func (a *App) appVersion() string {
@@ -97,6 +99,13 @@ func (a *App) appVersion() string {
 		return "unknown"
 	}
 	return version
+}
+
+// GetActivationStatus exposes provider-neutral activation state to the UI.
+// Future signed or online providers can replace the offline provider without
+// changing this API contract.
+func (a *App) GetActivationStatus() activation.Status {
+	return a.activationStatus
 }
 
 func (a *App) ensureLaunchServerAPIKey(cfg *config.Config) {
@@ -114,6 +123,7 @@ func (a *App) ensureLaunchServerAPIKey(cfg *config.Config) {
 // startup 应用启动时调用
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	a.activationStatus = (activation.OfflineInstallerProvider{}).Verify(a.appRoot)
 	a.lifecycleLog("startup", "version="+a.appVersion())
 	// 写入 Chrome 企业策略到 HKCU，抑制 --no-sandbox 等 unsupported flag
 	// 引发的黄色安全警告 infobar。无需管理员权限，不会被识别为 bot 信号。
@@ -216,7 +226,7 @@ func (a *App) startup(ctx context.Context) {
 	a.migrateToSQLite()
 	a.browserMgr.InitData()
 	if !a.panelMode {
-		// 默认使用随 Boost Browser 打包/下载到 chrome/ 目录内的独立 Google Chrome 内核；不再引用系统安装的 Chrome。
+		// 默认使用随 BrowserStudio 打包/下载到 chrome/ 目录内的独立 Google Chrome 内核；不再引用系统安装的 Chrome。
 		a.ensureBundledGoogleChromeCore()
 		// 同步内存态，确保后续默认内核解析使用刚注册的内置 Chrome。
 		_ = a.browserMgr.ListCores()
