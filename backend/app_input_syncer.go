@@ -678,6 +678,10 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 	switch msg {
 	case WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP:
 		atomic.AddInt32(&s.clickCount, 1)
+		if atomic.LoadInt32(&s.pageKeyboardFocus) == 1 {
+			s.dispatchPageMouseViaCDP(msg, screenX, screenY)
+			return callNextHook(nCode, wParam, lParam)
+		}
 		for _, hwnd := range followers {
 			if !isWindow(hwnd) {
 				continue
@@ -917,23 +921,72 @@ func (s *InputSyncer) dispatchPageKeyViaCDP(msg uint32, vk, scanCode, flags uint
 	go func() {
 		s.cdpKeyMu.Lock()
 		defer s.cdpKeyMu.Unlock()
+		var wg sync.WaitGroup
 		for _, port := range ports {
 			if port <= 0 {
 				continue
 			}
-			if down && ch != 0 && !ctrl && !alt {
-				_, _ = cdpCall(port, "Input.insertText", map[string]any{"text": string(rune(ch))})
-				continue
-			}
-			key := cdpKeyName(vk)
-			params := map[string]any{
-				"type":                  map[bool]string{true: "keyDown", false: "keyUp"}[down],
-				"windowsVirtualKeyCode": int(vk), "nativeVirtualKeyCode": int(vk),
-				"modifiers": modifiers, "key": key,
-			}
-			_, _ = cdpCall(port, "Input.dispatchKeyEvent", params)
+			wg.Add(1)
+			go func(debugPort int) {
+				defer wg.Done()
+				if down && ch != 0 && !ctrl && !alt {
+					_, _ = cdpCall(debugPort, "Input.insertText", map[string]any{"text": string(rune(ch))})
+					return
+				}
+				params := map[string]any{
+					"type":                  map[bool]string{true: "keyDown", false: "keyUp"}[down],
+					"windowsVirtualKeyCode": int(vk), "nativeVirtualKeyCode": int(vk),
+					"modifiers": modifiers, "key": cdpKeyName(vk),
+				}
+				_, _ = cdpCall(debugPort, "Input.dispatchKeyEvent", params)
+			}(port)
 		}
+		wg.Wait()
 	}()
+}
+
+func (s *InputSyncer) dispatchPageMouseViaCDP(msg uint32, screenX, screenY int) {
+	masterRender := findChromeRenderChild(s.masterHwnd)
+	if masterRender == 0 {
+		return
+	}
+	ml, mt, mr, mb := getWindowRect(masterRender)
+	if mr <= ml || mb <= mt {
+		return
+	}
+	rx := float64(screenX-int(ml)) / float64(mr-ml)
+	ry := float64(screenY-int(mt)) / float64(mb-mt)
+	s.mu.Lock()
+	ports := append([]int(nil), s.followerDebug...)
+	hwnds := append([]windows.HWND(nil), s.followerHwnds...)
+	s.mu.Unlock()
+	button := "left"
+	if msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP {
+		button = "right"
+	}
+	if msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP {
+		button = "middle"
+	}
+	eventType := "mousePressed"
+	if msg == WM_LBUTTONUP || msg == WM_RBUTTONUP || msg == WM_MBUTTONUP {
+		eventType = "mouseReleased"
+	}
+	for i, port := range ports {
+		if port <= 0 || i >= len(hwnds) {
+			continue
+		}
+		render := findChromeRenderChild(hwnds[i])
+		if render == 0 {
+			continue
+		}
+		fl, ft, fr, fb := getWindowRect(render)
+		x, y := rx*float64(fr-fl), ry*float64(fb-ft)
+		go func(debugPort int, px, py float64) {
+			_, _ = cdpCall(debugPort, "Input.dispatchMouseEvent", map[string]any{
+				"type": eventType, "x": px, "y": py, "button": button, "clickCount": 1,
+			})
+		}(port, x, y)
+	}
 }
 
 func cdpKeyName(vk uint32) string {
