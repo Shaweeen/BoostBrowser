@@ -514,11 +514,10 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				logger.F("args", strings.Join(args, " ")),
 			)
 
-			// 调试接口一就绪，先执行启动期扩展弹窗抑制：关闭 Chrome 自动恢复/自动
-			// 打开的 extension 页面/窗口，再把真正的浏览器主窗口恢复到可见位置。
-			// 之前 closeExtensionStartupPages/restoreBrowserWindowsAfterStartup 已实现
-			// 但没有接入启动链路，导致扩展首次安装页/解锁页在后续每次启动仍可能被
-			// Chrome 拉起并留在前台。
+			// 调试接口一就绪，执行启动期扩展弹窗抑制，只关闭 Chrome 自动恢复/自动
+			// 打开的 extension 页面/窗口。浏览器现在直接在正常屏幕位置启动，不能再
+			// 调用旧的 restoreBrowserWindowsAfterStartup：它会把 Chromium 子进程的
+			// 隐藏辅助 HWND 恢复并置前，表现为覆盖网页的巨大无边框白色窗口。
 			finalizeBrowserStartupExtensionSuppression(stableDebugPort, profile.Pid, profileId)
 
 			// 任务栏 badge 数字直接来自实例名字里的数字段：

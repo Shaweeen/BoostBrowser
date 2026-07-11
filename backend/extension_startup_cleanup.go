@@ -203,9 +203,14 @@ func finalizeBrowserStartupExtensionSuppression(debugPort int, pid int, profileI
 		return
 	}
 	closeExtensionStartupPages(debugPort, profileId)
-	if pid > 0 {
-		restoreBrowserWindowsAfterStartup(pid)
-	}
+	// Browser windows are launched at their real onscreen position now.  Do not
+	// run the legacy restore pass here: it walks the whole Chromium process tree
+	// and calls ShowWindow/SetForegroundWindow for every titled top-level HWND.
+	// Recent Chrome/Cloak builds create renderer, IME and extension-host windows
+	// in child processes; surfacing one of those produces a large, undecorated
+	// white window over the page.  The restore pass was only needed when startup
+	// deliberately used an offscreen --window-position, which is no longer done.
+	_ = pid
 }
 
 func closeExtensionStartupPagesOnce(debugPort int, seenClosed map[string]bool) int {
