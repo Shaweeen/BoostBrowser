@@ -68,7 +68,10 @@ func (a *App) OpenWindowSyncPanel() error {
 	}
 	cmd := exec.Command(exePath, "--sync-panel")
 	cmd.Dir = appRoot
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
 }
 
 // restoreNativeMainWindowBounds restores/centers the main Wails window. Native

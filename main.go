@@ -171,17 +171,12 @@ func (a *App) CloseWindowSyncPanel() {
 		a.RecordLifecycleEvent("sync-panel-close-request", []string{"action=ignore", "reason=not-sync-panel-mode"})
 		return
 	}
-	if !a.syncPanelStartedAt.IsZero() && time.Since(a.syncPanelStartedAt) < 3*time.Second {
-		a.RecordLifecycleEvent("sync-panel-close-request", []string{"action=ignore", "reason=startup-close-cooldown"})
-		return
-	}
 	a.syncPanelCloseMu.Lock()
-	a.syncPanelCloseAllowed = true
 	ctx := a.wailsCtx
 	a.syncPanelCloseMu.Unlock()
-	a.RecordLifecycleEvent("sync-panel-close-request", []string{"action=quit-panel-only"})
+	a.RecordLifecycleEvent("sync-panel-close-request", []string{"action=hide-panel", "sync=preserved"})
 	if ctx != nil {
-		runtime.Quit(ctx)
+		runtime.WindowHide(ctx)
 	}
 }
 

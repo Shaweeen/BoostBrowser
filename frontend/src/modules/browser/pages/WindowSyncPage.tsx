@@ -60,6 +60,17 @@ const PANEL_COMPACT_STATUS_COLLAPSED_SIZE = { width: 448, height: 120, minWidth:
 const PANEL_COMPACT_FUNCTION_SIZE = { width: 520, height: 120, minWidth: 520, minHeight: 120 }
 const PANEL_TOP_MARGIN_PX = 8
 const PANEL_COMPACT_EDGE_PADDING_PX = 0
+const SYNC_SELECTED_STORAGE_KEY = 'browserstudio.sync.selected-profile-ids'
+const SYNC_MASTER_STORAGE_KEY = 'browserstudio.sync.master-profile-id'
+
+function loadStoredSelectedIds(): Set<string> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SYNC_SELECTED_STORAGE_KEY) || '[]')
+    return new Set(Array.isArray(parsed) ? parsed.filter(item => typeof item === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
 
 export function WindowSyncPage() {
   const compactPanelRef = useRef<HTMLDivElement | null>(null)
@@ -69,8 +80,8 @@ export function WindowSyncPage() {
   const [panelPresentation, setPanelPresentation] = useState<'compact' | 'full'>('full')
   const [showSyncControls, setShowSyncControls] = useState(false)
   const [profiles, setProfiles] = useState<SyncProfileInfo[]>([])
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
-  const [masterId, setMasterId] = useState<string | null>(null)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(loadStoredSelectedIds)
+  const [masterId, setMasterId] = useState<string | null>(() => localStorage.getItem(SYNC_MASTER_STORAGE_KEY) || null)
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
   const [starting, setStarting] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
@@ -136,6 +147,15 @@ export function WindowSyncPage() {
       }
     }
   }, [])
+
+  useEffect(() => {
+    localStorage.setItem(SYNC_SELECTED_STORAGE_KEY, JSON.stringify(Array.from(selectedIds)))
+  }, [selectedIds])
+
+  useEffect(() => {
+    if (masterId) localStorage.setItem(SYNC_MASTER_STORAGE_KEY, masterId)
+    else localStorage.removeItem(SYNC_MASTER_STORAGE_KEY)
+  }, [masterId])
 
   useEffect(() => {
     let cancelled = false
