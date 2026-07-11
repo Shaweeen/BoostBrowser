@@ -50,7 +50,9 @@ type InputSyncer struct {
 	stopCh       chan struct{}
 	hookThreadID uint32
 
-	lastMoveTime int64 // Unix nano
+	lastMoveTime      int64 // Unix nano
+	pageKeyboardFocus int32 // last master click was inside the renderer
+	cdpKeyMu          sync.Mutex
 
 	// URL 同步
 	urlStopCh   chan struct{}
@@ -657,6 +659,18 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 	msg := uint32(wParam)
 	screenX := int(hook.Pt.X)
 	screenY := int(hook.Pt.Y)
+	if msg == WM_LBUTTONDOWN {
+		insidePage := false
+		if render := findChromeRenderChild(s.masterHwnd); render != 0 {
+			left, top, right, bottom := getWindowRect(render)
+			insidePage = screenX >= int(left) && screenX <= int(right) && screenY >= int(top) && screenY <= int(bottom)
+		}
+		if insidePage {
+			atomic.StoreInt32(&s.pageKeyboardFocus, 1)
+		} else {
+			atomic.StoreInt32(&s.pageKeyboardFocus, 0)
+		}
+	}
 
 	// 获取快照（原子读取，不加锁）
 	followers := s.getFollowerSnapshot()
@@ -811,6 +825,10 @@ func (s *InputSyncer) keyHookCallback(nCode int, wParam uintptr, lParam uintptr)
 	}
 
 	atomic.AddInt32(&s.keyCount, 1)
+	if atomic.LoadInt32(&s.pageKeyboardFocus) == 1 {
+		s.dispatchPageKeyViaCDP(msg, hook.VkCode, hook.ScanCode, hook.Flags)
+		return callNextHook(nCode, wParam, lParam)
+	}
 
 	// 获取跟随窗口快照
 	followers := s.getFollowerSnapshot()
@@ -872,6 +890,81 @@ func (s *InputSyncer) keyHookCallback(nCode int, wParam uintptr, lParam uintptr)
 	}
 
 	return callNextHook(nCode, wParam, lParam)
+}
+
+func (s *InputSyncer) dispatchPageKeyViaCDP(msg uint32, vk, scanCode, flags uint32) {
+	s.mu.Lock()
+	ports := append([]int(nil), s.followerDebug...)
+	s.mu.Unlock()
+	if len(ports) == 0 {
+		return
+	}
+	ctrl := isKeyDown(VK_CONTROL)
+	alt := isKeyDown(VK_MENU)
+	shift := isKeyDown(VK_SHIFT)
+	modifiers := 0
+	if alt {
+		modifiers |= 1
+	}
+	if ctrl {
+		modifiers |= 2
+	}
+	if shift {
+		modifiers |= 8
+	}
+	down := msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN
+	ch := toUnicode(uint16(vk), uint16(scanCode), (flags&0x01) != 0)
+	go func() {
+		s.cdpKeyMu.Lock()
+		defer s.cdpKeyMu.Unlock()
+		for _, port := range ports {
+			if port <= 0 {
+				continue
+			}
+			if down && ch != 0 && !ctrl && !alt {
+				_, _ = cdpCall(port, "Input.insertText", map[string]any{"text": string(rune(ch))})
+				continue
+			}
+			key := cdpKeyName(vk)
+			params := map[string]any{
+				"type":                  map[bool]string{true: "keyDown", false: "keyUp"}[down],
+				"windowsVirtualKeyCode": int(vk), "nativeVirtualKeyCode": int(vk),
+				"modifiers": modifiers, "key": key,
+			}
+			_, _ = cdpCall(port, "Input.dispatchKeyEvent", params)
+		}
+	}()
+}
+
+func cdpKeyName(vk uint32) string {
+	switch vk {
+	case 0x08:
+		return "Backspace"
+	case 0x09:
+		return "Tab"
+	case 0x0D:
+		return "Enter"
+	case 0x1B:
+		return "Escape"
+	case VK_LEFT:
+		return "ArrowLeft"
+	case VK_RIGHT:
+		return "ArrowRight"
+	case VK_UP:
+		return "ArrowUp"
+	case VK_DOWN:
+		return "ArrowDown"
+	case VK_DELETE:
+		return "Delete"
+	case VK_HOME:
+		return "Home"
+	case VK_END:
+		return "End"
+	}
+	if vk >= 0x41 && vk <= 0x5A {
+		return strings.ToLower(string(rune(vk)))
+	}
+	return "Unidentified"
 }
 
 // isSpecialKey 判断是否为非打印特殊键

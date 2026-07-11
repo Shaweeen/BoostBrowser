@@ -88,7 +88,7 @@ func focusExistingMainWindow() bool {
 }
 
 func focusExistingSyncPanelWindow() bool {
-	return focusExistingWindowByKeywords([]string{"BrowserStudio · 窗口同步", "BrowserStudio - 窗口同步", "Boost Browser · 窗口同步", "Boost Browser - 窗口同步", "窗口同步"})
+	return focusExistingWindowByKeywords([]string{"BrowserStudio · 同步工具", "BrowserStudio · 窗口同步", "Boost Browser · 同步工具", "窗口同步", "同步工具"})
 }
 
 func focusExistingWindowByKeywords(keywords []string) bool {

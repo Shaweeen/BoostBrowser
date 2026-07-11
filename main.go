@@ -357,7 +357,7 @@ func main() {
 	alwaysOnTop := false
 	disableResize := false
 	if syncPanelMode {
-		title = fmt.Sprintf("%s · 窗口同步", cfg.App.Name)
+		title = fmt.Sprintf("%s · 同步工具", cfg.App.Name)
 		width = 520
 		height = 600
 		// 同步面板现在默认直接以小悬浮窗启动；最小尺寸仅覆盖折叠状态和“显示下面功能”展开状态。
