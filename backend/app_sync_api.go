@@ -214,7 +214,8 @@ func (a *App) UpdateSyncRandomDelay(enabled bool, minMs, maxMs int) error {
 	return nil
 }
 
-// UpdateSyncConfig 更新同步配置（鼠标/键盘开关）
+// UpdateSyncConfig updates the optional mouse switch. Keyboard synchronisation
+// is an invariant of an active session and cannot be accidentally disabled.
 func (a *App) UpdateSyncConfig(mouseEnabled, keyEnabled bool) error {
 	syncState.mu.Lock()
 	defer syncState.mu.Unlock()
@@ -222,7 +223,7 @@ func (a *App) UpdateSyncConfig(mouseEnabled, keyEnabled bool) error {
 	if syncState.syncer == nil {
 		return fmt.Errorf("同步未启动")
 	}
-	syncState.syncer.SetConfig(mouseEnabled, keyEnabled)
+	syncState.syncer.SetConfig(mouseEnabled, true)
 	return nil
 }
 

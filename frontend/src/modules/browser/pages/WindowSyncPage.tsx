@@ -5,7 +5,6 @@ import {
   Columns,
   Grip,
   Info,
-  Keyboard,
   LayoutGrid,
   Monitor,
   Minimize2,
@@ -82,6 +81,7 @@ export function WindowSyncPage() {
   const [showSyncControls, setShowSyncControls] = useState(false)
   const [profiles, setProfiles] = useState<SyncProfileInfo[]>([])
   const [selectedIds, setSelectedIds] = useState<Set<string>>(loadStoredSelectedIds)
+  const selectedIdsRef = useRef(selectedIds)
   const [masterId, setMasterId] = useState<string | null>(() => localStorage.getItem(SYNC_MASTER_STORAGE_KEY) || null)
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
   const [starting, setStarting] = useState(false)
@@ -130,15 +130,21 @@ export function WindowSyncPage() {
         return
       }
 
+      const runningIds = new Set(sorted.filter(item => item.status === 'running').map(item => item.profileId))
       setSelectedIds(prev => {
-        const runningIds = new Set(sorted.filter(item => item.status === 'running').map(item => item.profileId))
         const next = new Set<string>()
         prev.forEach(id => {
           if (runningIds.has(id)) next.add(id)
         })
         return next
       })
-      setMasterId(prev => (prev && sorted.some(item => item.profileId === prev && item.status === 'running') ? prev : null))
+      setMasterId(prev => {
+        if (prev && runningIds.has(prev)) return prev
+        // A stopped profile named "default" is not a valid controller. Recover
+        // to a real browser window so reopening the assistant is immediately usable.
+        const firstSelectedRunning = sorted.find(item => runningIds.has(item.profileId) && selectedIdsRef.current.has(item.profileId))
+        return firstSelectedRunning?.profileId || sorted.find(item => item.status === 'running')?.profileId || null
+      })
     } finally {
       if (!silent) {
         pendingManualRefreshes.current = Math.max(0, pendingManualRefreshes.current - 1)
@@ -150,6 +156,7 @@ export function WindowSyncPage() {
   }, [])
 
   useEffect(() => {
+    selectedIdsRef.current = selectedIds
     localStorage.setItem(SYNC_SELECTED_STORAGE_KEY, JSON.stringify(Array.from(selectedIds)))
   }, [selectedIds])
 
@@ -352,7 +359,7 @@ export function WindowSyncPage() {
 
   useEffect(() => {
     const compactClass = 'sync-panel-compact'
-    if (syncPanelMode && compactSyncStatusMode) {
+    if (syncPanelMode && (compactSyncStatusMode || compactFunctionPanelMode || minimizedPanelMode)) {
       document.body.classList.add(compactClass)
       return () => {
         document.body.classList.remove(compactClass)
@@ -363,7 +370,7 @@ export function WindowSyncPage() {
     return () => {
       document.body.classList.remove(compactClass)
     }
-  }, [compactFunctionPanelMode, compactSyncStatusMode, syncPanelMode])
+  }, [compactFunctionPanelMode, compactSyncStatusMode, minimizedPanelMode, syncPanelMode])
 
   useEffect(() => {
     if (!syncPanelMode) {
@@ -482,14 +489,14 @@ export function WindowSyncPage() {
     await loadProfiles()
   }
 
-  const handleConfigChange = async (mouseEnabled: boolean, keyEnabled: boolean) => {
+  const handleConfigChange = async (mouseEnabled: boolean) => {
     if (!isSyncing) return
-    const err = await updateSyncConfig(mouseEnabled, keyEnabled)
+    const err = await updateSyncConfig(mouseEnabled, true)
     if (err) {
       toast.error(`更新配置失败：${err}`)
       return
     }
-    setSyncStatus(prev => (prev ? { ...prev, mouseEnabled, keyEnabled } : prev))
+    setSyncStatus(prev => (prev ? { ...prev, mouseEnabled, keyEnabled: true } : prev))
   }
 
   const handleRandomDelayChange = async (enabled: boolean) => {
@@ -555,15 +562,20 @@ export function WindowSyncPage() {
 
   if (minimizedPanelMode) {
     return (
-      <button
-        type="button"
-        className="flex h-16 w-16 items-center justify-center rounded-2xl border border-white/40 bg-[rgba(15,23,42,0.80)] text-white shadow-[0_12px_30px_rgba(15,23,42,0.30)] backdrop-blur-xl"
-        onClick={() => setPanelPresentation(isSyncing ? 'compact' : 'full')}
-        title="展开窗口同步助手"
-        style={{ ['--wails-draggable' as any]: 'drag' }}
-      >
-        <Monitor className="h-7 w-7" />
-      </button>
+      <div className="relative h-16 w-16 overflow-hidden rounded-[20px] border border-white/45 bg-[linear-gradient(145deg,rgba(24,39,70,.94),rgba(48,79,145,.88))] shadow-[0_14px_34px_rgba(15,23,42,.32)] backdrop-blur-xl" style={{ ['--wails-draggable' as any]: 'drag' }}>
+        <button
+          type="button"
+          className="flex h-full w-full flex-col items-center justify-center text-white"
+          onClick={() => setPanelPresentation('compact')}
+          title="展开窗口同步助手"
+          aria-label="展开窗口同步助手"
+          style={{ ['--wails-draggable' as any]: 'no-drag' }}
+        >
+          <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-white/15 text-[17px] font-black tracking-tight shadow-inner">B</span>
+          <span className="mt-1 text-[9px] font-semibold tracking-[.12em] text-white/80">SYNC</span>
+        </button>
+        <span className={`pointer-events-none absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full border-2 border-[#243b6b] ${isSyncing ? 'bg-[#4ade80]' : 'bg-[#fbbf24]'}`} />
+      </div>
     )
   }
 
@@ -782,22 +794,14 @@ export function WindowSyncPage() {
               </button>
             </div>
 
-            <div className="mt-2 grid grid-cols-2 gap-2">
+            <div className="mt-2 grid grid-cols-1 gap-2">
               <button
                 type="button"
                 className={`inline-flex h-9 items-center justify-center gap-2 rounded-2xl px-3 text-[13px] ${syncStatus?.mouseEnabled ? 'bg-[#dff6e5] text-[#173b21]' : 'bg-[#e8edf4] text-[#4a5565] hover:bg-[#dfe6ef]'}`}
-                onClick={() => handleConfigChange(!(syncStatus?.mouseEnabled ?? true), syncStatus?.keyEnabled ?? true)}
+                onClick={() => handleConfigChange(!(syncStatus?.mouseEnabled ?? true))}
               >
                 <MousePointer2 className="h-4 w-4" />
                 <span>{syncStatus?.mouseEnabled ? '鼠标开' : '鼠标关'}</span>
-              </button>
-              <button
-                type="button"
-                className={`inline-flex h-9 items-center justify-center gap-2 rounded-2xl px-3 text-[13px] ${syncStatus?.keyEnabled ? 'bg-[#dff6e5] text-[#173b21]' : 'bg-[#e8edf4] text-[#4a5565] hover:bg-[#dfe6ef]'}`}
-                onClick={() => handleConfigChange(syncStatus?.mouseEnabled ?? true, !(syncStatus?.keyEnabled ?? true))}
-              >
-                <Keyboard className="h-4 w-4" />
-                <span>{syncStatus?.keyEnabled ? '键盘开' : '键盘关'}</span>
               </button>
             </div>
 
@@ -949,18 +953,10 @@ export function WindowSyncPage() {
               <button
                 type="button"
                 className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 ${syncStatus?.mouseEnabled ? 'bg-[#123524] text-[#7cf4a8]' : 'bg-white/10 text-white/75 hover:bg-white/15'}`}
-                onClick={() => handleConfigChange(!(syncStatus?.mouseEnabled ?? true), syncStatus?.keyEnabled ?? true)}
+                onClick={() => handleConfigChange(!(syncStatus?.mouseEnabled ?? true))}
               >
                 <MousePointer2 className="h-4 w-4" />
                 <span>{syncStatus?.mouseEnabled ? '鼠标开' : '鼠标关'}</span>
-              </button>
-              <button
-                type="button"
-                className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 ${syncStatus?.keyEnabled ? 'bg-[#123524] text-[#7cf4a8]' : 'bg-white/10 text-white/75 hover:bg-white/15'}`}
-                onClick={() => handleConfigChange(syncStatus?.mouseEnabled ?? true, !(syncStatus?.keyEnabled ?? true))}
-              >
-                <Keyboard className="h-4 w-4" />
-                <span>{syncStatus?.keyEnabled ? '键盘开' : '键盘关'}</span>
               </button>
               <button type="button" className="inline-flex h-9 items-center rounded-xl bg-[#4b1620] px-3.5 text-sm font-medium text-[#ff9db0] hover:bg-[#5a1b27]" onClick={() => void handleStopSync()}>
                 停止同步
