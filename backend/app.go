@@ -291,7 +291,23 @@ func (a *App) startup(ctx context.Context) {
 	// 主程序被 watchdog 重启时，浏览器子进程仍然存活；启动后立即按
 	// --user-data-dir/--remote-debugging-port 重新接管运行状态，避免实例误显示“已停止”。
 	// crashfix probe: 保留首轮同步，但临时停掉常驻 reconciler，验证它是否是后台 exit_code=2 的来源。
-	a.reconcileBrowserRuntimeStateOnce()
+	// A clean installation has no profiles to recover. Running the Windows CIM
+	// process scan in that state only delays startup and, on affected machines,
+	// its five-second timeout can terminate the Wails host with exit code 2.
+	// Recovery is useful only after at least one profile has been registered.
+	profilesForRecovery := a.browserMgr.List()
+	hasRuntimeToRecover := false
+	for _, profile := range profilesForRecovery {
+		if profile.Running || profile.Pid > 0 || profile.DebugPort > 0 {
+			hasRuntimeToRecover = true
+			break
+		}
+	}
+	if hasRuntimeToRecover {
+		a.reconcileBrowserRuntimeStateOnce()
+	} else {
+		a.lifecycleLog("runtime-reconcile", "state=skipped", "reason=no-live-runtime")
+	}
 	if !a.panelMode {
 		a.startCacheAutoCleanScheduler()
 	}
