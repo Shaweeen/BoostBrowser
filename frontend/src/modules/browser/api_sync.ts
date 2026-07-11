@@ -28,6 +28,19 @@ export interface SyncStatus {
   followerIds: string[]
   mouseEnabled: boolean
   keyEnabled: boolean
+  randomDelayEnabled: boolean
+  randomDelayMinMs: number
+  randomDelayMaxMs: number
+}
+
+export async function updateSyncRandomDelay(enabled: boolean, minMs: number, maxMs: number): Promise<string | null> {
+  const bindings: any = await getBindings()
+  try {
+    await bindings?.UpdateSyncRandomDelay?.(enabled, minMs, maxMs)
+    return bindings?.UpdateSyncRandomDelay ? null : 'Wails 绑定不可用'
+  } catch (e: any) {
+    return e?.message || String(e)
+  }
 }
 
 export type TileLayoutMode = 'grid' | 'horizontal' | 'vertical'

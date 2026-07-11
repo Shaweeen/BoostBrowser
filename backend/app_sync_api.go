@@ -191,12 +191,25 @@ func (a *App) GetSyncStatus() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"active":       syncState.active,
-		"masterId":     syncState.masterId,
-		"followerIds":  syncState.followerIds,
-		"mouseEnabled": config.MouseEnabled,
-		"keyEnabled":   config.KeyEnabled,
+		"active":             syncState.active,
+		"masterId":           syncState.masterId,
+		"followerIds":        syncState.followerIds,
+		"mouseEnabled":       config.MouseEnabled,
+		"keyEnabled":         config.KeyEnabled,
+		"randomDelayEnabled": config.RandomDelayEnabled,
+		"randomDelayMinMs":   config.RandomDelayMinMs,
+		"randomDelayMaxMs":   config.RandomDelayMaxMs,
 	}
+}
+
+func (a *App) UpdateSyncRandomDelay(enabled bool, minMs, maxMs int) error {
+	syncState.mu.Lock()
+	defer syncState.mu.Unlock()
+	if syncState.syncer == nil {
+		return fmt.Errorf("同步未启动")
+	}
+	syncState.syncer.SetRandomDelay(enabled, minMs, maxMs)
+	return nil
 }
 
 // UpdateSyncConfig 更新同步配置（鼠标/键盘开关）

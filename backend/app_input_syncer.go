@@ -4,6 +4,7 @@ package backend
 
 import (
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
 	"sync"
@@ -35,9 +36,14 @@ type InputSyncer struct {
 	followerDebug []int
 
 	// 原子状态：钩子回调中只读 atomic，不加锁
-	active       int32 // 1=活跃, 0=停止
-	mouseEnabled int32 // 1=启用, 0=禁用
-	keyEnabled   int32 // 1=启用, 0=禁用
+	active             int32 // 1=活跃, 0=停止
+	mouseEnabled       int32 // 1=启用, 0=禁用
+	keyEnabled         int32 // 1=启用, 0=禁用
+	randomDelayEnabled int32
+	randomDelayMinMs   int32
+	randomDelayMaxMs   int32
+	randomDelayMu      sync.Mutex
+	randomDelayNext    map[windows.HWND]time.Time
 
 	mouseHook    uintptr
 	keyHook      uintptr
@@ -66,8 +72,11 @@ type InputSyncer struct {
 
 // SyncConfig 同步配置
 type SyncConfig struct {
-	MouseEnabled bool `json:"mouseEnabled"`
-	KeyEnabled   bool `json:"keyEnabled"`
+	MouseEnabled       bool `json:"mouseEnabled"`
+	KeyEnabled         bool `json:"keyEnabled"`
+	RandomDelayEnabled bool `json:"randomDelayEnabled"`
+	RandomDelayMinMs   int  `json:"randomDelayMinMs"`
+	RandomDelayMaxMs   int  `json:"randomDelayMaxMs"`
 }
 
 // NewInputSyncer 创建输入同步器
@@ -79,6 +88,7 @@ func NewInputSyncerWithLogger(lifecycleLogger func(event string, fields ...strin
 	return &InputSyncer{
 		stopCh:          make(chan struct{}),
 		lifecycleLogger: lifecycleLogger,
+		randomDelayNext: make(map[windows.HWND]time.Time),
 	}
 }
 
@@ -288,11 +298,61 @@ func (s *InputSyncer) SetConfig(mouseEnabled, keyEnabled bool) {
 	}
 }
 
+func (s *InputSyncer) SetRandomDelay(enabled bool, minMs, maxMs int) {
+	if minMs < 0 {
+		minMs = 0
+	}
+	if maxMs < minMs {
+		maxMs = minMs
+	}
+	if maxMs > 5000 {
+		maxMs = 5000
+	}
+	atomic.StoreInt32(&s.randomDelayMinMs, int32(minMs))
+	atomic.StoreInt32(&s.randomDelayMaxMs, int32(maxMs))
+	if enabled {
+		atomic.StoreInt32(&s.randomDelayEnabled, 1)
+	} else {
+		atomic.StoreInt32(&s.randomDelayEnabled, 0)
+	}
+}
+
+func (s *InputSyncer) dispatchWithRandomDelay(hwnd windows.HWND, action func()) {
+	if atomic.LoadInt32(&s.randomDelayEnabled) == 0 {
+		action()
+		return
+	}
+	minMs := int(atomic.LoadInt32(&s.randomDelayMinMs))
+	maxMs := int(atomic.LoadInt32(&s.randomDelayMaxMs))
+	delayMs := minMs
+	if maxMs > minMs {
+		delayMs += rand.Intn(maxMs - minMs + 1)
+	}
+	now := time.Now()
+	due := now.Add(time.Duration(delayMs) * time.Millisecond)
+	s.randomDelayMu.Lock()
+	if previous := s.randomDelayNext[hwnd]; !previous.IsZero() && !due.After(previous) {
+		due = previous.Add(time.Millisecond)
+	}
+	s.randomDelayNext[hwnd] = due
+	s.randomDelayMu.Unlock()
+	time.AfterFunc(time.Until(due), action)
+}
+
+func (s *InputSyncer) postMessageWithRandomDelay(hwnd windows.HWND, msg, wparam, lparam uintptr) {
+	s.dispatchWithRandomDelay(hwnd, func() {
+		procPostMessageW.Call(uintptr(hwnd), msg, wparam, lparam)
+	})
+}
+
 // GetConfig 返回当前同步配置
 func (s *InputSyncer) GetConfig() SyncConfig {
 	return SyncConfig{
-		MouseEnabled: atomic.LoadInt32(&s.mouseEnabled) == 1,
-		KeyEnabled:   atomic.LoadInt32(&s.keyEnabled) == 1,
+		MouseEnabled:       atomic.LoadInt32(&s.mouseEnabled) == 1,
+		KeyEnabled:         atomic.LoadInt32(&s.keyEnabled) == 1,
+		RandomDelayEnabled: atomic.LoadInt32(&s.randomDelayEnabled) == 1,
+		RandomDelayMinMs:   int(atomic.LoadInt32(&s.randomDelayMinMs)),
+		RandomDelayMaxMs:   int(atomic.LoadInt32(&s.randomDelayMaxMs)),
 	}
 }
 
@@ -633,9 +693,10 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 			}
 
 			// 发到顶层窗口：先 WM_MOUSEMOVE 让 Chrome 更新 hover 状态
-			procPostMessageW.Call(uintptr(hwnd), WM_MOUSEMOVE, wparam, lparam)
-			// 再发点击消息
-			procPostMessageW.Call(uintptr(hwnd), uintptr(msg), wparam, lparam)
+			s.dispatchWithRandomDelay(hwnd, func() {
+				procPostMessageW.Call(uintptr(hwnd), WM_MOUSEMOVE, wparam, lparam)
+				procPostMessageW.Call(uintptr(hwnd), uintptr(msg), wparam, lparam)
+			})
 
 			// 仅在首次点击时记录详细日志（避免日志过多）
 			if atomic.LoadInt32(&s.clickCount) <= 5 {
@@ -671,7 +732,9 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 				continue
 			}
 			wheelLParam := MAKELONG(uint16(int16(targetX)), uint16(int16(targetY)))
-			procPostMessageW.Call(uintptr(hwnd), WM_MOUSEWHEEL, wheelWParam, wheelLParam)
+			s.dispatchWithRandomDelay(hwnd, func() {
+				procPostMessageW.Call(uintptr(hwnd), WM_MOUSEWHEEL, wheelWParam, wheelLParam)
+			})
 		}
 
 	case WM_MOUSEMOVE:
@@ -702,7 +765,9 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 			if !ok {
 				continue
 			}
-			procPostMessageW.Call(uintptr(hwnd), WM_MOUSEMOVE, 0, lparam)
+			s.dispatchWithRandomDelay(hwnd, func() {
+				procPostMessageW.Call(uintptr(hwnd), WM_MOUSEMOVE, 0, lparam)
+			})
 		}
 	}
 
@@ -767,28 +832,28 @@ func (s *InputSyncer) keyHookCallback(nCode int, wParam uintptr, lParam uintptr)
 			if ctrlPressed {
 				switch vk {
 				case 0x41, 0x43, 0x56, 0x58, 0x5A: // A, C, V, X, Z
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, VK_CONTROL, makeKeyLParam(VK_CONTROL, true))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, uintptr(vk), keyParam)
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, uintptr(vk), makeKeyLParam(vk, false))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, VK_CONTROL, makeKeyLParam(VK_CONTROL, false))
+					s.postMessageWithRandomDelay(hwnd, WM_KEYDOWN, VK_CONTROL, makeKeyLParam(VK_CONTROL, true))
+					s.postMessageWithRandomDelay(hwnd, WM_KEYDOWN, uintptr(vk), keyParam)
+					s.postMessageWithRandomDelay(hwnd, WM_KEYUP, uintptr(vk), makeKeyLParam(vk, false))
+					s.postMessageWithRandomDelay(hwnd, WM_KEYUP, VK_CONTROL, makeKeyLParam(VK_CONTROL, false))
 					continue
 				}
 			}
 
 			// Alt 组合键
 			if altPressed {
-				procPostMessageW.Call(uintptr(hwnd), WM_SYSKEYDOWN, uintptr(vk), keyParam)
+				s.postMessageWithRandomDelay(hwnd, WM_SYSKEYDOWN, uintptr(vk), keyParam)
 				continue
 			}
 
 			// 特殊键：只发 WM_KEYDOWN
 			if isSpecialKey(vk) {
-				procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, uintptr(vk), keyParam)
+				s.postMessageWithRandomDelay(hwnd, WM_KEYDOWN, uintptr(vk), keyParam)
 			} else {
 				// 普通字符：只发 WM_CHAR
 				ch := toUnicode(uint16(vk), uint16(hook.ScanCode), (hook.Flags&0x01) != 0)
 				if ch != 0 {
-					procPostMessageW.Call(uintptr(hwnd), WM_CHAR, uintptr(ch), keyParam)
+					s.postMessageWithRandomDelay(hwnd, WM_CHAR, uintptr(ch), keyParam)
 				}
 			}
 		} else if msg == WM_KEYUP {
@@ -798,11 +863,11 @@ func (s *InputSyncer) keyHookCallback(nCode int, wParam uintptr, lParam uintptr)
 			if vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU {
 				continue
 			}
-			procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, uintptr(vk), makeKeyLParam(vk, false))
+			s.postMessageWithRandomDelay(hwnd, WM_KEYUP, uintptr(vk), makeKeyLParam(vk, false))
 		} else if msg == WM_SYSKEYDOWN {
-			procPostMessageW.Call(uintptr(hwnd), uintptr(msg), uintptr(vk), makeKeyLParam(vk, true))
+			s.postMessageWithRandomDelay(hwnd, uintptr(msg), uintptr(vk), makeKeyLParam(vk, true))
 		} else if msg == WM_SYSKEYUP {
-			procPostMessageW.Call(uintptr(hwnd), uintptr(msg), uintptr(vk), makeKeyLParam(vk, false))
+			s.postMessageWithRandomDelay(hwnd, uintptr(msg), uintptr(vk), makeKeyLParam(vk, false))
 		}
 	}
 

@@ -29,6 +29,7 @@ import {
   type SyncStatus,
   type TileLayoutMode,
   updateSyncConfig,
+  updateSyncRandomDelay,
 } from '../api_sync'
 
 function compareProfileName(a: SyncProfileInfo, b: SyncProfileInfo) {
@@ -80,8 +81,11 @@ export function WindowSyncPage() {
   const [customCols, setCustomCols] = useState('2')
   const [customRows, setCustomRows] = useState('1')
   const [displayLabel, setDisplayLabel] = useState('当前显示器')
-  const [panelFocused, setPanelFocused] = useState(false)
-  const [panelHovered, setPanelHovered] = useState(false)
+  const [, setPanelFocused] = useState(false)
+  const [, setPanelHovered] = useState(false)
+  const [randomDelayEnabled, setRandomDelayEnabled] = useState(false)
+  const [randomDelayMinMs, setRandomDelayMinMs] = useState('50')
+  const [randomDelayMaxMs, setRandomDelayMaxMs] = useState('200')
 
   const refreshTimer = useRef<ReturnType<typeof setInterval>>()
   const loadProfilesSeq = useRef(0)
@@ -101,6 +105,11 @@ export function WindowSyncPage() {
       const sorted = [...list].sort(compareProfileName)
       setProfiles(sorted)
       setSyncStatus(status)
+      if (status) {
+        setRandomDelayEnabled(status.randomDelayEnabled === true)
+        setRandomDelayMinMs(String(status.randomDelayMinMs || 50))
+        setRandomDelayMaxMs(String(status.randomDelayMaxMs || 200))
+      }
 
       if (status?.active) {
         const nextSelected = new Set([status.masterId, ...(status.followerIds || [])].filter(Boolean))
@@ -203,8 +212,7 @@ export function WindowSyncPage() {
   const compactSyncStatusMode = syncPanelMode && isSyncing && panelPresentation === 'compact'
   const compactFunctionPanelMode = syncPanelMode && !isSyncing && panelPresentation === 'compact'
   const compactPanelInteractive = syncPanelMode && (compactSyncStatusMode || compactFunctionPanelMode)
-  const compactPanelActive = compactPanelInteractive && (panelFocused || panelHovered)
-  const syncControlsVisible = compactSyncStatusMode ? compactPanelActive : showSyncControls
+  const syncControlsVisible = compactSyncStatusMode ? true : showSyncControls
 
   const handleCompactPanelMouseEnter = () => {
     if (compactPanelLeaveTimerRef.current) {
@@ -430,7 +438,6 @@ export function WindowSyncPage() {
       toast.error(`启动同步失败：${err}`)
       return
     }
-    toast.success('同步器已启动')
     setPanelPresentation('compact')
     setShowSyncControls(false)
     await loadProfiles()
@@ -442,7 +449,6 @@ export function WindowSyncPage() {
       toast.error(`停止同步失败：${err}`)
       return
     }
-    toast.success('同步已停止')
     setShowSyncControls(false)
     setPanelPresentation('compact')
     setToolbarMenu(null)
@@ -459,7 +465,20 @@ export function WindowSyncPage() {
     setSyncStatus(prev => (prev ? { ...prev, mouseEnabled, keyEnabled } : prev))
   }
 
-  const handleTile = async (layout: TileLayoutMode = tileLayout, toastLabel?: string) => {
+  const handleRandomDelayChange = async (enabled: boolean) => {
+    if (!isSyncing) return
+    const minMs = Math.max(0, Number(randomDelayMinMs) || 0)
+    const maxMs = Math.max(minMs, Number(randomDelayMaxMs) || minMs)
+    const err = await updateSyncRandomDelay(enabled, minMs, maxMs)
+    if (err) {
+      toast.error(`更新随机延时失败：${err}`)
+      return
+    }
+    setRandomDelayEnabled(enabled)
+    setSyncStatus(prev => prev ? { ...prev, randomDelayEnabled: enabled, randomDelayMinMs: minMs, randomDelayMaxMs: maxMs } : prev)
+  }
+
+  const handleTile = async (layout: TileLayoutMode = tileLayout, _toastLabel?: string) => {
     const ids = isSyncing ? activeSyncIds : Array.from(selectedIds)
     if (ids.length === 0) {
       toast.error('请先选择要排列的环境')
@@ -471,8 +490,6 @@ export function WindowSyncPage() {
       return
     }
     setTileLayout(result.layout)
-    const layoutText = toastLabel || (result.layout === 'vertical' ? '堆叠' : result.layout === 'horizontal' ? '横向排列' : '平铺')
-    toast.success(`已${layoutText} ${result.count} 个窗口`)
   }
 
   const handleApplyCustomLayout = async () => {
@@ -492,8 +509,7 @@ export function WindowSyncPage() {
       toast.error('请先选择要关闭的环境')
       return
     }
-    const closed = await syncCloseAll(ids)
-    toast.success(`已关闭 ${closed.length} 个环境`)
+    await syncCloseAll(ids)
     setSelectedIds(new Set())
     setMasterId(null)
     await loadProfiles()
@@ -659,7 +675,7 @@ export function WindowSyncPage() {
       <div className="inline-block overflow-visible bg-transparent px-0 pt-0 text-white">
         <div
           ref={compactPanelRef}
-          className={`w-[448px] rounded-[24px] border px-3.5 py-3.5 transition-all duration-200 ${compactPanelActive ? 'border-white/28 bg-[rgba(15,23,42,0.78)] shadow-[0_18px_42px_rgba(15,23,42,0.26)] backdrop-blur-[18px]' : 'border-white/10 bg-[rgba(15,23,42,0.18)] shadow-none backdrop-blur-0'}`}
+          className="w-[448px] rounded-[24px] border border-white/28 bg-[rgba(15,23,42,0.88)] px-3.5 py-3.5 shadow-[0_18px_42px_rgba(15,23,42,0.26)] backdrop-blur-[18px]"
           onMouseEnter={handleCompactPanelMouseEnter}
           onMouseLeave={handleCompactPanelMouseLeave}
         >
@@ -724,6 +740,25 @@ export function WindowSyncPage() {
                 <Keyboard className="h-4 w-4" />
                 <span>{syncStatus?.keyEnabled ? '键盘开' : '键盘关'}</span>
               </button>
+            </div>
+
+            <div className="mt-2 rounded-2xl border border-white/14 bg-white/8 p-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[13px] text-white">同步随机延时</span>
+                <button
+                  type="button"
+                  className={`h-7 rounded-full px-3 text-xs ${randomDelayEnabled ? 'bg-[#dff6e5] text-[#173b21]' : 'bg-white/12 text-white/75'}`}
+                  onClick={() => void handleRandomDelayChange(!randomDelayEnabled)}
+                >
+                  {randomDelayEnabled ? '已开启' : '已关闭'}
+                </button>
+              </div>
+              <div className="mt-2 grid grid-cols-[1fr_auto_1fr_auto] items-center gap-2 text-xs text-white/70">
+                <input className="h-8 min-w-0 rounded-lg bg-white/12 px-2 text-white outline-none" type="number" min="0" max="5000" value={randomDelayMinMs} onChange={event => setRandomDelayMinMs(event.target.value)} />
+                <span>至</span>
+                <input className="h-8 min-w-0 rounded-lg bg-white/12 px-2 text-white outline-none" type="number" min="0" max="5000" value={randomDelayMaxMs} onChange={event => setRandomDelayMaxMs(event.target.value)} />
+                <span>ms</span>
+              </div>
             </div>
 
             <button

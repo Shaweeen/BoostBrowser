@@ -450,6 +450,10 @@ export function UpdateSyncConfig(arg1, arg2) {
   return window['go']['main']['App']['UpdateSyncConfig'](arg1, arg2);
 }
 
+export function UpdateSyncRandomDelay(arg1, arg2, arg3) {
+  return window['go']['main']['App']['UpdateSyncRandomDelay'](arg1, arg2, arg3);
+}
+
 export function ValidateProxyConfig(arg1, arg2) {
   return window['go']['main']['App']['ValidateProxyConfig'](arg1, arg2);
 }
