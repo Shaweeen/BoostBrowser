@@ -16,7 +16,7 @@ import {
   X,
 } from 'lucide-react'
 import { Button, Input, Select, toast } from '../../../shared/components'
-import { CloseWindowSyncPanel, IsWindowSyncPanelMode } from '../../../wailsjs/go/main/App'
+import { IsWindowSyncPanelMode } from '../../../wailsjs/go/main/App'
 import { EventsOn, ScreenGetAll, WindowCenter, WindowSetAlwaysOnTop, WindowSetMinSize, WindowSetPosition, WindowSetSize, WindowShow, WindowUnminimise } from '../../../wailsjs/runtime/runtime'
 import {
   getSyncProfiles,
@@ -524,7 +524,8 @@ export function WindowSyncPage() {
 
   const handleClosePanel = () => {
     if (!syncPanelMode) return
-    void CloseWindowSyncPanel().catch(() => {})
+    setShowSyncControls(false)
+    setPanelPresentation('minimized')
   }
 
   const handleOpenFullPanel = () => {
@@ -535,7 +536,7 @@ export function WindowSyncPage() {
 
   if (minimizedPanelMode) {
     return (
-      <div className="relative flex h-14 w-44 items-center overflow-hidden rounded-[18px] border border-white/35 bg-[linear-gradient(135deg,rgba(15,23,42,.96),rgba(42,67,122,.94))] px-2.5 shadow-[0_12px_30px_rgba(15,23,42,.30)] backdrop-blur-xl" style={{ ['--wails-draggable' as any]: 'drag' }}>
+      <div className="relative flex h-14 w-44 items-center overflow-hidden bg-[linear-gradient(135deg,#0f172a,#2a437a)] px-2.5 shadow-[0_8px_22px_rgba(15,23,42,.28)]" style={{ ['--wails-draggable' as any]: 'drag' }}>
         <button
           type="button"
           className="flex h-10 w-full items-center gap-2.5 rounded-[13px] px-1.5 text-left text-white transition hover:bg-white/10"
@@ -569,7 +570,7 @@ export function WindowSyncPage() {
       <div className="inline-block overflow-visible bg-transparent px-0 pt-0 text-white">
         <div
           ref={compactPanelRef}
-          className="w-[520px] rounded-[24px] border border-[#dbe5f3] bg-[rgba(239,245,255,0.80)] px-4 py-4 text-[#111827] shadow-[0_18px_40px_rgba(35,68,135,0.16)] backdrop-blur-xl transition-all duration-200"
+          className="w-[520px] border border-[#dbe5f3] bg-[#eff5ff] px-4 py-4 text-[#111827] shadow-[0_14px_32px_rgba(35,68,135,0.14)] transition-all duration-200"
           onMouseEnter={handleCompactPanelMouseEnter}
           onMouseLeave={handleCompactPanelMouseLeave}
         >
@@ -716,7 +717,7 @@ export function WindowSyncPage() {
       <div className="inline-block overflow-visible bg-transparent px-0 pt-0 text-white">
         <div
           ref={compactPanelRef}
-          className="w-[448px] rounded-[24px] border border-white/28 bg-[rgba(15,23,42,0.80)] px-3.5 py-3.5 shadow-[0_18px_42px_rgba(15,23,42,0.26)] backdrop-blur-[18px]"
+          className="w-[448px] border border-[#26324a] bg-[#0f172a] px-3.5 py-3.5 shadow-[0_14px_32px_rgba(15,23,42,0.28)]"
           onMouseEnter={handleCompactPanelMouseEnter}
           onMouseLeave={handleCompactPanelMouseLeave}
         >

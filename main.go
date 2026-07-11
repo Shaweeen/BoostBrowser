@@ -360,18 +360,17 @@ func main() {
 		title = fmt.Sprintf("%s · 同步工具", cfg.App.Name)
 		width = 520
 		height = 600
-		// 同步面板现在默认直接以小悬浮窗启动；最小尺寸仅覆盖折叠状态和“显示下面功能”展开状态。
 		minWidth = 448
 		minHeight = 120
-		// 同步器悬浮窗恢复为真实透明宿主，前端再根据聚焦态决定面板的不透明度。
-		// 这样空闲时尽量接近“只有一层透明浮层”，聚焦/操作时再抬高可见度。
-		backgroundColour = &options.RGBA{R: 0, G: 0, B: 0, A: 0}
+		// Use a fully opaque native host. Transparent/translucent WebView windows
+		// can lose their hit-test surface on blur and appear to disappear.
+		backgroundColour = &options.RGBA{R: 239, G: 245, B: 255, A: 255}
 		frameless = true
 		alwaysOnTop = true
 		disableResize = true
 		windowsOptions = &windows.Options{
-			WebviewIsTransparent:              true,
-			WindowIsTranslucent:               true,
+			WebviewIsTransparent:              false,
+			WindowIsTranslucent:               false,
 			DisableFramelessWindowDecorations: true,
 		}
 	}

@@ -26,12 +26,12 @@ body {
 }
 
 body.sync-panel-compact {
-  background: transparent;
+  background: #eff5ff;
 }
 
 html:has(body.sync-panel-compact),
 body.sync-panel-compact #root {
-  background: transparent;
+  background: #eff5ff;
 }
 
 html:has(body.sync-panel-compact),
