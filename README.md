@@ -152,6 +152,33 @@ after validation.
 
 ## One-command Windows package
 
+### New private Windows computer: install everything and run
+
+Open **Windows PowerShell** on the new computer. Install Git first, then clone
+the private repository. Git Credential Manager opens a browser for GitHub sign-in,
+so no access token needs to be saved in a command or script:
+
+```powershell
+winget install --id Git.Git --exact --accept-package-agreements --accept-source-agreements
+$env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+git clone https://github.com/Shaweeen/BrowserStudio.git "$HOME\BrowserStudio"
+cd "$HOME\BrowserStudio"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup_new_windows_private.ps1
+```
+
+The setup script installs Go, Node.js LTS, NSIS, WebView2, the Visual C++ x64
+runtime, and the Wails CLI version pinned by `go.mod`. It then downloads the
+verified CloakBrowser kernel, builds the Private full installer, verifies its
+SHA-256 hash, and opens it. The installer still requires a valid installation
+key. Private repository access is controlled by the GitHub account used during
+the browser sign-in.
+
+To build without opening the generated installer:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup_new_windows_private.ps1 -NoLaunchInstaller
+```
+
 Build the public redistributable Manager edition:
 
 ```powershell

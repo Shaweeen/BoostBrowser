@@ -85,6 +85,22 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("BOOST_KERNEL_SRC", text)
         self.assertIn("google-148.0.7778.167", text)
 
+    def test_new_windows_private_setup_installs_and_builds_private_edition(self):
+        text = self.read("scripts/setup_new_windows_private.ps1")
+        for package in [
+            "Git.Git",
+            "GoLang.Go",
+            "OpenJS.NodeJS.LTS",
+            "NSIS.NSIS",
+            "Microsoft.EdgeWebView2Runtime",
+            "Microsoft.VCRedist.2015+.x64",
+        ]:
+            self.assertIn(package, text)
+        self.assertIn("go.mod", text)
+        self.assertIn("build_windows_selfuse.ps1", text)
+        self.assertIn("BrowserStudio-Private-Setup", text)
+        self.assertIn("Get-FileHash", text)
+
     def test_public_manager_build_never_bundles_third_party_runtimes(self):
         wrapper = self.read("scripts/build_windows_public.ps1")
         installer = self.read("scripts/build_installer.ps1")
