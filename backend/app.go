@@ -312,6 +312,9 @@ func (a *App) startup(ctx context.Context) {
 		a.startCacheAutoCleanScheduler()
 	}
 	// a.startBrowserRuntimeReconciler()
+	if !a.panelMode {
+		a.startSyncBridge()
+	}
 
 	// v1.6.12: 暂停启动后台代理测速定时器。
 	// 线上证据显示 v1.6.10/v1.6.11 主程序按 5~7 分钟周期以 exit_code=2 退出，
