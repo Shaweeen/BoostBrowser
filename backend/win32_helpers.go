@@ -69,8 +69,9 @@ const (
 )
 
 var (
-	user32dll = windows.NewLazyDLL("user32.dll")
-	gdi32dll  = windows.NewLazyDLL("gdi32.dll")
+	user32dll   = windows.NewLazyDLL("user32.dll")
+	gdi32dll    = windows.NewLazyDLL("gdi32.dll")
+	kernel32dll = windows.NewLazyDLL("kernel32.dll")
 
 	procFindWindowW              = user32dll.NewProc("FindWindowW")
 	procEnumWindows              = user32dll.NewProc("EnumWindows")
@@ -103,6 +104,9 @@ var (
 	procGetClientRect            = user32dll.NewProc("GetClientRect")
 	procClientToScreen           = user32dll.NewProc("ClientToScreen")
 	procMapVirtualKeyW           = user32dll.NewProc("MapVirtualKeyW")
+	procCreateToolhelp32Snapshot = kernel32dll.NewProc("CreateToolhelp32Snapshot")
+	procProcess32FirstW          = kernel32dll.NewProc("Process32FirstW")
+	procProcess32NextW           = kernel32dll.NewProc("Process32NextW")
 )
 
 // MAKELONG 模拟 Win32 MAKELONG 宏
@@ -251,4 +255,58 @@ func findProcessWindow(pid int) (windows.HWND, error) {
 		}
 	}
 	return best.hwnd, nil
+}
+
+// findProcessTreeWindow resolves the real Chrome frame even when the launcher
+// PID hands the browser window to a child process. CloakBrowser and current
+// Chrome builds can both exhibit this during startup/recovery.
+func findProcessTreeWindow(rootPID int) (windows.HWND, error) {
+	if hwnd, err := findProcessWindow(rootPID); err == nil {
+		return hwnd, nil
+	}
+	const th32csSnapProcess = 0x00000002
+	const invalidHandleValue = ^uintptr(0)
+	type processEntry32 struct {
+		Size            uint32
+		Usage           uint32
+		ProcessID       uint32
+		DefaultHeapID   uintptr
+		ModuleID        uint32
+		Threads         uint32
+		ParentProcessID uint32
+		PriClassBase    int32
+		Flags           uint32
+		ExeFile         [260]uint16
+	}
+	snapshot, _, _ := procCreateToolhelp32Snapshot.Call(th32csSnapProcess, 0)
+	if snapshot == invalidHandleValue || snapshot == 0 {
+		return 0, fmt.Errorf("无法读取 PID=%d 的进程树", rootPID)
+	}
+	defer windows.CloseHandle(windows.Handle(snapshot))
+
+	children := map[int][]int{}
+	var entry processEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	ret, _, _ := procProcess32FirstW.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
+	for ret != 0 {
+		children[int(entry.ParentProcessID)] = append(children[int(entry.ParentProcessID)], int(entry.ProcessID))
+		entry.Size = uint32(unsafe.Sizeof(entry))
+		ret, _, _ = procProcess32NextW.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
+	}
+
+	queue := append([]int(nil), children[rootPID]...)
+	seen := map[int]bool{rootPID: true}
+	for len(queue) > 0 {
+		pid := queue[0]
+		queue = queue[1:]
+		if seen[pid] {
+			continue
+		}
+		seen[pid] = true
+		if hwnd, err := findProcessWindow(pid); err == nil {
+			return hwnd, nil
+		}
+		queue = append(queue, children[pid]...)
+	}
+	return 0, fmt.Errorf("未找到 PID=%d 进程树中的浏览器主窗口", rootPID)
 }

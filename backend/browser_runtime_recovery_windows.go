@@ -176,7 +176,7 @@ func pickRuntimeProcessForSync(candidates []browserRuntimeProcess) (browserRunti
 		if proc.PID <= 0 {
 			continue
 		}
-		if _, err := findProcessWindow(proc.PID); err == nil {
+		if _, err := findProcessTreeWindow(proc.PID); err == nil {
 			return proc, true
 		}
 	}

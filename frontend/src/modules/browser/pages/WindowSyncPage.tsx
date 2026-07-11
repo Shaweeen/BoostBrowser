@@ -290,7 +290,10 @@ export function WindowSyncPage() {
           : compactFunctionPanelMode
             ? PANEL_COMPACT_FUNCTION_SIZE
             : PANEL_EXPANDED_SIZE
-      const shouldPinTop = compactSyncStatusMode || compactFunctionPanelMode
+      // The sync tool is a dedicated control surface. Keep every presentation
+      // above the main client and browser windows so expanding it cannot look
+      // like the panel disappeared behind another window.
+      const shouldPinTop = true
       WindowSetAlwaysOnTop(shouldPinTop)
       WindowSetMinSize(target.minWidth, target.minHeight)
       WindowSetSize(target.width, target.height)
@@ -632,7 +635,7 @@ export function WindowSyncPage() {
                       </button>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <span className="truncate text-sm font-semibold text-[#111827]">{profile.profileName || profile.profileId}</span>
+                          <span className="truncate text-sm font-semibold text-[#111827]">{profile.badgeNumber > 0 ? `#${profile.badgeNumber} · ` : ''}{profile.profileName || profile.profileId}</span>
                           {isMaster && <span className="rounded-full bg-[#d9e7ff] px-2 py-0.5 text-xs font-semibold text-[#3a6be0]">主控</span>}
                           {!isSelectable && <span className="rounded-full bg-[#f2f4f7] px-2 py-0.5 text-xs font-semibold text-[#667085]">无窗口</span>}
                         </div>
@@ -1027,7 +1030,7 @@ export function WindowSyncPage() {
                       <div key={profile.profileId} className="flex items-center gap-3 border-b border-[var(--color-border)] px-4 py-3 last:border-b-0">
                         <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#eefbf3] text-xs font-semibold text-[#2c9c59]">跟</span>
                         <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-semibold text-[var(--color-text-primary)]">{profile.profileName || profile.profileId}</div>
+                          <div className="truncate text-sm font-semibold text-[var(--color-text-primary)]">{profile.badgeNumber > 0 ? `#${profile.badgeNumber} · ` : ''}{profile.profileName || profile.profileId}</div>
                           <div className="mt-1 text-xs text-[var(--color-text-muted)]">PID {profile.pid || '-'} · 正在跟随主控输入</div>
                         </div>
                       </div>
@@ -1059,7 +1062,7 @@ export function WindowSyncPage() {
                         </button>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
-                            <span className="truncate text-sm font-semibold text-[var(--color-text-primary)]">{profile.profileName || profile.profileId}</span>
+                            <span className="truncate text-sm font-semibold text-[var(--color-text-primary)]">{profile.badgeNumber > 0 ? `#${profile.badgeNumber} · ` : ''}{profile.profileName || profile.profileId}</span>
                             {isMaster && <span className="rounded-full bg-[#d9e7ff] px-2 py-0.5 text-xs font-semibold text-[#3a6be0]">主控</span>}
                             {!isMaster && isFollower && <span className="rounded-full bg-[#dcf7e4] px-2 py-0.5 text-xs font-semibold text-[#2c9c59]">跟随</span>}
                           </div>

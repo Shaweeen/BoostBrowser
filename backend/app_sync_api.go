@@ -35,6 +35,7 @@ type SyncProfileInfo struct {
 	Hwnd        int64  `json:"hwnd"`
 	Running     bool   `json:"running"`
 	Status      string `json:"status"` // "running" | "no_window" | "stopped"
+	BadgeNumber int    `json:"badgeNumber"`
 }
 
 // GetSyncProfiles 获取所有可用于同步的实例列表
@@ -59,6 +60,7 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 			Pid:         p.Pid,
 			DebugPort:   p.DebugPort,
 			Running:     p.Running,
+			BadgeNumber: extractBadgeNumberFromName(p.ProfileName),
 		}
 		if p.Pid <= 0 {
 			info.Status = "no_window"
@@ -66,7 +68,7 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 			continue
 		}
 
-		hwnd, err := findProcessWindow(p.Pid)
+		hwnd, err := findProcessTreeWindow(p.Pid)
 		if err == nil {
 			info.Hwnd = int64(hwnd)
 			info.Status = "running"
@@ -99,7 +101,7 @@ func (a *App) StartInputSync(masterProfileId string, followerProfileIds []string
 		return fmt.Errorf("主控实例未在运行：%s", masterProfileId)
 	}
 
-	masterHwnd, err := findProcessWindow(masterProfile.Pid)
+	masterHwnd, err := findProcessTreeWindow(masterProfile.Pid)
 	if err != nil {
 		return fmt.Errorf("未找到主控实例窗口：%v", err)
 	}
@@ -117,7 +119,7 @@ func (a *App) StartInputSync(masterProfileId string, followerProfileIds []string
 		if !ok || !fp.Running || fp.Pid <= 0 {
 			continue
 		}
-		fhwnd, err := findProcessWindow(fp.Pid)
+		fhwnd, err := findProcessTreeWindow(fp.Pid)
 		if err != nil {
 			continue
 		}
@@ -249,7 +251,7 @@ func (a *App) SyncTileWindows(profileIds []string, masterProfileId string, layou
 		if !ok || !profile.Running || profile.Pid <= 0 {
 			continue
 		}
-		hwnd, err := findProcessWindow(profile.Pid)
+		hwnd, err := findProcessTreeWindow(profile.Pid)
 		if err != nil {
 			continue
 		}

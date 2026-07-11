@@ -293,9 +293,9 @@ func overlayBadgeNumber(img *image.NRGBA, number int) *image.NRGBA {
 	if len(numStr) > 4 {
 		numStr = numStr[len(numStr)-4:]
 	}
-	digitW := 10 * scale
-	digitH := 16 * scale
-	stroke := 3 * scale
+	digitW := 13 * scale
+	digitH := 20 * scale
+	stroke := 4 * scale
 	gap := 2 * scale
 	if len(numStr) >= 3 {
 		digitW = 8 * scale
@@ -306,8 +306,8 @@ func overlayBadgeNumber(img *image.NRGBA, number int) *image.NRGBA {
 	totalFontWidth := len(numStr)*digitW + (len(numStr)-1)*gap
 	totalFontHeight := digitH
 
-	padX := 5 * scale
-	padY := 4 * scale
+	padX := 6 * scale
+	padY := 5 * scale
 	pillW := totalFontWidth + padX*2
 	pillH := totalFontHeight + padY*2
 	if pillW < pillH {
@@ -620,7 +620,7 @@ func loadIconFromFile(icoPath string, size int) (windows.HWND, error) {
 
 // setWindowIcon 为指定进程的窗口设置自定义图标。
 func setWindowIcon(pid int, icoPath string) error {
-	hwnd, err := findProcessWindow(pid)
+	hwnd, err := findProcessTreeWindow(pid)
 	if err != nil {
 		return fmt.Errorf("查找窗口失败: %v", err)
 	}

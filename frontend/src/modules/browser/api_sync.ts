@@ -20,6 +20,7 @@ export interface SyncProfileInfo {
   hwnd: number
   running: boolean
   status: string // "running" | "no_window" | "stopped"
+  badgeNumber: number
 }
 
 export interface SyncStatus {
