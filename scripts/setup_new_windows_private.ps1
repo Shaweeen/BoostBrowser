@@ -32,7 +32,14 @@ function Install-WingetPackage([string]$Id, [string]$CommandName) {
 
     Write-Host "Installing $Id ..." -ForegroundColor Cyan
     & winget install --id $Id --exact --silent --disable-interactivity --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -ne 0) { throw "winget failed to install $Id (exit $LASTEXITCODE)" }
+    $wingetExitCode = $LASTEXITCODE
+    # 0x8A15002B means that the package is already installed and no applicable
+    # upgrade exists. Windows PowerShell exposes that HRESULT as -1978335189.
+    if ($wingetExitCode -eq -1978335189) {
+        Write-Host "$Id is already installed and current" -ForegroundColor Green
+    } elseif ($wingetExitCode -ne 0) {
+        throw "winget failed to install $Id (exit $wingetExitCode)"
+    }
     Refresh-Path
 }
 
@@ -92,4 +99,3 @@ if (-not $NoLaunchInstaller) {
     Write-Host "Launching the installer. Enter your valid installation key when prompted." -ForegroundColor Cyan
     Start-Process -FilePath $installer.FullName -Wait
 }
-

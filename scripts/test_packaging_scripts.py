@@ -100,6 +100,8 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("build_windows_selfuse.ps1", text)
         self.assertIn("BrowserStudio-Private-Setup", text)
         self.assertIn("Get-FileHash", text)
+        self.assertIn("-1978335189", text)
+        self.assertIn("already installed and current", text)
 
     def test_public_manager_build_never_bundles_third_party_runtimes(self):
         wrapper = self.read("scripts/build_windows_public.ps1")
