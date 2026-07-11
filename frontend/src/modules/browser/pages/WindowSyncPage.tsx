@@ -8,6 +8,7 @@ import {
   Keyboard,
   LayoutGrid,
   Monitor,
+  Minimize2,
   MousePointer2,
   Move,
   RefreshCw,
@@ -77,7 +78,7 @@ export function WindowSyncPage() {
   const compactPanelLeaveTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
   const syncPanelWindowBootstrappedRef = useRef(false)
   const [syncPanelMode, setSyncPanelMode] = useState(false)
-  const [panelPresentation, setPanelPresentation] = useState<'compact' | 'full'>('full')
+  const [panelPresentation, setPanelPresentation] = useState<'minimized' | 'compact' | 'full'>('full')
   const [showSyncControls, setShowSyncControls] = useState(false)
   const [profiles, setProfiles] = useState<SyncProfileInfo[]>([])
   const [selectedIds, setSelectedIds] = useState<Set<string>>(loadStoredSelectedIds)
@@ -231,6 +232,7 @@ export function WindowSyncPage() {
   const compactRunningMode = isSyncing && !syncPanelMode
   const compactSyncStatusMode = syncPanelMode && isSyncing && panelPresentation === 'compact'
   const compactFunctionPanelMode = syncPanelMode && !isSyncing && panelPresentation === 'compact'
+  const minimizedPanelMode = syncPanelMode && panelPresentation === 'minimized'
   const compactPanelInteractive = syncPanelMode && (compactSyncStatusMode || compactFunctionPanelMode)
   const syncControlsVisible = compactSyncStatusMode ? true : showSyncControls
 
@@ -307,6 +309,8 @@ export function WindowSyncPage() {
     const applyWindowMode = async () => {
       const target = compactSyncStatusMode
           ? (syncControlsVisible ? PANEL_COMPACT_STATUS_SIZE : PANEL_COMPACT_STATUS_COLLAPSED_SIZE)
+          : minimizedPanelMode
+            ? { width: 64, height: 64, minWidth: 64, minHeight: 64 }
           : compactFunctionPanelMode
             ? PANEL_COMPACT_FUNCTION_SIZE
             : PANEL_EXPANDED_SIZE
@@ -344,7 +348,7 @@ export function WindowSyncPage() {
       void applyWindowMode()
     }, compactSyncStatusMode ? 40 : 0)
     return () => window.clearTimeout(timer)
-  }, [compactFunctionPanelMode, compactSyncStatusMode, syncControlsVisible, syncPanelMode])
+  }, [compactFunctionPanelMode, compactSyncStatusMode, minimizedPanelMode, syncControlsVisible, syncPanelMode])
 
   useEffect(() => {
     const compactClass = 'sync-panel-compact'
@@ -549,6 +553,20 @@ export function WindowSyncPage() {
     setPanelPresentation('full')
   }
 
+  if (minimizedPanelMode) {
+    return (
+      <button
+        type="button"
+        className="flex h-16 w-16 items-center justify-center rounded-2xl border border-white/40 bg-[rgba(15,23,42,0.80)] text-white shadow-[0_12px_30px_rgba(15,23,42,0.30)] backdrop-blur-xl"
+        onClick={() => setPanelPresentation(isSyncing ? 'compact' : 'full')}
+        title="展开窗口同步助手"
+        style={{ ['--wails-draggable' as any]: 'drag' }}
+      >
+        <Monitor className="h-7 w-7" />
+      </button>
+    )
+  }
+
   const visibleSelectableProfiles = visibleProfiles.filter(item => item.status === 'running')
   const compactProfiles = displayProfiles
   const compactSelectableProfiles = compactProfiles.filter(item => item.status === 'running')
@@ -560,7 +578,7 @@ export function WindowSyncPage() {
       <div className="inline-block overflow-visible bg-transparent px-0 pt-0 text-white">
         <div
           ref={compactPanelRef}
-          className="w-[520px] rounded-[24px] border border-[#dbe5f3] bg-[linear-gradient(180deg,#eff5ff_0%,#f6f8fc_45%,#fbfcfe_100%)] px-4 py-4 text-[#111827] shadow-[0_18px_40px_rgba(35,68,135,0.16)] transition-all duration-200"
+          className="w-[520px] rounded-[24px] border border-[#dbe5f3] bg-[rgba(239,245,255,0.80)] px-4 py-4 text-[#111827] shadow-[0_18px_40px_rgba(35,68,135,0.16)] backdrop-blur-xl transition-all duration-200"
           onMouseEnter={handleCompactPanelMouseEnter}
           onMouseLeave={handleCompactPanelMouseLeave}
         >
@@ -572,6 +590,15 @@ export function WindowSyncPage() {
               <div className="whitespace-normal break-words text-[16px] font-semibold leading-5 text-[#111827]">窗口同步功能页</div>
               <div className="mt-1 text-[12px] text-[#667085]">运行中 {compactSelectableProfiles.length} · 共 {compactProfiles.length} · 已选 {selectedCount} · 主控 {displayProfiles.find(item => item.profileId === masterId)?.profileName || displayProfiles.find(item => item.profileId === masterId)?.profileId || '未设置'}</div>
             </div>
+            <button
+              type="button"
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#c8d0dc] bg-white/80 text-[#344054]"
+              onClick={() => setPanelPresentation('minimized')}
+              title="最小化为悬浮图标"
+              style={{ ['--wails-draggable' as any]: 'no-drag' }}
+            >
+              <Minimize2 className="h-4 w-4" />
+            </button>
             <button
               type="button"
               className="inline-flex h-9 items-center justify-center self-center rounded-full border border-[#c8d0dc] bg-white px-3 text-sm font-medium text-[#344054] shadow-[0_8px_18px_rgba(16,24,40,0.08)] transition hover:bg-[#eef2f7] hover:text-[#111827]"
@@ -698,7 +725,7 @@ export function WindowSyncPage() {
       <div className="inline-block overflow-visible bg-transparent px-0 pt-0 text-white">
         <div
           ref={compactPanelRef}
-          className="w-[448px] rounded-[24px] border border-white/28 bg-[rgba(15,23,42,0.88)] px-3.5 py-3.5 shadow-[0_18px_42px_rgba(15,23,42,0.26)] backdrop-blur-[18px]"
+          className="w-[448px] rounded-[24px] border border-white/28 bg-[rgba(15,23,42,0.80)] px-3.5 py-3.5 shadow-[0_18px_42px_rgba(15,23,42,0.26)] backdrop-blur-[18px]"
           onMouseEnter={handleCompactPanelMouseEnter}
           onMouseLeave={handleCompactPanelMouseLeave}
         >
@@ -710,6 +737,15 @@ export function WindowSyncPage() {
               <div className="whitespace-normal break-words text-[15px] font-semibold leading-5 text-white">{activeSyncCount} 个环境同步中</div>
               <div className="mt-0.5 text-[11px] text-white/72">主控 {masterProfile?.profileName || masterProfile?.profileId || '-'} · 跟随 {followerCount} · {statusLayoutLabel}</div>
             </div>
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-white/10 text-white"
+              onClick={() => setPanelPresentation('minimized')}
+              title="最小化为悬浮图标"
+              style={{ ['--wails-draggable' as any]: 'no-drag' }}
+            >
+              <Minimize2 className="h-4 w-4" />
+            </button>
             <button
               type="button"
               className="inline-flex h-8 shrink-0 items-center justify-center self-center rounded-full border border-[#e49aa6] bg-[#d74c68] px-3 text-[13px] font-semibold text-white shadow-[0_8px_20px_rgba(215,76,104,0.24)] transition hover:bg-[#e05c76]"

@@ -104,6 +104,7 @@ var (
 	procGetClientRect            = user32dll.NewProc("GetClientRect")
 	procClientToScreen           = user32dll.NewProc("ClientToScreen")
 	procMapVirtualKeyW           = user32dll.NewProc("MapVirtualKeyW")
+	procGetWindow                = user32dll.NewProc("GetWindow")
 	procCreateToolhelp32Snapshot = kernel32dll.NewProc("CreateToolhelp32Snapshot")
 	procProcess32FirstW          = kernel32dll.NewProc("Process32FirstW")
 	procProcess32NextW           = kernel32dll.NewProc("Process32NextW")
@@ -228,8 +229,19 @@ func findProcessWindow(pid int) (windows.HWND, error) {
 		// Chrome_WidgetWin_0 and titled renderer/extension helper HWNDs can be
 		// visible transiently; selecting one makes tiling/show operations surface
 		// an undecorated white window over the page.
-		if !strings.EqualFold(className, "Chrome_WidgetWin_1") && !strings.EqualFold(className, "Chrome_MainWindow") {
+		isPrimaryClass := strings.EqualFold(className, "Chrome_WidgetWin_1") || strings.EqualFold(className, "Chrome_MainWindow")
+		isCloakTopLevelFallback := strings.EqualFold(className, "Chrome_WidgetWin_0") && strings.TrimSpace(title) != ""
+		if !isPrimaryClass && !isCloakTopLevelFallback {
 			return 1
+		}
+		// Chrome_WidgetWin_0 is also used by transient helpers. Only accept an
+		// unowned, titled top-level frame as the CloakBrowser fallback.
+		if isCloakTopLevelFallback {
+			const gwOwner = 4
+			owner, _, _ := procGetWindow.Call(uintptr(hwnd), gwOwner)
+			if owner != 0 {
+				return 1
+			}
 		}
 		clientW, clientH, ok := getClientSize(hwnd)
 		if !ok || clientW < 320 || clientH < 240 || clientW > 10000 || clientH > 10000 {
