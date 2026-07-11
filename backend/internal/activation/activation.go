@@ -60,3 +60,17 @@ func DeriveInstallerProof(seed string) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("browserstudio-install:%s:v1", strings.TrimSpace(seed))))
 	return hex.EncodeToString(sum[:])
 }
+
+func ValidateInstallerSeed(seed string) bool {
+	want, _ := hex.DecodeString(expectedProofHex)
+	got, err := hex.DecodeString(DeriveInstallerProof(seed))
+	return err == nil && len(got) == len(want) && subtle.ConstantTimeCompare(got, want) == 1
+}
+
+func WriteInstallerMarker(path string) error {
+	marker, err := json.Marshal(installerMarker{Scheme: "offline-installer-v1", Proof: expectedProofHex})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, marker, 0o600)
+}

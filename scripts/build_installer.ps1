@@ -84,6 +84,7 @@ Write-Host "==> Version: v$Version" -ForegroundColor Cyan
 $ReleaseDir = "$RepoRoot\build\release"
 $BoostExe = "$ReleaseDir\boost-browser.exe"
 $UpdaterExe = "$ReleaseDir\updater.exe"
+$ActivationCheckExe = "$ReleaseDir\activation-check.exe"
 $Stage = 'C:\Temp\BrowserStudio_installer_staging'
 $Publish = "$RepoRoot\publish\output"
 $NsiPath = "$RepoRoot\publish\boost-browser-installer.nsi"
@@ -102,20 +103,9 @@ $BinSrc = "$AssetRoot\bin"
 $ConfigSrc = "$RepoRoot\config.yaml"
 $AppIconSrc = if (Test-Path -LiteralPath "$AssetRoot\app.ico") { "$AssetRoot\app.ico" } else { "$RepoRoot\build\windows\icon.ico" }
 $AppPngSrc = if (Test-Path -LiteralPath "$AssetRoot\app.png") { "$AssetRoot\app.png" } else { "$RepoRoot\build\appicon.png" }
-$ActivationSeed = $env:BROWSERSTUDIO_INSTALL_SEED
-if ([string]::IsNullOrWhiteSpace($ActivationSeed)) {
-    throw 'Missing BROWSERSTUDIO_INSTALL_SEED. Supply it through the process environment or CI secret store.'
-}
-$ActivationMaterial = [Text.Encoding]::UTF8.GetBytes("browserstudio-install:${ActivationSeed}:v1")
-$ActivationHasher = [Security.Cryptography.SHA256]::Create()
-try {
-    $ActivationProof = -join ($ActivationHasher.ComputeHash($ActivationMaterial) | ForEach-Object { $_.ToString('x2') })
-} finally {
-    $ActivationHasher.Dispose()
-}
-
 Require-Path $BoostExe "Missing $BoostExe. Run scripts\build_release.ps1 first."
 Require-Path $UpdaterExe "Missing $UpdaterExe. Run scripts\build_release.ps1 first."
+Require-Path $ActivationCheckExe "Missing $ActivationCheckExe. Run scripts\build_release.ps1 first."
 Require-Path "$CloakKernelSrc\chrome.exe" "Missing CloakBrowser kernel: $CloakKernelSrc\chrome.exe"
 Require-Path $Icon "Missing icon: $Icon"
 New-Item -ItemType Directory -Force -Path $Publish | Out-Null
@@ -142,10 +132,6 @@ if (Test-Path -LiteralPath $GoogleKernelSrc) {
     Write-Host "Optional Google fallback missing; skipped: $GoogleKernelSrc" -ForegroundColor Yellow
 }
 New-Item -ItemType Directory -Force -Path "$Stage\data" | Out-Null
-$ActivationMarker = @{ scheme = 'offline-installer-v1'; proof = $ActivationProof } | ConvertTo-Json -Compress
-# JSON is ASCII-only here. Windows PowerShell 5.1 writes a BOM for -Encoding
-# UTF8, which encoding/json intentionally rejects, so keep the marker BOM-free.
-Set-Content -LiteralPath "$Stage\.browserstudio-activation.json" -Value $ActivationMarker -Encoding ASCII
 
 Get-ChildItem $Stage -Recurse -File -Force | Where-Object {
     $_.Name -in @('LOCK','LOG','LOG.old') -or $_.Name -like '*.tmp'
@@ -178,6 +164,7 @@ Unicode True
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
+!include "nsDialogs.nsh"
 
 Name "`${PRODUCT_NAME} `${PRODUCT_VERSION}"
 OutFile "$OutExe"
@@ -199,11 +186,51 @@ UninstallIcon "`${APP_ICON}"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
+Page custom ActivationPage ActivationPageLeave
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
+
+Var ActivationDialog
+Var ActivationInput
+
+Function .onInit
+  InitPluginsDir
+  SetOutPath `$PLUGINSDIR
+  File /oname=activation-check.exe "$ActivationCheckExe"
+FunctionEnd
+
+Function ActivationPage
+  nsDialogs::Create 1018
+  Pop `$ActivationDialog
+  `$`{If} `$ActivationDialog == error
+    Abort
+  `$`{EndIf}
+  !insertmacro MUI_HEADER_TEXT "Activate BrowserStudio" "Enter a valid installation key to continue."
+  `$`{NSD_CreateLabel} 0 8u 100% 24u "Installation key"
+  Pop `$0
+  `$`{NSD_CreatePassword} 0 34u 100% 14u ""
+  Pop `$ActivationInput
+  `$`{NSD_SetFocus} `$ActivationInput
+  nsDialogs::Show
+FunctionEnd
+
+Function ActivationPageLeave
+  `$`{NSD_GetText} `$ActivationInput `$0
+  StrCmp `$0 "" activation_failed
+  FileOpen `$1 "`$PLUGINSDIR\activation.input" w
+  FileWrite `$1 `$0
+  FileClose `$1
+  ExecWait '"`$PLUGINSDIR\activation-check.exe" "`$PLUGINSDIR\activation.input" "`$PLUGINSDIR\activation.marker"' `$2
+  Delete "`$PLUGINSDIR\activation.input"
+  IntCmp `$2 0 activation_ok activation_failed activation_failed
+activation_failed:
+  MessageBox MB_ICONSTOP|MB_OK "Invalid installation key. Installation cannot continue."
+  Abort
+activation_ok:
+FunctionEnd
 
 Function CloseBoostProcesses
   IfFileExists "`$INSTDIR" 0 done
@@ -221,6 +248,7 @@ Section "BrowserStudio" SecMain
   Call CloseBoostProcesses
   SetOutPath "`$INSTDIR"
   !include "$NshPath"
+  CopyFiles /SILENT "`$PLUGINSDIR\activation.marker" "`$INSTDIR\.browserstudio-activation.json"
   SetOutPath "`$INSTDIR"
   WriteUninstaller "`$INSTDIR\Uninstall.exe"
   CreateDirectory "`$SMPROGRAMS\`${PRODUCT_NAME}"

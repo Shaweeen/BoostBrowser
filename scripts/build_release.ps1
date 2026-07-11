@@ -35,6 +35,12 @@ if (-not (Test-Path $BuiltExe)) { throw "未找到 $BuiltExe" }
 Copy-Item $BuiltExe "$ReleaseDir\boost-browser.exe" -Force
 Write-Host "    -> $ReleaseDir\boost-browser.exe ($([math]::Round((Get-Item "$ReleaseDir\boost-browser.exe").Length/1MB, 2)) MB)" -ForegroundColor Green
 
+# 4. 编译安装激活校验器（仅嵌入 Setup，不安装到应用目录）
+Write-Host "==> 编译 activation-check.exe (go build) ..." -ForegroundColor Yellow
+& go build -trimpath -ldflags "-s -w" -o "$ReleaseDir\activation-check.exe" ".\backend\cmd\activation-check"
+if ($LASTEXITCODE -ne 0) { throw "activation-check.exe 构建失败" }
+if (-not (Test-Path "$ReleaseDir\activation-check.exe")) { throw "未找到 $ReleaseDir\activation-check.exe" }
+
 # 5. 编译 updater.exe
 Write-Host "==> 编译 updater.exe (go build) ..." -ForegroundColor Yellow
 & go build -o "$ReleaseDir\updater.exe" ".\backend\cmd\updater"

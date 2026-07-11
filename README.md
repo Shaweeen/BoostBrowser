@@ -42,21 +42,14 @@ Install Wails:
 go install github.com/wailsapp/wails/v2/cmd/wails@latest
 ```
 
-## Activation input
+## Installer activation
 
-The private installer seed is never stored in source code. Supply it only as
-the `BROWSERSTUDIO_INSTALL_SEED` environment variable or as a GitHub Actions
-secret with the same name. The packaged application contains only a one-way
-verification value.
-
-For a local PowerShell session:
-
-```powershell
-$env:BROWSERSTUDIO_INSTALL_SEED = '<private installer seed>'
-```
-
-Do not commit the value to configuration files, scripts, workflow YAML, logs,
-or release notes.
+Packaging does not require an activation environment variable. The generated
+NSIS installer displays an activation page before any application files are
+installed. A valid installation key is required to continue. Validation is
+performed by a small embedded checker; only a one-way verifier is shipped and
+the entered key is deleted from the installer temporary directory immediately
+after validation.
 
 ## One-command Windows package
 
