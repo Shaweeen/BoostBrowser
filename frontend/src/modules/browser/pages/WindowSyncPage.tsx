@@ -191,18 +191,24 @@ export function WindowSyncPage() {
     let stopped = false
     let zeroConfirmations = 0
     let bridgeFailures = 0
+    let recoveryGraceUntil = 0
     const checkRuntimeState = async () => {
       const status = await getSyncStatus()
       if (stopped) return
       if (!status || status.bridgeError) {
         bridgeFailures += 1
         zeroConfirmations = 0
-        if (bridgeFailures >= 2) void ExitWindowSyncPanel().catch(() => {})
+        recoveryGraceUntil = Date.now() + 15000
+        if (bridgeFailures >= 30) void ExitWindowSyncPanel().catch(() => {})
         return
       }
       bridgeFailures = 0
       if ((status.runningProfileCount ?? 0) > 0) {
         // Any client-owned running instance immediately cancels exit.
+        zeroConfirmations = 0
+        return
+      }
+      if (Date.now() < recoveryGraceUntil) {
         zeroConfirmations = 0
         return
       }
@@ -562,12 +568,6 @@ export function WindowSyncPage() {
     await handleTile(nextLayout, `按 ${cols}×${rows} 自定义排列`)
   }
 
-  const handleClosePanel = () => {
-    if (!syncPanelMode) return
-    setShowSyncControls(false)
-    setPanelPresentation('minimized')
-  }
-
   const handleExitAssistant = async () => {
     if (isSyncing) await stopInputSync()
     await ExitWindowSyncPanel().catch(() => {})
@@ -648,9 +648,9 @@ export function WindowSyncPage() {
             <button
               type="button"
               className="inline-flex h-9 w-9 shrink-0 items-center justify-center self-center rounded-full border border-[#c8d0dc] bg-white text-[#344054] shadow-[0_8px_18px_rgba(16,24,40,0.12)] transition hover:bg-[#eef2f7] hover:text-[#111827]"
-              onClick={handleClosePanel}
-              title="关闭同步窗口"
-              aria-label="关闭同步窗口"
+              onClick={() => void handleExitAssistant()}
+              title="退出同步助手"
+              aria-label="退出同步助手"
               style={{ ['--wails-draggable' as any]: 'no-drag' }}
             >
               <X className="h-4 w-4" />
@@ -791,6 +791,16 @@ export function WindowSyncPage() {
               style={{ ['--wails-draggable' as any]: 'no-drag' }}
             >
               重新配置
+            </button>
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/20 bg-white/10 text-white transition hover:border-[#d74c68] hover:bg-[#d74c68]"
+              onClick={() => void handleExitAssistant()}
+              title="退出同步助手"
+              aria-label="退出同步助手"
+              style={{ ['--wails-draggable' as any]: 'no-drag' }}
+            >
+              <X className="h-4 w-4" />
             </button>
           </div>
 
@@ -994,9 +1004,9 @@ export function WindowSyncPage() {
               <button
                 type="button"
                 className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-[#d8dee8] bg-white text-[#475467] shadow-sm transition hover:bg-[#f2f4f7] hover:text-[#101828] dark:border-[var(--color-border)] dark:bg-[var(--color-bg-muted)] dark:text-[var(--color-text-secondary)]"
-                onClick={handleClosePanel}
-                title="关闭同步窗口"
-                aria-label="关闭同步窗口"
+                onClick={() => void handleExitAssistant()}
+                title="退出同步助手"
+                aria-label="退出同步助手"
               >
                 <X className="h-4 w-4" />
               </button>

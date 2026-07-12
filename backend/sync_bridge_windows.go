@@ -36,7 +36,20 @@ func (a *App) startSyncBridge() {
 	if a == nil || a.panelMode {
 		return
 	}
-	listener, err := net.Listen("tcp", syncBridgeAddress)
+	go a.runSyncBridge()
+}
+
+func (a *App) runSyncBridge() {
+	var listener net.Listener
+	var err error
+	for attempt := 1; attempt <= 30; attempt++ {
+		listener, err = net.Listen("tcp", syncBridgeAddress)
+		if err == nil {
+			break
+		}
+		a.lifecycleLog("sync-bridge", "state=listen-retry", fmt.Sprintf("attempt=%d", attempt), "error="+err.Error())
+		time.Sleep(time.Second)
+	}
 	if err != nil {
 		a.lifecycleLog("sync-bridge", "state=listen-failed", "error="+err.Error())
 		return
@@ -77,8 +90,8 @@ func (a *App) startSyncBridge() {
 		writeSyncBridgeJSON(w, syncBridgeEnvelope{OK: true, Tile: result})
 	})
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
-	go func() { _ = server.Serve(listener) }()
 	a.lifecycleLog("sync-bridge", "state=started", "address="+syncBridgeAddress)
+	_ = server.Serve(listener)
 }
 
 func writeSyncBridgeResult(w http.ResponseWriter, err error) {

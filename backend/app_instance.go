@@ -318,9 +318,9 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		"--no-first-run",
 		"--no-default-browser-check",
 	}
-	// All kernels start at one predictable 1.42:1 workspace size. Persisted
+	// All kernels start at one predictable 16:10 workspace size. Persisted
 	// bounds may describe a maximised/tiled/off-screen previous session.
-	args = append(args, "--window-size=1400,800")
+	args = append(args, "--window-size=1440,900")
 
 	// 非 Cloak 内核仍保留 --search-provider-* 作为启动期兜底。
 	// Cloak 路径下禁止再注入这组命令行参数：实际 packaged 目标里它会留下
