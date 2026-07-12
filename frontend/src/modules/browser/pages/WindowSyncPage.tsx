@@ -15,14 +15,13 @@ import {
   X,
 } from 'lucide-react'
 import { Button, Input, Select, toast } from '../../../shared/components'
-import { IsWindowSyncPanelMode } from '../../../wailsjs/go/main/App'
+import { ExitWindowSyncPanel, IsWindowSyncPanelMode } from '../../../wailsjs/go/main/App'
 import { EventsOn, ScreenGetAll, WindowCenter, WindowGetPosition, WindowSetAlwaysOnTop, WindowSetMinSize, WindowSetPosition, WindowSetSize, WindowShow, WindowUnminimise } from '../../../wailsjs/runtime/runtime'
 import {
   getSyncProfiles,
   getSyncStatus,
   startInputSync,
   stopInputSync,
-  syncCloseAll,
   syncTileWindows,
   type SyncProfileInfo,
   type SyncStatus,
@@ -58,13 +57,16 @@ const PANEL_COMPACT_STATUS_COLLAPSED_SIZE = { width: 400, height: 104, minWidth:
 const PANEL_COMPACT_FUNCTION_SIZE = { width: 440, height: 108, minWidth: 440, minHeight: 108 }
 const PANEL_TOP_MARGIN_PX = 8
 const PANEL_COMPACT_EDGE_PADDING_PX = 0
-const PANEL_MINI_SIZE = { width: 176, height: 56, minWidth: 176, minHeight: 56 }
+const PANEL_MINI_SIZE = { width: 136, height: 44, minWidth: 136, minHeight: 44 }
 
 export function WindowSyncPage() {
   const compactPanelRef = useRef<HTMLDivElement | null>(null)
   const compactPanelLeaveTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
   const syncPanelWindowBootstrappedRef = useRef(false)
   const autoCollapseTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
+  const panelStartedAtRef = useRef(Date.now())
+  const runningSeenRef = useRef(false)
+  const emptyRefreshCountRef = useRef(0)
   const [syncPanelMode, setSyncPanelMode] = useState(false)
   const [panelPresentation, setPanelPresentation] = useState<'minimized' | 'compact' | 'full'>('full')
   const [showSyncControls, setShowSyncControls] = useState(false)
@@ -103,6 +105,17 @@ export function WindowSyncPage() {
       if (seq !== loadProfilesSeq.current) return
 
       const sorted = [...list].sort(compareProfileName)
+	  const runningCount = sorted.filter(item => item.status === 'running').length
+	  if (runningCount > 0) {
+		runningSeenRef.current = true
+		emptyRefreshCountRef.current = 0
+	  } else if (syncPanelMode && Date.now() - panelStartedAtRef.current > 5000) {
+		emptyRefreshCountRef.current += 1
+		if (runningSeenRef.current || emptyRefreshCountRef.current >= 2) {
+			void stopInputSync().finally(() => ExitWindowSyncPanel().catch(() => {}))
+			return
+		}
+	  }
       setProfiles(sorted)
       setSyncStatus(status)
       if (status) {
@@ -135,7 +148,7 @@ export function WindowSyncPage() {
         }
       }
     }
-  }, [])
+  }, [syncPanelMode])
 
   useEffect(() => {
     let cancelled = false
@@ -529,22 +542,15 @@ export function WindowSyncPage() {
     await handleTile(nextLayout, `按 ${cols}×${rows} 自定义排列`)
   }
 
-  const handleCloseAll = async () => {
-    const ids = Array.from(selectedIds)
-    if (ids.length === 0) {
-      toast.error('请先选择要关闭的环境')
-      return
-    }
-    await syncCloseAll(ids)
-    setSelectedIds(new Set())
-    setMasterId(null)
-    await loadProfiles()
-  }
-
   const handleClosePanel = () => {
     if (!syncPanelMode) return
     setShowSyncControls(false)
     setPanelPresentation('minimized')
+  }
+
+  const handleExitAssistant = async () => {
+    if (isSyncing) await stopInputSync()
+    await ExitWindowSyncPanel().catch(() => {})
   }
 
   const handleOpenFullPanel = () => {
@@ -555,24 +561,24 @@ export function WindowSyncPage() {
 
   if (minimizedPanelMode) {
     return (
-      <div className="relative flex h-14 w-44 items-center overflow-hidden border border-[#d8e1ef] bg-[#f7f9fc] px-2 shadow-[0_10px_28px_rgba(30,58,110,.20)]">
-        <div className="flex h-10 w-11 shrink-0 cursor-move items-center justify-center" title="拖动同步工具" style={{ ['--wails-draggable' as any]: 'drag' }}>
-          <span className="relative flex h-9 w-9 items-center justify-center rounded-[11px] bg-[#17263d] text-[16px] font-black text-white">
+      <div className="relative flex h-11 w-[136px] items-center overflow-hidden bg-[#f8fafc] px-1.5 shadow-[0_8px_22px_rgba(30,58,110,.18)]">
+        <div className="flex h-9 w-9 shrink-0 cursor-move items-center justify-center" title="拖动同步工具" style={{ ['--wails-draggable' as any]: 'drag' }}>
+          <span className="relative flex h-8 w-8 items-center justify-center rounded-[9px] bg-[#17263d] text-[14px] font-black text-white">
             B
             <span className={`absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#f7f9fc] ${isSyncing ? 'bg-[#22c55e]' : 'bg-[#f59e0b]'}`} />
           </span>
         </div>
         <button
           type="button"
-          className="ml-1 flex h-10 min-w-0 flex-1 items-center gap-2 rounded-[11px] px-2 text-left text-[#17263d] transition hover:bg-[#eaf0f8]"
+          className="ml-1 flex h-9 min-w-0 flex-1 items-center rounded-[9px] px-1.5 text-left text-[#17263d] transition hover:bg-[#eaf0f8]"
           onClick={() => setPanelPresentation('compact')}
           title="展开窗口同步助手"
           aria-label="展开窗口同步助手"
           style={{ ['--wails-draggable' as any]: 'no-drag' }}
         >
           <span className="min-w-0 flex-1">
-            <span className="block text-[12px] font-semibold leading-4">同步工具</span>
-            <span className="block truncate text-[9px] leading-3 text-[#738199]">{isSyncing ? `${activeSyncCount} 个环境同步中` : '点击展开'}</span>
+            <span className="block text-[11px] font-semibold leading-4">同步工具</span>
+            <span className="block truncate text-[8px] leading-3 text-[#738199]">{isSyncing ? `${activeSyncCount} 个同步中` : '点击展开'}</span>
           </span>
         </button>
       </div>
@@ -720,8 +726,8 @@ export function WindowSyncPage() {
           </div>
 
           <div className="mt-2 grid grid-cols-[1fr_1fr] gap-2">
-            <Button variant="secondary" className="h-10" onClick={() => void handleCloseAll()} disabled={selectedIds.size === 0}>
-              关闭选中
+            <Button variant="secondary" className="h-9 text-sm" onClick={() => void handleExitAssistant()}>
+              退出同步助手
             </Button>
             <div className="inline-flex h-10 items-center justify-center rounded-2xl bg-[#eef2f7] px-3 text-sm text-[#475467]">
               {masterId ? `主控已设置` : '请先设 1 个主控'}
@@ -1170,8 +1176,8 @@ export function WindowSyncPage() {
               ) : null}
 
               {!isSyncing && (
-                <Button variant="secondary" className="h-11 w-full max-w-[180px]" onClick={() => void handleCloseAll()} disabled={selectedIds.size === 0}>
-                  关闭选中
+                <Button variant="secondary" className="h-10 w-full max-w-[180px]" onClick={() => void handleExitAssistant()}>
+                  退出同步助手
                 </Button>
               )}
 

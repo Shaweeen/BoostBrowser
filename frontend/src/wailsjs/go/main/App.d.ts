@@ -142,6 +142,8 @@ export function ClearIntentionalExitMarker():Promise<void>;
 
 export function CloseWindowSyncPanel():Promise<void>;
 
+export function ExitWindowSyncPanel():Promise<void>;
+
 export function CreateGroup(arg1:browser.GroupInput):Promise<browser.Group>;
 
 export function DeleteGroup(arg1:string):Promise<void>;

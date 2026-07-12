@@ -42,6 +42,10 @@ export function BrowserClearCookies(arg1) {
   return window['go']['main']['App']['BrowserClearCookies'](arg1);
 }
 
+export function ExitWindowSyncPanel() {
+  return window['go']['main']['App']['ExitWindowSyncPanel']();
+}
+
 export function BrowserCleanCache(arg1) {
   return window['go']['main']['App']['BrowserCleanCache'](arg1);
 }
