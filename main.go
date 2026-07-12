@@ -358,10 +358,10 @@ func main() {
 	disableResize := false
 	if syncPanelMode {
 		title = fmt.Sprintf("%s · 同步工具", cfg.App.Name)
-		width = 520
-		height = 600
-		minWidth = 448
-		minHeight = 120
+		width = 440
+		height = 520
+		minWidth = 176
+		minHeight = 56
 		// Use a fully opaque native host. Transparent/translucent WebView windows
 		// can lose their hit-test surface on blur and appear to disappear.
 		backgroundColour = &options.RGBA{R: 239, G: 245, B: 255, A: 255}

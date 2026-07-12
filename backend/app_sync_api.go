@@ -296,6 +296,20 @@ type TileWindowsResult struct {
 // masterProfileId: 主控实例ID，主控窗口始终放在最左边（index 0）
 // layoutMode: grid | horizontal | vertical
 func (a *App) SyncTileWindows(profileIds []string, masterProfileId string, layoutMode string) (*TileWindowsResult, error) {
+	if a.panelMode {
+		response, err := callSyncBridge("/tile", syncBridgeRequest{ProfileIDs: profileIds, MasterID: masterProfileId, Layout: layoutMode})
+		if err != nil {
+			return nil, err
+		}
+		if response.Tile == nil {
+			return nil, fmt.Errorf("主客户端没有返回窗口排列结果")
+		}
+		return response.Tile, nil
+	}
+	return a.syncTileWindowsLocal(profileIds, masterProfileId, layoutMode)
+}
+
+func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, layoutMode string) (*TileWindowsResult, error) {
 	a.browserMgr.Mutex.Lock()
 	defer a.browserMgr.Mutex.Unlock()
 

@@ -16,6 +16,8 @@ const syncBridgeAddress = "127.0.0.1:47823"
 type syncBridgeRequest struct {
 	MasterID    string   `json:"masterId,omitempty"`
 	FollowerIDs []string `json:"followerIds,omitempty"`
+	ProfileIDs  []string `json:"profileIds,omitempty"`
+	Layout      string   `json:"layout,omitempty"`
 	Mouse       bool     `json:"mouse,omitempty"`
 	MinMs       int      `json:"minMs,omitempty"`
 	MaxMs       int      `json:"maxMs,omitempty"`
@@ -27,6 +29,7 @@ type syncBridgeEnvelope struct {
 	Error    string                 `json:"error,omitempty"`
 	Profiles []SyncProfileInfo      `json:"profiles,omitempty"`
 	Status   map[string]interface{} `json:"status,omitempty"`
+	Tile     *TileWindowsResult     `json:"tile,omitempty"`
 }
 
 func (a *App) startSyncBridge() {
@@ -62,6 +65,16 @@ func (a *App) startSyncBridge() {
 		var req syncBridgeRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		writeSyncBridgeResult(w, a.updateSyncRandomDelayLocal(req.Enabled, req.MinMs, req.MaxMs))
+	})
+	mux.HandleFunc("/tile", func(w http.ResponseWriter, r *http.Request) {
+		var req syncBridgeRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		result, err := a.syncTileWindowsLocal(req.ProfileIDs, req.MasterID, req.Layout)
+		if err != nil {
+			writeSyncBridgeResult(w, err)
+			return
+		}
+		writeSyncBridgeJSON(w, syncBridgeEnvelope{OK: true, Tile: result})
 	})
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
 	go func() { _ = server.Serve(listener) }()

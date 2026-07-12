@@ -8,7 +8,6 @@ import {
   LayoutGrid,
   Monitor,
   Minimize2,
-  MousePointer2,
   Move,
   RefreshCw,
   Rows,
@@ -17,7 +16,7 @@ import {
 } from 'lucide-react'
 import { Button, Input, Select, toast } from '../../../shared/components'
 import { IsWindowSyncPanelMode } from '../../../wailsjs/go/main/App'
-import { EventsOn, ScreenGetAll, WindowCenter, WindowSetAlwaysOnTop, WindowSetMinSize, WindowSetPosition, WindowSetSize, WindowShow, WindowUnminimise } from '../../../wailsjs/runtime/runtime'
+import { EventsOn, ScreenGetAll, WindowCenter, WindowGetPosition, WindowSetAlwaysOnTop, WindowSetMinSize, WindowSetPosition, WindowSetSize, WindowShow, WindowUnminimise } from '../../../wailsjs/runtime/runtime'
 import {
   getSyncProfiles,
   getSyncStatus,
@@ -28,7 +27,6 @@ import {
   type SyncProfileInfo,
   type SyncStatus,
   type TileLayoutMode,
-  updateSyncConfig,
   updateSyncRandomDelay,
 } from '../api_sync'
 
@@ -54,10 +52,10 @@ const LAYOUT_OPTIONS: Array<{ value: TileLayoutMode; label: string }> = [
   { value: 'horizontal', label: '横向排列' },
 ]
 
-const PANEL_EXPANDED_SIZE = { width: 920, height: 680, minWidth: 820, minHeight: 620 }
-const PANEL_COMPACT_STATUS_SIZE = { width: 448, height: 312, minWidth: 320, minHeight: 80 }
-const PANEL_COMPACT_STATUS_COLLAPSED_SIZE = { width: 448, height: 120, minWidth: 320, minHeight: 80 }
-const PANEL_COMPACT_FUNCTION_SIZE = { width: 520, height: 120, minWidth: 520, minHeight: 120 }
+const PANEL_EXPANDED_SIZE = { width: 720, height: 580, minWidth: 680, minHeight: 520 }
+const PANEL_COMPACT_STATUS_SIZE = { width: 400, height: 260, minWidth: 360, minHeight: 80 }
+const PANEL_COMPACT_STATUS_COLLAPSED_SIZE = { width: 400, height: 104, minWidth: 360, minHeight: 80 }
+const PANEL_COMPACT_FUNCTION_SIZE = { width: 440, height: 108, minWidth: 440, minHeight: 108 }
 const PANEL_TOP_MARGIN_PX = 8
 const PANEL_COMPACT_EDGE_PADDING_PX = 0
 const PANEL_MINI_SIZE = { width: 176, height: 56, minWidth: 176, minHeight: 56 }
@@ -308,16 +306,20 @@ export function WindowSyncPage() {
         WindowUnminimise()
         syncPanelWindowBootstrappedRef.current = true
       }
-      // Preserve the user's dragged screen position when compacting/restoring.
-      if (shouldPinTop && isFirstShow) {
+      // Preserve the dragged position, but clamp the expanded panel into the
+      // current display so restoring a logo near an edge never goes off-screen.
+      if (shouldPinTop) {
         try {
           const screens = await ScreenGetAll()
           const current = screens.find(screen => screen.isCurrent) || screens.find(screen => screen.isPrimary) || screens[0]
           if (current) {
             const currentX = typeof (current as unknown as { x?: number }).x === 'number' ? (current as unknown as { x: number }).x : 0
             const currentY = typeof (current as unknown as { y?: number }).y === 'number' ? (current as unknown as { y: number }).y : 0
-            const x = Math.round(currentX + (current.width - target.width) / 2)
-            const y = Math.round(currentY + PANEL_TOP_MARGIN_PX)
+            const position = isFirstShow ? null : await WindowGetPosition()
+            const desiredX = position?.x ?? Math.round(currentX + (current.width - target.width) / 2)
+            const desiredY = position?.y ?? Math.round(currentY + PANEL_TOP_MARGIN_PX)
+            const x = Math.max(currentX, Math.min(desiredX, currentX + current.width - target.width))
+            const y = Math.max(currentY, Math.min(desiredY, currentY + current.height - target.height))
             WindowSetPosition(x, y)
             return
           }
@@ -489,16 +491,6 @@ export function WindowSyncPage() {
     await loadProfiles()
   }
 
-  const handleConfigChange = async (mouseEnabled: boolean) => {
-    if (!isSyncing) return
-    const err = await updateSyncConfig(mouseEnabled, true)
-    if (err) {
-      toast.error(`更新配置失败：${err}`)
-      return
-    }
-    setSyncStatus(prev => (prev ? { ...prev, mouseEnabled, keyEnabled: true } : prev))
-  }
-
   const handleRandomDelayChange = async (enabled: boolean) => {
     if (!isSyncing) return
     const minMs = Math.max(0, Number(randomDelayMinMs) || 0)
@@ -582,7 +574,6 @@ export function WindowSyncPage() {
             <span className="block text-[12px] font-semibold leading-4">同步工具</span>
             <span className="block truncate text-[9px] leading-3 text-[#738199]">{isSyncing ? `${activeSyncCount} 个环境同步中` : '点击展开'}</span>
           </span>
-          <ChevronDown className="h-4 w-4 shrink-0 -rotate-90 text-[#607089]" />
         </button>
       </div>
     )
@@ -599,7 +590,7 @@ export function WindowSyncPage() {
       <div className="inline-block overflow-visible bg-transparent px-0 pt-0 text-white">
         <div
           ref={compactPanelRef}
-          className="w-[520px] border border-[#dbe5f3] bg-[#eff5ff] px-4 py-4 text-[#111827] shadow-[0_14px_32px_rgba(35,68,135,0.14)] transition-all duration-200"
+          className="w-[440px] border border-[#dbe5f3] bg-[#eff5ff] px-3 py-3 text-[#111827] shadow-[0_14px_32px_rgba(35,68,135,0.14)] transition-all duration-200"
           onMouseEnter={handleCompactPanelMouseEnter}
           onMouseLeave={handleCompactPanelMouseLeave}
         >
@@ -686,7 +677,7 @@ export function WindowSyncPage() {
               </button>
             </div>
 
-            <div className="mt-3 max-h-[256px] overflow-auto rounded-2xl border border-[#e5e7eb] bg-[#fbfcfe]/92">
+            <div className="mt-3 max-h-[210px] overflow-auto rounded-xl border border-[#e5e7eb] bg-[#fbfcfe]">
               {compactProfiles.length === 0 ? (
                 <div className="px-6 py-12 text-center text-sm text-[#98a2b3]">暂无可同步实例</div>
               ) : (
@@ -695,7 +686,7 @@ export function WindowSyncPage() {
                   const isMaster = masterId === profile.profileId
                   const isSelectable = profile.status === 'running'
                   return (
-                    <div key={profile.profileId} className={`flex items-center gap-3 border-b border-[#e5e7eb] px-4 py-3 last:border-b-0 ${isMaster ? 'bg-[#eef4ff]' : isSelected ? 'bg-[#f7faff]' : ''}`}>
+                    <div key={profile.profileId} className={`flex items-center gap-2.5 border-b border-[#e5e7eb] px-3 py-2 last:border-b-0 ${isMaster ? 'bg-[#eef4ff]' : isSelected ? 'bg-[#f7faff]' : ''}`}>
                       <button type="button" className="shrink-0" onClick={() => toggleSelect(profile.profileId)} disabled={!isSelectable}>
                         {isSelected || isMaster
                           ? <CheckSquare className="h-4 w-4 text-[#3a6be0]" />
@@ -746,7 +737,7 @@ export function WindowSyncPage() {
       <div className="inline-block overflow-visible bg-transparent px-0 pt-0 text-white">
         <div
           ref={compactPanelRef}
-          className="w-[448px] border border-[#26324a] bg-[#0f172a] px-3.5 py-3.5 shadow-[0_14px_32px_rgba(15,23,42,0.28)]"
+          className="w-[400px] border border-[#26324a] bg-[#0f172a] px-3 py-3 shadow-[0_12px_28px_rgba(15,23,42,.24)]"
           onMouseEnter={handleCompactPanelMouseEnter}
           onMouseLeave={handleCompactPanelMouseLeave}
         >
@@ -800,17 +791,6 @@ export function WindowSyncPage() {
                 onClick={() => void handleTile('horizontal', '横排')}
               >
                 <Columns className="h-4 w-4" />横排
-              </button>
-            </div>
-
-            <div className="mt-2 grid grid-cols-1 gap-2">
-              <button
-                type="button"
-                className={`inline-flex h-9 items-center justify-center gap-2 rounded-2xl px-3 text-[13px] ${syncStatus?.mouseEnabled ? 'bg-[#dff6e5] text-[#173b21]' : 'bg-[#e8edf4] text-[#4a5565] hover:bg-[#dfe6ef]'}`}
-                onClick={() => handleConfigChange(!(syncStatus?.mouseEnabled ?? true))}
-              >
-                <MousePointer2 className="h-4 w-4" />
-                <span>{syncStatus?.mouseEnabled ? '鼠标开' : '鼠标关'}</span>
               </button>
             </div>
 
@@ -959,14 +939,6 @@ export function WindowSyncPage() {
             </button>
 
             <div className="ml-auto flex flex-wrap items-center gap-2 text-sm">
-              <button
-                type="button"
-                className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 ${syncStatus?.mouseEnabled ? 'bg-[#123524] text-[#7cf4a8]' : 'bg-white/10 text-white/75 hover:bg-white/15'}`}
-                onClick={() => handleConfigChange(!(syncStatus?.mouseEnabled ?? true))}
-              >
-                <MousePointer2 className="h-4 w-4" />
-                <span>{syncStatus?.mouseEnabled ? '鼠标开' : '鼠标关'}</span>
-              </button>
               <button type="button" className="inline-flex h-9 items-center rounded-xl bg-[#4b1620] px-3.5 text-sm font-medium text-[#ff9db0] hover:bg-[#5a1b27]" onClick={() => void handleStopSync()}>
                 停止同步
               </button>
