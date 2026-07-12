@@ -64,10 +64,6 @@ export function WindowSyncPage() {
   const compactPanelLeaveTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
   const syncPanelWindowBootstrappedRef = useRef(false)
   const autoCollapseTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
-  const panelStartedAtRef = useRef(Date.now())
-  const runningSeenRef = useRef(false)
-  const emptyRefreshCountRef = useRef(0)
-  const bridgeFailureCountRef = useRef(0)
   const [syncPanelMode, setSyncPanelMode] = useState(false)
   const [panelPresentation, setPanelPresentation] = useState<'minimized' | 'compact' | 'full'>('full')
   const [showSyncControls, setShowSyncControls] = useState(false)
@@ -106,27 +102,6 @@ export function WindowSyncPage() {
       if (seq !== loadProfilesSeq.current) return
 
       const sorted = [...list].sort(compareProfileName)
-      const bridgeError = (status as (SyncStatus & { bridgeError?: string }) | null)?.bridgeError
-      if (bridgeError || !status) {
-        bridgeFailureCountRef.current += 1
-        if (syncPanelMode && bridgeFailureCountRef.current >= 3) {
-          void ExitWindowSyncPanel().catch(() => {})
-          return
-        }
-      } else {
-        bridgeFailureCountRef.current = 0
-        const runningCount = sorted.filter(item => item.status === 'running').length
-        if (runningCount > 0) {
-          runningSeenRef.current = true
-          emptyRefreshCountRef.current = 0
-        } else if (syncPanelMode && Date.now() - panelStartedAtRef.current > 7000) {
-          emptyRefreshCountRef.current += 1
-          if (runningSeenRef.current || emptyRefreshCountRef.current >= 3) {
-            void stopInputSync().finally(() => ExitWindowSyncPanel().catch(() => {}))
-            return
-          }
-        }
-      }
       setProfiles(sorted)
       setSyncStatus(status)
       if (status) {
@@ -210,6 +185,40 @@ export function WindowSyncPage() {
       offUpdated?.()
     }
   }, [loadProfiles])
+
+  useEffect(() => {
+    if (!syncPanelMode) return
+    let stopped = false
+    let zeroConfirmations = 0
+    let bridgeFailures = 0
+    const checkRuntimeState = async () => {
+      const status = await getSyncStatus()
+      if (stopped) return
+      if (!status || status.bridgeError) {
+        bridgeFailures += 1
+        zeroConfirmations = 0
+        if (bridgeFailures >= 2) void ExitWindowSyncPanel().catch(() => {})
+        return
+      }
+      bridgeFailures = 0
+      if ((status.runningProfileCount ?? 0) > 0) {
+        // Any client-owned running instance immediately cancels exit.
+        zeroConfirmations = 0
+        return
+      }
+      zeroConfirmations += 1
+      if (zeroConfirmations >= 2) {
+        if (status.active) await stopInputSync()
+        if (!stopped) void ExitWindowSyncPanel().catch(() => {})
+      }
+    }
+    void checkRuntimeState()
+    const timer = window.setInterval(() => { void checkRuntimeState() }, 1000)
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+    }
+  }, [syncPanelMode])
 
   useEffect(() => {
     const screen = window.screen

@@ -226,6 +226,12 @@ func (a *App) GetSyncStatus() map[string]interface{} {
 }
 
 func (a *App) getSyncStatusLocal() map[string]interface{} {
+	runningProfileCount := 0
+	for _, profile := range a.browserMgr.List() {
+		if profile.Running {
+			runningProfileCount++
+		}
+	}
 	syncState.mu.Lock()
 	defer syncState.mu.Unlock()
 
@@ -235,14 +241,15 @@ func (a *App) getSyncStatusLocal() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"active":             syncState.active,
-		"masterId":           syncState.masterId,
-		"followerIds":        syncState.followerIds,
-		"mouseEnabled":       config.MouseEnabled,
-		"keyEnabled":         config.KeyEnabled,
-		"randomDelayEnabled": config.RandomDelayEnabled,
-		"randomDelayMinMs":   config.RandomDelayMinMs,
-		"randomDelayMaxMs":   config.RandomDelayMaxMs,
+		"active":              syncState.active,
+		"masterId":            syncState.masterId,
+		"followerIds":         syncState.followerIds,
+		"mouseEnabled":        config.MouseEnabled,
+		"keyEnabled":          config.KeyEnabled,
+		"randomDelayEnabled":  config.RandomDelayEnabled,
+		"randomDelayMinMs":    config.RandomDelayMinMs,
+		"randomDelayMaxMs":    config.RandomDelayMaxMs,
+		"runningProfileCount": runningProfileCount,
 	}
 }
 

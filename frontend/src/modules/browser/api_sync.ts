@@ -32,6 +32,8 @@ export interface SyncStatus {
   randomDelayEnabled: boolean
   randomDelayMinMs: number
   randomDelayMaxMs: number
+  runningProfileCount?: number
+  bridgeError?: string
 }
 
 export async function updateSyncRandomDelay(enabled: boolean, minMs: number, maxMs: number): Promise<string | null> {
