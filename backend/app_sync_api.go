@@ -313,6 +313,24 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	a.browserMgr.Mutex.Lock()
 	defer a.browserMgr.Mutex.Unlock()
 
+	// Reuse the exact HWNDs already validated by the active sync engine. Chrome
+	// can transfer its top-level frame to a sibling process, so resolving again
+	// from a stored PID is less reliable than the running session snapshot.
+	activeWindows := make(map[string]windows.HWND)
+	syncState.mu.Lock()
+	if syncState.active && syncState.masterHwnd != 0 {
+		activeWindows[syncState.masterId] = syncState.masterHwnd
+		if syncState.syncer != nil {
+			followerWindows := syncState.syncer.getFollowerSnapshot()
+			for i, id := range syncState.followerIds {
+				if i < len(followerWindows) {
+					activeWindows[id] = followerWindows[i]
+				}
+			}
+		}
+	}
+	syncState.mu.Unlock()
+
 	// 收集运行中的实例窗口
 	type winInfo struct {
 		hwnd      windows.HWND
@@ -320,6 +338,10 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	}
 	var wins []winInfo
 	for _, pid := range profileIds {
+		if hwnd := activeWindows[pid]; hwnd != 0 && isWindow(hwnd) {
+			wins = append(wins, winInfo{hwnd: hwnd, profileId: pid})
+			continue
+		}
 		profile, ok := a.browserMgr.Profiles[pid]
 		if !ok || !profile.Running || profile.Pid <= 0 {
 			continue
