@@ -67,6 +67,7 @@ export function WindowSyncPage() {
   const panelStartedAtRef = useRef(Date.now())
   const runningSeenRef = useRef(false)
   const emptyRefreshCountRef = useRef(0)
+  const bridgeFailureCountRef = useRef(0)
   const [syncPanelMode, setSyncPanelMode] = useState(false)
   const [panelPresentation, setPanelPresentation] = useState<'minimized' | 'compact' | 'full'>('full')
   const [showSyncControls, setShowSyncControls] = useState(false)
@@ -105,17 +106,27 @@ export function WindowSyncPage() {
       if (seq !== loadProfilesSeq.current) return
 
       const sorted = [...list].sort(compareProfileName)
-	  const runningCount = sorted.filter(item => item.status === 'running').length
-	  if (runningCount > 0) {
-		runningSeenRef.current = true
-		emptyRefreshCountRef.current = 0
-	  } else if (syncPanelMode && Date.now() - panelStartedAtRef.current > 5000) {
-		emptyRefreshCountRef.current += 1
-		if (runningSeenRef.current || emptyRefreshCountRef.current >= 2) {
-			void stopInputSync().finally(() => ExitWindowSyncPanel().catch(() => {}))
-			return
-		}
-	  }
+      const bridgeError = (status as (SyncStatus & { bridgeError?: string }) | null)?.bridgeError
+      if (bridgeError || !status) {
+        bridgeFailureCountRef.current += 1
+        if (syncPanelMode && bridgeFailureCountRef.current >= 3) {
+          void ExitWindowSyncPanel().catch(() => {})
+          return
+        }
+      } else {
+        bridgeFailureCountRef.current = 0
+        const runningCount = sorted.filter(item => item.status === 'running').length
+        if (runningCount > 0) {
+          runningSeenRef.current = true
+          emptyRefreshCountRef.current = 0
+        } else if (syncPanelMode && Date.now() - panelStartedAtRef.current > 7000) {
+          emptyRefreshCountRef.current += 1
+          if (runningSeenRef.current || emptyRefreshCountRef.current >= 3) {
+            void stopInputSync().finally(() => ExitWindowSyncPanel().catch(() => {}))
+            return
+          }
+        }
+      }
       setProfiles(sorted)
       setSyncStatus(status)
       if (status) {
@@ -349,7 +360,7 @@ export function WindowSyncPage() {
   }, [compactFunctionPanelMode, compactSyncStatusMode, minimizedPanelMode, syncControlsVisible, syncPanelMode])
 
   useEffect(() => {
-    if (!syncPanelMode || minimizedPanelMode) {
+    if (!syncPanelMode || minimizedPanelMode || !isSyncing) {
       if (autoCollapseTimerRef.current) window.clearTimeout(autoCollapseTimerRef.current)
       autoCollapseTimerRef.current = null
       return
@@ -370,7 +381,7 @@ export function WindowSyncPage() {
       autoCollapseTimerRef.current = null
       events.forEach(event => window.removeEventListener(event, resetAutoCollapse))
     }
-  }, [minimizedPanelMode, syncPanelMode])
+  }, [isSyncing, minimizedPanelMode, syncPanelMode])
 
   useEffect(() => {
     const compactClass = 'sync-panel-compact'
@@ -770,7 +781,7 @@ export function WindowSyncPage() {
               onClick={() => void handleStopSync()}
               style={{ ['--wails-draggable' as any]: 'no-drag' }}
             >
-              停止
+              重新配置
             </button>
           </div>
 
