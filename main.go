@@ -151,6 +151,20 @@ func (a *App) shutdown(ctx context.Context) {
 	backend.Stop(a.App, ctx)
 }
 
+func (a *App) recoverWailsCallback(name string, ctx context.Context) {
+	if r := recover(); r != nil {
+		stack := strings.ReplaceAll(string(debug.Stack()), "\n", "\\n")
+		a.RecordLifecycleEvent("wails-callback-panic", []string{
+			"callback=" + strings.TrimSpace(name),
+			fmt.Sprintf("value=%v", r),
+			"stack=" + stack,
+		})
+		if ctx != nil {
+			runtime.LogError(ctx, fmt.Sprintf("%s callback recovered from panic: %v", name, r))
+		}
+	}
+}
+
 func (a *App) shouldBlockClose(ctx context.Context) bool {
 	if syncPanelMode {
 		a.syncPanelCloseMu.Lock()
@@ -291,6 +305,8 @@ func main() {
 	if err := backend.EnsureRuntimeLayout(appRoot); err != nil {
 		log.Printf("准备用户数据目录失败: %v", err)
 	}
+	installCrashLogCapture(appRoot)
+	debug.SetTraceback("all")
 	if startupDebugEnabled && backend.RuntimeUsesDetachedState(appRoot) {
 		log.Printf("检测到安装目录需要只读运行，状态目录切换到: %s", backend.RuntimeStateRoot(appRoot))
 	}
@@ -404,6 +420,7 @@ func main() {
 		},
 		BackgroundColour: backgroundColour,
 		OnStartup: func(ctx context.Context) {
+			defer app.recoverWailsCallback("startup", ctx)
 			close(startupReached)
 			app.RecordLifecycleEvent("wails-startup", nil)
 			if startupDebugEnabled {
@@ -458,6 +475,7 @@ func main() {
 			}
 		},
 		OnShutdown: func(ctx context.Context) {
+			defer app.recoverWailsCallback("shutdown", ctx)
 			app.RecordLifecycleEvent("wails-shutdown", nil)
 			if startupDebugEnabled {
 				log.Printf("Wails OnShutdown 已触发")
@@ -469,6 +487,7 @@ func main() {
 		},
 		// 拦截关闭按钮事件，由前端处理自定义对话框
 		OnBeforeClose: func(ctx context.Context) bool {
+			defer app.recoverWailsCallback("before-close", ctx)
 			return app.shouldBlockClose(ctx)
 		},
 		Bind: []interface{}{

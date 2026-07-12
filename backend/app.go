@@ -273,7 +273,7 @@ func (a *App) startup(ctx context.Context) {
 		if a.ctx != nil {
 			runtime.EventsEmit(a.ctx, "proxy:bridge:died", map[string]interface{}{
 				"engine": "xray",
-				"key":    key[:8],
+				"key":    shortRuntimeKey(key),
 				"error":  err.Error(),
 			})
 		}
@@ -282,7 +282,7 @@ func (a *App) startup(ctx context.Context) {
 		if a.ctx != nil {
 			runtime.EventsEmit(a.ctx, "proxy:bridge:died", map[string]interface{}{
 				"engine": "singbox",
-				"key":    key[:8],
+				"key":    shortRuntimeKey(key),
 				"error":  err.Error(),
 			})
 		}
@@ -304,13 +304,25 @@ func (a *App) startup(ctx context.Context) {
 		}
 	}
 	if hasRuntimeToRecover {
-		a.reconcileBrowserRuntimeStateOnce()
+		a.lifecycleLog("runtime-reconcile", "state=scheduled")
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					a.lifecycleLog("runtime-reconcile", "state=panic-recovered", fmt.Sprintf("error=%v", r), fmt.Sprintf("stack=%s", strings.ReplaceAll(string(debug.Stack()), "\n", "\\n")))
+				}
+			}()
+			a.lifecycleLog("runtime-reconcile", "state=started")
+			a.reconcileBrowserRuntimeStateOnce()
+			a.lifecycleLog("runtime-reconcile", "state=completed")
+		}()
 	} else {
 		a.lifecycleLog("runtime-reconcile", "state=skipped", "reason=no-live-runtime")
 	}
-	if !a.panelMode {
-		a.startCacheAutoCleanScheduler()
-	}
+	// Never run cache maintenance during the Wails startup window. The previous
+	// five-second goroutine overlapped profile/database initialisation and was the
+	// only startup task whose deadline exactly matched the observed exit_code=2
+	// restart loop. Cache cleanup remains available through the explicit UI/API.
+	a.lifecycleLog("cache-auto-clean", "state=deferred", "reason=startup-stability")
 	// a.startBrowserRuntimeReconciler()
 	if !a.panelMode {
 		a.startSyncBridge()
@@ -325,6 +337,15 @@ func (a *App) startup(ctx context.Context) {
 	a.speedScheduler = nil
 
 	log.Info("应用启动成功")
+	a.lifecycleLog("startup-complete")
+}
+
+func shortRuntimeKey(key string) string {
+	key = strings.TrimSpace(key)
+	if len(key) <= 8 {
+		return key
+	}
+	return key[:8]
 }
 
 // ReloadConfig 开放给前端重新读取配置，用于应对手动修补后的配置重载

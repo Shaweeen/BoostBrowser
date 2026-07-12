@@ -3,6 +3,7 @@
 package backend
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -203,21 +204,12 @@ $items = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Obj
 @($items) | ConvertTo-Json -Depth 3 -Compress
 `, psSingleQuoted(root))
 
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodePowerShellCommand(script))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodePowerShellCommand(script))
 	hideWindow(cmd)
-	// Add a timeout to prevent PowerShell from hanging indefinitely.
-	done := make(chan struct{})
-	var out []byte
-	var cmdErr error
-	go func() {
-		defer close(done)
-		out, cmdErr = cmd.Output()
-	}()
-	select {
-	case <-done:
-		// Command completed.
-	case <-time.After(5 * time.Second):
-		_ = cmd.Process.Kill()
+	out, cmdErr := cmd.Output()
+	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("powershell process discovery timed out after 5s")
 	}
 	if cmdErr != nil {
