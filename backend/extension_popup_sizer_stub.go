@@ -10,4 +10,6 @@ func StartGlobalSerializedWindowWatchers(appRoot string) {}
 
 func restoreBrowserWindowsAfterStartup(pid int) {}
 
+func enforceBrowserWindowBounds(pid, width, height int) {}
+
 func StartGlobalServiceWorkerDevToolsRestorer(appRoot string) {}

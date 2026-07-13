@@ -16,10 +16,10 @@ import (
 const (
 	extensionPopupTargetWidth     = 390
 	extensionPopupTargetHeight    = 620
-	startupBrowserDefaultWidth    = 1280
-	startupBrowserDefaultHeight   = 900
+	startupBrowserDefaultWidth    = 1400
+	startupBrowserDefaultHeight   = 600
 	startupBrowserMinUsableWidth  = 1000
-	startupBrowserMinUsableHeight = 700
+	startupBrowserMinUsableHeight = 500
 	swRestore                     = 9
 	smCxScreen                    = 0
 	smCyScreen                    = 1
@@ -271,6 +271,36 @@ func startupBrowserWindowPlacement(rect winRect) (int, int, int, int, bool) {
 	}
 
 	return 80, 80, w, h, true
+}
+
+// enforceBrowserWindowBounds runs for a short bounded startup period. Chrome
+// can apply a persisted maximised show-state after parsing --window-size, so a
+// final SW_RESTORE + SetWindowPos is required to guarantee a normal 1400x600
+// top-level frame without introducing a permanent window watcher.
+func enforceBrowserWindowBounds(pid, width, height int) {
+	if pid <= 0 || width <= 0 || height <= 0 {
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.New("BrowserWindow").Error("startup bounds enforcement panic recovered",
+					logger.F("pid", pid),
+					logger.F("error", r),
+				)
+			}
+		}()
+		for attempt := 0; attempt < 4; attempt++ {
+			hwnd, err := findProcessTreeWindow(pid)
+			if err == nil && hwnd != 0 {
+				procShowWindow.Call(uintptr(hwnd), swRestore)
+				procSetWindowPos.Call(uintptr(hwnd), 0, 80, 80, uintptr(width), uintptr(height), SWP_NOZORDER|SWP_SHOWWINDOW)
+			}
+			if attempt < 3 {
+				time.Sleep(350 * time.Millisecond)
+			}
+		}
+	}()
 }
 
 // Cached callback state for clampExtensionPopupWindows to avoid creating

@@ -22,16 +22,17 @@ import (
 
 // Windows 常量（badge 图标专用）
 const (
-	WM_SETICON      = 0x0080
-	WM_GETICON      = 0x007F
-	ICON_BIG        = 1
-	ICON_SMALL      = 0
-	IMAGE_ICON      = 1
-	LR_LOADFROMFILE = 0x0010
-	GCL_HICON       = uintptr(0xFFFFFFF2) // -14
-	diNormal        = 3
-	DIB_RGB_COLORS  = 0
-	BI_RGB          = 0
+	WM_SETICON             = 0x0080
+	WM_GETICON             = 0x007F
+	ICON_BIG               = 1
+	ICON_SMALL             = 0
+	IMAGE_ICON             = 1
+	LR_LOADFROMFILE        = 0x0010
+	GCL_HICON              = uintptr(0xFFFFFFF2) // -14
+	diNormal               = 3
+	DIB_RGB_COLORS         = 0
+	BI_RGB                 = 0
+	badgeIconDesignVersion = 4
 )
 
 // badgeIconFileCache 缓存已生成的 badge 图标文件路径（key 为显示序号，value 为 .ico 文件路径）
@@ -293,36 +294,49 @@ func overlayBadgeNumber(img *image.NRGBA, number int) *image.NRGBA {
 	if len(numStr) > 4 {
 		numStr = numStr[len(numStr)-4:]
 	}
-	digitW := 13 * scale
-	digitH := 20 * scale
+	digitW := 18 * scale
+	digitH := 26 * scale
 	stroke := 4 * scale
 	gap := 2 * scale
-	if len(numStr) >= 3 {
-		digitW = 8 * scale
-		digitH = 14 * scale
+	padX := 9 * scale
+	padY := 5 * scale
+	switch len(numStr) {
+	case 2:
+		digitW = 13 * scale
+		digitH = 24 * scale
+		stroke = 4 * scale
+		padX = 5 * scale
+	case 3:
+		digitW = 9 * scale
+		digitH = 21 * scale
+		stroke = 3 * scale
+		gap = scale
+		padX = 3 * scale
+	case 4:
+		digitW = 7 * scale
+		digitH = 18 * scale
 		stroke = 2 * scale
 		gap = scale
+		padX = 2 * scale
 	}
 	totalFontWidth := len(numStr)*digitW + (len(numStr)-1)*gap
 	totalFontHeight := digitH
-
-	padX := 6 * scale
-	padY := 5 * scale
 	pillW := totalFontWidth + padX*2
 	pillH := totalFontHeight + padY*2
 	if pillW < pillH {
 		pillW = pillH
 	}
-	pillX := size - pillW - 2*scale
+	pillX := size - pillW - scale
 	if pillX < 1 {
 		pillX = scale
 	}
-	pillY := 2 * scale
+	pillY := scale
 	radius := pillH / 2
 
-	// 白色描边 + 红色底，做成胶囊而不是固定圆，避免 2/3/4 位数字被裁剪。
+	// Thick white keyline and deep red fill remain distinct after Explorer scales
+	// the icon to 24-32 px. The number intentionally occupies most of the badge.
 	drawRoundedPill(img, pillX-2*scale, pillY-2*scale, pillW+4*scale, pillH+4*scale, radius+2*scale, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
-	drawRoundedPill(img, pillX, pillY, pillW, pillH, radius, color.NRGBA{R: 220, G: 38, B: 38, A: 255})
+	drawRoundedPill(img, pillX, pillY, pillW, pillH, radius, color.NRGBA{R: 205, G: 24, B: 38, A: 255})
 
 	drawStartX := pillX + (pillW-totalFontWidth)/2
 	drawStartY := pillY + (pillH-totalFontHeight)/2
@@ -584,7 +598,7 @@ func getBadgeICOFilePath(pid int, number int) (string, error) {
 	if err := os.MkdirAll(tmpDir, 0755); err != nil {
 		return "", err
 	}
-	icoPath := filepath.Join(tmpDir, fmt.Sprintf("badge_%d.ico", number))
+	icoPath := filepath.Join(tmpDir, fmt.Sprintf("badge_v%d_%d.ico", badgeIconDesignVersion, number))
 	if err := os.WriteFile(icoPath, icoData, 0644); err != nil {
 		return "", err
 	}
@@ -633,8 +647,8 @@ func setWindowIcon(pid int, icoPath string) error {
 		return fmt.Errorf("加载小图标失败: %v", err)
 	}
 
-	// 加载 32x32 大图标（任务栏大图标 / Alt+Tab）
-	bigIcon, err := loadIconFromFile(icoPath, 32)
+	// Load a true 64px large icon for high-DPI taskbars and Alt+Tab previews.
+	bigIcon, err := loadIconFromFile(icoPath, 64)
 	if err != nil {
 		return fmt.Errorf("加载大图标失败: %v", err)
 	}
@@ -665,6 +679,7 @@ func setBadgeForInstance(pid int, displayNumber int) error {
 	}
 
 	var lastErr error
+	successfulWrites := 0
 	for attempt := 0; attempt < 30; attempt++ {
 		if !isProcessAlive(pid) {
 			if lastErr != nil {
@@ -675,12 +690,21 @@ func setBadgeForInstance(pid int, displayNumber int) error {
 
 		err = setWindowIcon(pid, icoPath)
 		if err == nil {
-			log.Info("任务栏 badge 图标设置成功",
-				logger.F("pid", pid),
-				logger.F("display_number", displayNumber),
-				logger.F("attempt", attempt+1),
-			)
-			return nil
+			successfulWrites++
+			// Chrome may replace WM_SETICON once more while the first tab finishes
+			// initialising. Three bounded writes keep the number without a permanent
+			// watchdog or long-running GDI loop.
+			if successfulWrites >= 3 {
+				log.Info("任务栏 badge 图标设置成功",
+					logger.F("pid", pid),
+					logger.F("display_number", displayNumber),
+					logger.F("attempt", attempt+1),
+					logger.F("writes", successfulWrites),
+				)
+				return nil
+			}
+			time.Sleep(450 * time.Millisecond)
+			continue
 		}
 
 		lastErr = err

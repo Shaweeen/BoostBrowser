@@ -318,10 +318,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		"--no-first-run",
 		"--no-default-browser-check",
 	}
-	// All kernels start at one predictable 16:10 workspace size. Persisted
-	// bounds may describe a maximised/tiled/off-screen previous session.
-	args = append(args, "--window-size=1440,900")
-
 	// 非 Cloak 内核仍保留 --search-provider-* 作为启动期兜底。
 	// Cloak 路径下禁止再注入这组命令行参数：实际 packaged 目标里它会留下
 	// default_search_provider 与 runtime row 不一致的 mixed state，最终仍可能
@@ -456,6 +452,13 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
+	// Final authoritative placement pass: fingerprint/profile/API arguments are
+	// already appended, so stale sizes and maximised/fullscreen flags cannot win.
+	args, removedWindowArgs := sanitizeManagedWindowPlacementArgs(args)
+	if len(removedWindowArgs) > 0 {
+		logManagedLaunchArgOverrides(log, profileId, "final.windowPlacement", removedWindowArgs)
+	}
+	args = append(args, "--window-size=1400,600")
 	// 清理 profile 中旧的 unpacked 扩展记录，避免同一个钱包/Header Fix 因旧路径残留显示两份。
 	cleanupStaleManagedUnpackedExtensions(userDataDir, args, a.appRoot)
 	pinAllLoadedExtensionsToToolbar(userDataDir, args)
@@ -503,6 +506,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				logger.F("max_attempts", maxStartAttempts),
 				logger.F("args", strings.Join(args, " ")),
 			)
+			enforceBrowserWindowBounds(profile.Pid, 1400, 600)
 
 			// 调试接口一就绪，执行启动期扩展弹窗抑制，只关闭 Chrome 自动恢复/自动
 			// 打开的 extension 页面/窗口。浏览器现在直接在正常屏幕位置启动，不能再

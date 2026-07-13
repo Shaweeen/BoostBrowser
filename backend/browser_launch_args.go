@@ -37,6 +37,9 @@ var managedLaunchArgSpecs = []managedLaunchArgSpec{
 var managedWindowPlacementArgSpecs = []managedLaunchArgSpec{
 	{prefix: "--window-size", takesValue: true},
 	{prefix: "--window-position", takesValue: true},
+	{prefix: "--start-maximized", takesValue: false},
+	{prefix: "--start-fullscreen", takesValue: false},
+	{prefix: "--kiosk", takesValue: false},
 }
 
 func sanitizeManagedLaunchArgs(args []string) ([]string, []string) {
