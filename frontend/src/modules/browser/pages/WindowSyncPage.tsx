@@ -190,21 +190,19 @@ export function WindowSyncPage() {
     if (!syncPanelMode) return
     let stopped = false
     let zeroConfirmations = 0
-    let bridgeFailures = 0
     let recoveryGraceUntil = 0
     const checkRuntimeState = async () => {
       const status = await getSyncStatus()
       if (stopped) return
       if (!status || status.bridgeError) {
-        bridgeFailures += 1
         zeroConfirmations = 0
         recoveryGraceUntil = Date.now() + 15000
-        if (bridgeFailures >= 30) void ExitWindowSyncPanel().catch(() => {})
+        // A transient backend/database error must never close the independent
+        // sync process. The next successful poll will reconcile real runtimes.
         return
       }
-      bridgeFailures = 0
       if ((status.runningProfileCount ?? 0) > 0) {
-        // Any client-owned running instance immediately cancels exit.
+        // Any running browser instance immediately cancels exit.
         zeroConfirmations = 0
         return
       }

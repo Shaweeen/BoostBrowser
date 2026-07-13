@@ -194,8 +194,8 @@ func (a *App) CloseWindowSyncPanel() {
 	}
 }
 
-// ExitWindowSyncPanel terminates only the assistant UI process. The sync
-// engine lives in the main client and is stopped explicitly by the caller.
+// ExitWindowSyncPanel terminates the independent assistant process. Its
+// OnShutdown callback releases panel-owned hooks without touching browsers.
 func (a *App) ExitWindowSyncPanel() {
 	if !syncPanelMode {
 		return

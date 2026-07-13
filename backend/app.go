@@ -329,8 +329,12 @@ func (a *App) startup(ctx context.Context) {
 	// restart loop. Cache cleanup remains available through the explicit UI/API.
 	a.lifecycleLog("cache-auto-clean", "state=deferred", "reason=startup-stability")
 	// a.startBrowserRuntimeReconciler()
-	if !a.panelMode {
-		a.startSyncBridge()
+	if a.panelMode {
+		a.lifecycleLog("sync-engine-owner", "mode=panel-process", "isolation=main-client")
+	} else {
+		// 全局鼠标/键盘 Hook 不得运行在主 Wails 宿主中。同步面板是独立
+		// 进程并直接持有同步引擎，主客户端崩溃或重启时同步仍保持运行。
+		a.lifecycleLog("sync-engine-owner", "mode=external-panel", "bridge=disabled")
 	}
 
 	// v1.6.12: 暂停启动后台代理测速定时器。
@@ -409,6 +413,7 @@ func (a *App) applyRuntimeConfig(cfg config.RuntimeConfig) {
 func (a *App) shutdown(ctx context.Context) {
 	log := logger.New("App")
 	a.lifecycleLog("shutdown", fmt.Sprintf("mode=%d", a.quitMode), fmt.Sprintf("forceQuit=%t", a.forceQuit))
+	stopPanelOwnedSync(a)
 	if a.shouldStopRuntimeServicesOnShutdown() {
 		log.Info("应用正在关闭...")
 		a.stopRuntimeServices()

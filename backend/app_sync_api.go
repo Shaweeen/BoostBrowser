@@ -40,13 +40,8 @@ type SyncProfileInfo struct {
 
 // GetSyncProfiles 获取所有可用于同步的实例列表
 func (a *App) GetSyncProfiles() []SyncProfileInfo {
-	if a.panelMode {
-		response, err := callSyncBridge("/profiles", nil)
-		if err == nil {
-			return response.Profiles
-		}
-		return []SyncProfileInfo{}
-	}
+	// 同步面板直接读取共享状态并接管存活窗口。它不再依赖主客户端
+	// Bridge，因此主客户端崩溃或 watchdog 重启不会让同步面板失联退出。
 	return a.getSyncProfilesLocal()
 }
 
@@ -97,9 +92,9 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 // masterProfileId: 主控实例 ID
 // followerProfileIds: 跟随实例 ID 列表
 func (a *App) StartInputSync(masterProfileId string, followerProfileIds []string) error {
-	if a.panelMode {
-		_, err := callSyncBridge("/start", syncBridgeRequest{MasterID: masterProfileId, FollowerIDs: followerProfileIds})
-		return err
+	if !a.panelMode {
+		a.lifecycleLog("sync-start-rejected", "reason=main-process-isolation")
+		return fmt.Errorf("输入同步只能在独立同步工具中启动")
 	}
 	return a.startInputSyncLocal(masterProfileId, followerProfileIds)
 }
@@ -183,10 +178,6 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 
 // StopInputSync 停止输入同步
 func (a *App) StopInputSync() error {
-	if a.panelMode {
-		_, err := callSyncBridge("/stop", nil)
-		return err
-	}
 	return a.stopInputSyncLocal()
 }
 
@@ -211,17 +202,6 @@ func (a *App) stopInputSyncLocal() error {
 
 // GetSyncStatus 获取当前同步状态
 func (a *App) GetSyncStatus() map[string]interface{} {
-	if a.panelMode {
-		response, err := callSyncBridge("/status", nil)
-		if err == nil && response.Status != nil {
-			return response.Status
-		}
-		message := "主客户端同步服务没有返回状态"
-		if err != nil {
-			message = err.Error()
-		}
-		return map[string]interface{}{"active": false, "bridgeError": message}
-	}
 	return a.getSyncStatusLocal()
 }
 
@@ -254,10 +234,6 @@ func (a *App) getSyncStatusLocal() map[string]interface{} {
 }
 
 func (a *App) UpdateSyncRandomDelay(enabled bool, minMs, maxMs int) error {
-	if a.panelMode {
-		_, err := callSyncBridge("/delay", syncBridgeRequest{Enabled: enabled, MinMs: minMs, MaxMs: maxMs})
-		return err
-	}
 	return a.updateSyncRandomDelayLocal(enabled, minMs, maxMs)
 }
 
@@ -274,10 +250,6 @@ func (a *App) updateSyncRandomDelayLocal(enabled bool, minMs, maxMs int) error {
 // UpdateSyncConfig updates the optional mouse switch. Keyboard synchronisation
 // is an invariant of an active session and cannot be accidentally disabled.
 func (a *App) UpdateSyncConfig(mouseEnabled, keyEnabled bool) error {
-	if a.panelMode {
-		_, err := callSyncBridge("/config", syncBridgeRequest{Mouse: mouseEnabled})
-		return err
-	}
 	return a.updateSyncConfigLocal(mouseEnabled)
 }
 
@@ -303,16 +275,6 @@ type TileWindowsResult struct {
 // masterProfileId: 主控实例ID，主控窗口始终放在最左边（index 0）
 // layoutMode: grid | horizontal | vertical
 func (a *App) SyncTileWindows(profileIds []string, masterProfileId string, layoutMode string) (*TileWindowsResult, error) {
-	if a.panelMode {
-		response, err := callSyncBridge("/tile", syncBridgeRequest{ProfileIDs: profileIds, MasterID: masterProfileId, Layout: layoutMode})
-		if err != nil {
-			return nil, err
-		}
-		if response.Tile == nil {
-			return nil, fmt.Errorf("主客户端没有返回窗口排列结果")
-		}
-		return response.Tile, nil
-	}
 	return a.syncTileWindowsLocal(profileIds, masterProfileId, layoutMode)
 }
 

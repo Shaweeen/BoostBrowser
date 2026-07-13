@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -527,23 +528,32 @@ func mapCoordsViaRenderContent(screenX, screenY int, masterHwnd, followerHwnd wi
 	return MAKELONG(uint16(int16(clientX)), uint16(int16(clientY))), true
 }
 
+var chromeRenderChildEnumCallback = windows.NewCallback(func(child windows.HWND, lParam uintptr) uintptr {
+	defer func() {
+		_ = recover()
+	}()
+	found := (*windows.HWND)(unsafe.Pointer(lParam))
+	if found == nil {
+		return 0
+	}
+	if !isWindowVisible(child) {
+		return 1
+	}
+	if getWindowClassName(child) != "Chrome_RenderWidgetHostHWND" {
+		return 1
+	}
+	left, top, right, bottom := getWindowRect(child)
+	if right-left <= 50 || bottom-top <= 50 {
+		return 1
+	}
+	*found = child
+	return 0
+})
+
 func findChromeRenderChild(hwnd windows.HWND) windows.HWND {
 	var found windows.HWND
-	cb := windows.NewCallback(func(child windows.HWND, lParam uintptr) uintptr {
-		if !isWindowVisible(child) {
-			return 1
-		}
-		if getWindowClassName(child) != "Chrome_RenderWidgetHostHWND" {
-			return 1
-		}
-		left, top, right, bottom := getWindowRect(child)
-		if right-left <= 50 || bottom-top <= 50 {
-			return 1
-		}
-		found = child
-		return 0
-	})
-	procEnumChildWindows.Call(uintptr(hwnd), cb, 0)
+	procEnumChildWindows.Call(uintptr(hwnd), chromeRenderChildEnumCallback, uintptr(unsafe.Pointer(&found)))
+	runtime.KeepAlive(&found)
 	return found
 }
 

@@ -62,3 +62,24 @@ func TestSyncDebugLogEnabledByEnv(t *testing.T) {
 		t.Fatalf("sync debug log should be enabled by env")
 	}
 }
+
+func TestMainProcessCannotOwnInputSyncHooks(t *testing.T) {
+	app := NewApp(t.TempDir(), false)
+	if err := app.StartInputSync("master", []string{"follower"}); err == nil {
+		t.Fatal("main process must reject input sync before creating native hooks")
+	}
+}
+
+func TestWindowEnumerationCallbacksAreProcessReusable(t *testing.T) {
+	if processWindowEnumCallback == 0 || chromeRenderChildEnumCallback == 0 || browserWindowRestoreEnumCallback == 0 {
+		t.Fatal("expected reusable Win32 enumeration callbacks")
+	}
+	processCallback := processWindowEnumCallback
+	renderCallback := chromeRenderChildEnumCallback
+	restoreCallback := browserWindowRestoreEnumCallback
+	for i := 0; i < 10000; i++ {
+		if processWindowEnumCallback != processCallback || chromeRenderChildEnumCallback != renderCallback || browserWindowRestoreEnumCallback != restoreCallback {
+			t.Fatal("Win32 callback address changed; repeated lookup would exhaust the callback table")
+		}
+	}
+}
