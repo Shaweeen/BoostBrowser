@@ -73,6 +73,25 @@ type InputSyncer struct {
 	lifecycleLogger func(event string, fields ...string)
 }
 
+// Low-level hook callbacks are process-global resources in the Go Windows
+// runtime. Allocate them once and route to the single active sync session.
+// Recreating callbacks on every start eventually exhausts the callback table.
+var activeInputSyncer atomic.Pointer[InputSyncer]
+
+var processMouseHookCallback = windows.NewCallback(func(nCode int, wParam, lParam uintptr) uintptr {
+	if syncer := activeInputSyncer.Load(); syncer != nil {
+		return syncer.mouseHookCallback(nCode, wParam, lParam)
+	}
+	return callNextHook(nCode, wParam, lParam)
+})
+
+var processKeyHookCallback = windows.NewCallback(func(nCode int, wParam, lParam uintptr) uintptr {
+	if syncer := activeInputSyncer.Load(); syncer != nil {
+		return syncer.keyHookCallback(nCode, wParam, lParam)
+	}
+	return callNextHook(nCode, wParam, lParam)
+})
+
 // SyncConfig 同步配置
 type SyncConfig struct {
 	MouseEnabled       bool `json:"mouseEnabled"`
@@ -102,7 +121,20 @@ func (s *InputSyncer) lifecycle(event string, fields ...string) {
 }
 
 func syncURLSyncEnabled() bool {
-	return syncEnvFlagEnabled("BOOST_BROWSER_ENABLE_SYNC_URL_SYNC")
+	value := strings.TrimSpace(strings.ToLower(os.Getenv("BOOST_BROWSER_ENABLE_SYNC_URL_SYNC")))
+	// Navigation synchronization is safe inside the isolated sync-panel process
+	// and is required for omnibox input: Chrome does not route background
+	// WM_CHAR messages to its address bar. Allow an explicit opt-out for
+	// diagnostics, but enable the reliable CDP path by default.
+	if value == "" {
+		return true
+	}
+	switch value {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 func syncDebugLogEnabled() bool {
@@ -129,7 +161,6 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	s.masterHwnd = masterHwnd
 	s.masterPid = masterPid
@@ -152,6 +183,7 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	atomic.StoreInt32(&s.mouseEnabled, 1)
 	atomic.StoreInt32(&s.keyEnabled, 1)
 	s.stopCh = make(chan struct{})
+	ready := make(chan error, 1)
 
 	// 重置诊断计数器
 	atomic.StoreInt32(&s.clickCount, 0)
@@ -177,19 +209,52 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 		syncLog("follower[%d]=%#x rect=(%d,%d,%d,%d) size=%dx%d", i, fhwnd, fL, fT, fR, fB, fR-fL, fB-fT)
 	}
 
-	// 安装全局鼠标和键盘钩子
+	activeInputSyncer.Store(s)
+	s.mu.Unlock()
+
+	// 安装全局鼠标和键盘钩子。启动必须等待安装结果；旧逻辑在安装
+	// 失败时仍立即返回成功，前端因此会显示“同步中”但没有任何事件。
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
+				activeInputSyncer.CompareAndSwap(s, nil)
+				atomic.StoreInt32(&s.active, 0)
 				logger.New("InputSyncer").Error("installHooks goroutine panic recovered",
 					logger.F("error", r),
 				)
+				select {
+				case ready <- fmt.Errorf("键鼠 Hook 安装异常: %v", r):
+				default:
+				}
 			}
 		}()
-		s.installHooks()
+		s.installHooks(ready)
 	}()
 
-	return nil
+	select {
+	case err := <-ready:
+		if err != nil {
+			activeInputSyncer.CompareAndSwap(s, nil)
+			atomic.StoreInt32(&s.active, 0)
+			return err
+		}
+		return nil
+	case <-time.After(3 * time.Second):
+		activeInputSyncer.CompareAndSwap(s, nil)
+		atomic.StoreInt32(&s.active, 0)
+		select {
+		case <-s.stopCh:
+		default:
+			close(s.stopCh)
+		}
+		s.mu.Lock()
+		hookThreadID := s.hookThreadID
+		s.mu.Unlock()
+		if hookThreadID != 0 {
+			user32dll.NewProc("PostThreadMessageW").Call(uintptr(hookThreadID), 0x0012, 0, 0)
+		}
+		return fmt.Errorf("键鼠 Hook 安装超时，请重新启动同步助手")
+	}
 }
 
 // StartWithURLSync 启动带 CDP URL 同步的输入同步
@@ -206,8 +271,8 @@ func (s *InputSyncer) StartWithURLSync(masterHwnd windows.HWND, followerHwnds []
 
 	if !syncURLSyncEnabled() {
 		log := logger.New("InputSyncer")
-		log.Info("CDP URL 同步默认关闭", logger.F("enable_env", "BOOST_BROWSER_ENABLE_SYNC_URL_SYNC=1"))
-		s.lifecycle("sync-url-sync", "state=disabled", "reason=default-off-crashprobe")
+		log.Info("CDP URL 同步已通过环境变量关闭", logger.F("disable_env", "BOOST_BROWSER_ENABLE_SYNC_URL_SYNC=0"))
+		s.lifecycle("sync-url-sync", "state=disabled", "reason=env-opt-out")
 		return nil
 	}
 
@@ -248,6 +313,7 @@ func (s *InputSyncer) Stop() {
 		atomic.LoadInt32(&s.wheelCount), atomic.LoadInt32(&s.keyCount))
 
 	atomic.StoreInt32(&s.active, 0)
+	activeInputSyncer.CompareAndSwap(s, nil)
 	close(s.stopCh)
 
 	// 停止 URL 同步
@@ -561,7 +627,12 @@ func findChromeRenderChild(hwnd windows.HWND) windows.HWND {
 // 钩子安装和消息循环
 // ============================================================================
 
-func (s *InputSyncer) installHooks() {
+func (s *InputSyncer) installHooks(ready chan<- error) {
+	// WH_MOUSE_LL/WH_KEYBOARD_LL callbacks are delivered to the thread that
+	// installed them. A Go goroutine may migrate between OS threads unless it is
+	// pinned, leaving GetMessage on a different thread and producing zero input.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	syncLog("installHooks: 开始安装钩子...")
 
 	procGetCurrentThreadId := windows.NewLazySystemDLL("kernel32.dll").NewProc("GetCurrentThreadId")
@@ -570,13 +641,10 @@ func (s *InputSyncer) installHooks() {
 	s.hookThreadID = uint32(threadID)
 	s.mu.Unlock()
 
-	mouseHookProc := windows.NewCallback(s.mouseHookCallback)
-	keyHookProc := windows.NewCallback(s.keyHookCallback)
-
 	// WH_MOUSE_LL = 14, WH_KEYBOARD_LL = 13
 	setHookEx := user32dll.NewProc("SetWindowsHookExW")
-	mouseHook, mouseErr, mouseErrno := setHookEx.Call(14, mouseHookProc, 0, 0)
-	keyHook, keyErr, keyErrno := setHookEx.Call(13, keyHookProc, 0, 0)
+	mouseHook, mouseErr, mouseErrno := setHookEx.Call(14, processMouseHookCallback, 0, 0)
+	keyHook, keyErr, keyErrno := setHookEx.Call(13, processKeyHookCallback, 0, 0)
 
 	syncLog("installHooks: mouseHook=%#x err=%v errno=%d", mouseHook, mouseErr, mouseErrno)
 	syncLog("installHooks: keyHook=%#x err=%v errno=%d", keyHook, keyErr, keyErrno)
@@ -598,9 +666,23 @@ func (s *InputSyncer) installHooks() {
 		syncLog("installHooks: ✅ 钩子安装成功，开始消息循环")
 		s.lifecycle("sync-hooks", "state=installed", fmt.Sprintf("mouse_hook=%#x", mouseHook), fmt.Sprintf("key_hook=%#x", keyHook))
 	} else {
-		syncLog("installHooks: ⚠️ 部分钩子安装失败，继续尝试消息循环")
+		unhookWindowsHookEx := user32dll.NewProc("UnhookWindowsHookEx")
+		if mouseHook != 0 {
+			unhookWindowsHookEx.Call(mouseHook)
+		}
+		if keyHook != 0 {
+			unhookWindowsHookEx.Call(keyHook)
+		}
+		s.mu.Lock()
+		s.mouseHook = 0
+		s.keyHook = 0
+		s.mu.Unlock()
+		syncLog("installHooks: ❌ Hook 未完整安装，中止同步")
 		s.lifecycle("sync-hooks", "state=partial", fmt.Sprintf("mouse_hook=%#x", mouseHook), fmt.Sprintf("key_hook=%#x", keyHook))
+		ready <- fmt.Errorf("键鼠 Hook 安装失败（mouse=%#x, keyboard=%#x, mouseErr=%v/%d, keyErr=%v/%d）", mouseHook, keyHook, mouseErr, mouseErrno, keyErr, keyErrno)
+		return
 	}
+	ready <- nil
 
 	type MSG struct {
 		HWnd    windows.HWND
@@ -1160,11 +1242,13 @@ func syncLog(format string, args ...interface{}) {
 // ============================================================================
 
 func (s *InputSyncer) urlSyncLoop() {
+	ticker := time.NewTicker(350 * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-s.urlStopCh:
 			return
-		default:
+		case <-ticker.C:
 		}
 
 		if atomic.LoadInt32(&s.active) == 0 {
@@ -1181,15 +1265,19 @@ func (s *InputSyncer) urlSyncLoop() {
 			url := s.getMasterURL(masterDebug)
 			if url != "" && url != s.lastSyncURL && !isAboutBlank(url) {
 				s.lastSyncURL = url
+				var wg sync.WaitGroup
 				for _, port := range followerDebug {
 					if port > 0 {
-						s.navigateFollower(port, url)
+						wg.Add(1)
+						go func(debugPort int) {
+							defer wg.Done()
+							s.navigateFollower(debugPort, url)
+						}(port)
 					}
 				}
+				wg.Wait()
 			}
 		}
-
-		time.Sleep(900 * time.Millisecond)
 	}
 }
 
