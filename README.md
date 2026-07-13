@@ -223,6 +223,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_release.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_installer.ps1
 ```
 
+For the complete self-use workflow, `build_windows_selfuse.ps1` validates the
+toolchain, builds the release and full Setup, then launches the generated Setup
+installer by default. Pass `-NoInstall` only when packaging without installing.
+
 ## Build output
 
 The installers are generated at:

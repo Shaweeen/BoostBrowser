@@ -84,6 +84,9 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("build_installer.ps1", text)
         self.assertIn("BOOST_KERNEL_SRC", text)
         self.assertIn("google-148.0.7778.167", text)
+        self.assertIn("[switch]$NoInstall", text)
+        self.assertIn('Run-Step "Starting Setup installer"', text)
+        self.assertIn("Start-Process -FilePath $setupPath -Wait -PassThru", text)
 
     def test_new_windows_private_setup_installs_and_builds_private_edition(self):
         text = self.read("scripts/setup_new_windows_private.ps1")
