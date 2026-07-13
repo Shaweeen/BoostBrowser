@@ -419,7 +419,7 @@ func DefaultConfig() *Config {
 			DefaultProxy:               "",
 			LastMoreLoginCacheRoot:     "",
 			StartReadyTimeoutMs:        3000,
-			StartStableWindowMs:        1200,
+			StartStableWindowMs:        450,
 			CacheAutoCleanEnabled:      false,
 			CacheAutoCleanIntervalDays: 30,
 			CacheLastCleanAt:           "",

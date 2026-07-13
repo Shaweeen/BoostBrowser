@@ -1,3 +1,5 @@
+//go:build windows
+
 package backend
 
 import (
@@ -10,7 +12,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -32,7 +33,7 @@ const (
 	diNormal               = 3
 	DIB_RGB_COLORS         = 0
 	BI_RGB                 = 0
-	badgeIconDesignVersion = 4
+	badgeIconDesignVersion = 6
 )
 
 // badgeIconFileCache 缓存已生成的 badge 图标文件路径（key 为显示序号，value 为 .ico 文件路径）
@@ -212,13 +213,12 @@ func drawCircle(img *image.NRGBA, cx, cy, r int, col color.NRGBA) {
 
 // generateFallbackIcon 生成固定的旧版 Boost Browser 任务栏底图：蓝色 Chrome-like 圆环。
 // 不读取 chrome.exe 自带图标，避免切到 Google Chrome 后变成官方四色 Chrome 图标。
-func generateFallbackIcon() *image.NRGBA {
-	const size = 192
+func generateFallbackIcon(size int) *image.NRGBA {
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
-	cx, cy := 96.0, 96.0
-	outerR := 81.0
-	innerR := 39.0
-	centerR := 25.5
+	cx, cy := float64(size)/2, float64(size)/2
+	outerR := float64(size) * 0.421875
+	innerR := float64(size) * 0.203125
+	centerR := float64(size) * 0.1328125
 
 	blend := func(dst, src color.NRGBA, alpha float64) color.NRGBA {
 		if alpha < 0 {
@@ -283,114 +283,81 @@ func generateFallbackIcon() *image.NRGBA {
 	return img
 }
 
-// overlayBadgeNumber 在图标上叠加编号。
-// 旧实现固定右上角圆形 badge + 3x3 字体，多位数会被圆形裁掉，任务栏缩放后经常只剩红点看不到数字。
-// 新实现按位数自适应为右上角红色胶囊，1~4 位都尽量完整显示。
-func overlayBadgeNumber(img *image.NRGBA, number int) *image.NRGBA {
-	size := img.Bounds().Dx()
-	scale := max(1, size/64)
+var badgeDigitPixels = map[byte][5]string{
+	'0': {"111", "101", "101", "101", "111"},
+	'1': {"010", "110", "010", "010", "111"},
+	'2': {"111", "001", "111", "100", "111"},
+	'3': {"111", "001", "111", "001", "111"},
+	'4': {"101", "101", "111", "001", "001"},
+	'5': {"111", "100", "111", "001", "111"},
+	'6': {"111", "100", "111", "101", "111"},
+	'7': {"111", "001", "010", "010", "010"},
+	'8': {"111", "101", "111", "101", "111"},
+	'9': {"111", "101", "111", "001", "111"},
+}
 
+// overlayBadgeNumberNative 直接在 Windows 会实际选择的图标尺寸上绘制数字。
+// 像素字不经过二次缩小，16/24/32/48/64px 下都能保持清晰边缘。
+func overlayBadgeNumberNative(img *image.NRGBA, number int) {
+	size := img.Bounds().Dx()
 	numStr := fmt.Sprintf("%d", number)
 	if len(numStr) > 4 {
 		numStr = numStr[len(numStr)-4:]
 	}
-	digitW := 18 * scale
-	digitH := 26 * scale
-	stroke := 4 * scale
-	gap := 2 * scale
-	padX := 9 * scale
-	padY := 5 * scale
-	switch len(numStr) {
-	case 2:
-		digitW = 13 * scale
-		digitH = 24 * scale
-		stroke = 4 * scale
-		padX = 5 * scale
-	case 3:
-		digitW = 9 * scale
-		digitH = 21 * scale
-		stroke = 3 * scale
-		gap = scale
-		padX = 3 * scale
-	case 4:
-		digitW = 7 * scale
-		digitH = 18 * scale
-		stroke = 2 * scale
-		gap = scale
-		padX = 2 * scale
+
+	// 24px 是 Windows 常见的小任务栏尺寸，向上取整可让一、两位数字仍使用
+	// 2px 笔画；旧版整除会退成 1px，实际显示偏细。
+	scale := max(1, (size+8)/16)
+	if len(numStr) >= 3 {
+		scale = max(1, size/24)
 	}
-	totalFontWidth := len(numStr)*digitW + (len(numStr)-1)*gap
-	totalFontHeight := digitH
-	pillW := totalFontWidth + padX*2
-	pillH := totalFontHeight + padY*2
-	if pillW < pillH {
+	gap := max(1, scale/2)
+	fontW := len(numStr)*3*scale + (len(numStr)-1)*gap
+	fontH := 5 * scale
+	padX := max(2, scale)
+	padY := max(2, scale/2)
+	pillW := fontW + 2*padX
+	pillH := fontH + 2*padY
+	if len(numStr) == 1 && pillW < pillH {
+		// 单数字使用等宽醒目标记，避免视觉上退化成右上角小红点。
 		pillW = pillH
 	}
-	pillX := size - pillW - scale
-	if pillX < 1 {
-		pillX = scale
+	maxW := size - 1
+	if pillW > maxW {
+		// 四位编号在小尺寸中优先保证完整，而不是让两端数字被裁掉。
+		scale = 1
+		gap = 1
+		fontW = len(numStr)*3 + len(numStr) - 1
+		fontH = 5
+		padX, padY = 2, 2
+		pillW, pillH = min(size, fontW+4), fontH+4
 	}
-	pillY := scale
-	radius := pillH / 2
+	pillX := max(0, size-pillW)
+	pillY := 0
+	keyline := 1
+	drawRoundedPill(img, max(0, pillX-keyline), pillY, min(size-pillX+keyline, pillW+keyline), min(size, pillH+keyline), max(2, pillH/3), color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+	drawRoundedPill(img, pillX, pillY+keyline, pillW, pillH-keyline, max(2, pillH/3), color.NRGBA{R: 214, G: 20, B: 38, A: 255})
 
-	// Thick white keyline and deep red fill remain distinct after Explorer scales
-	// the icon to 24-32 px. The number intentionally occupies most of the badge.
-	drawRoundedPill(img, pillX-2*scale, pillY-2*scale, pillW+4*scale, pillH+4*scale, radius+2*scale, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
-	drawRoundedPill(img, pillX, pillY, pillW, pillH, radius, color.NRGBA{R: 205, G: 24, B: 38, A: 255})
-
-	drawStartX := pillX + (pillW-totalFontWidth)/2
-	drawStartY := pillY + (pillH-totalFontHeight)/2
-	curX := drawStartX
+	x := pillX + (pillW-fontW)/2
+	y := pillY + keyline + (pillH-keyline-fontH)/2
 	for _, ch := range []byte(numStr) {
-		drawSevenSegmentDigit(img, curX, drawStartY, digitW, digitH, stroke, ch, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
-		curX += digitW + gap
-	}
-
-	return img
-}
-
-func drawSevenSegmentDigit(img *image.NRGBA, x, y, w, h, stroke int, ch byte, col color.NRGBA) {
-	segments := map[byte]string{
-		'0': "abcfed",
-		'1': "bc",
-		'2': "abged",
-		'3': "abgcd",
-		'4': "fgbc",
-		'5': "afgcd",
-		'6': "afgecd",
-		'7': "abc",
-		'8': "abcdefg",
-		'9': "abfgcd",
-	}
-	active, ok := segments[ch]
-	if !ok {
-		return
-	}
-	has := func(seg byte) bool { return strings.ContainsRune(active, rune(seg)) }
-	r := int(math.Max(1, float64(stroke)/2))
-	midY := y + h/2 - stroke/2
-	bottomY := y + h - stroke
-	rightX := x + w - stroke
-	if has('a') {
-		drawRoundedPill(img, x+stroke/2, y, w-stroke, stroke, r, col)
-	}
-	if has('g') {
-		drawRoundedPill(img, x+stroke/2, midY, w-stroke, stroke, r, col)
-	}
-	if has('d') {
-		drawRoundedPill(img, x+stroke/2, bottomY, w-stroke, stroke, r, col)
-	}
-	if has('f') {
-		drawRoundedPill(img, x, y+stroke/2, stroke, h/2, r, col)
-	}
-	if has('b') {
-		drawRoundedPill(img, rightX, y+stroke/2, stroke, h/2, r, col)
-	}
-	if has('e') {
-		drawRoundedPill(img, x, y+h/2, stroke, h/2-stroke/2, r, col)
-	}
-	if has('c') {
-		drawRoundedPill(img, rightX, y+h/2, stroke, h/2-stroke/2, r, col)
+		rows, ok := badgeDigitPixels[ch]
+		if !ok {
+			continue
+		}
+		for row, pixels := range rows {
+			for col, pixel := range []byte(pixels) {
+				if pixel != '1' {
+					continue
+				}
+				for yy := 0; yy < scale; yy++ {
+					for xx := 0; xx < scale; xx++ {
+						img.SetNRGBA(x+col*scale+xx, y+row*scale+yy, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+					}
+				}
+			}
+		}
+		x += 3*scale + gap
 	}
 }
 
@@ -415,9 +382,9 @@ func drawRoundedPill(img *image.NRGBA, x, y, w, h, r int, col color.NRGBA) {
 // generateBadgeIconImage 生成固定的 Boost Browser 蓝色浏览器图标并叠加红色编号角标。
 // 不再使用 Chrome 窗口自身图标作为底图：切到系统最新版 Chrome 后，Chrome 会暴露
 // 多色官方图标；用户要求任务栏仍保持之前的蓝色 Chrome 类图标 + 红色编号 badge 样式。
-func generateBadgeIconImage(pid int, number int) *image.NRGBA {
-	baseImg := generateFallbackIcon()
-	overlayBadgeNumber(baseImg, number)
+func generateBadgeIconImage(pid int, number int, size int) *image.NRGBA {
+	baseImg := generateFallbackIcon(size)
+	overlayBadgeNumberNative(baseImg, number)
 	return baseImg
 }
 
@@ -425,75 +392,18 @@ func generateBadgeIconImage(pid int, number int) *image.NRGBA {
 // ICO 文件生成
 // ============================================================================
 
-// scaleImage 将图像缩放到指定尺寸（面积采样），任务栏小尺寸下数字边缘更圆滑。
-func scaleImage(src *image.NRGBA, dstSize int) *image.NRGBA {
-	srcBounds := src.Bounds()
-	srcW := srcBounds.Dx()
-	srcH := srcBounds.Dy()
-	dst := image.NewNRGBA(image.Rect(0, 0, dstSize, dstSize))
-	scaleX := float64(srcW) / float64(dstSize)
-	scaleY := float64(srcH) / float64(dstSize)
-	for dy := 0; dy < dstSize; dy++ {
-		for dx := 0; dx < dstSize; dx++ {
-			x0 := int(math.Floor(float64(dx) * scaleX))
-			x1 := int(math.Ceil(float64(dx+1) * scaleX))
-			y0 := int(math.Floor(float64(dy) * scaleY))
-			y1 := int(math.Ceil(float64(dy+1) * scaleY))
-			if x1 <= x0 {
-				x1 = x0 + 1
-			}
-			if y1 <= y0 {
-				y1 = y0 + 1
-			}
-			var r, g, b, a uint32
-			var count uint32
-			for sy := y0; sy < y1 && sy < srcH; sy++ {
-				for sx := x0; sx < x1 && sx < srcW; sx++ {
-					p := src.NRGBAAt(srcBounds.Min.X+sx, srcBounds.Min.Y+sy)
-					r += uint32(p.R)
-					g += uint32(p.G)
-					b += uint32(p.B)
-					a += uint32(p.A)
-					count++
-				}
-			}
-			if count == 0 {
-				continue
-			}
-			dst.SetNRGBA(dx, dy, color.NRGBA{R: uint8(r / count), G: uint8(g / count), B: uint8(b / count), A: uint8(a / count)})
-		}
-	}
-	return dst
-}
-
-// generateBadgeICO 生成多分辨率编号图标。192px 矢量式源画布是旧版的 3 倍，
-// 再分别降采样，避免先在 64px 上画数字后被 Windows 高 DPI 二次放大而失真。
+// generateBadgeICO 生成多分辨率编号图标。每个分辨率独立原生绘制，避免
+// 192px 源图缩到任务栏尺寸后数字发糊，也避免 Windows 高 DPI 再次插值。
 func generateBadgeICO(pid int, number int) ([]byte, error) {
-	srcImg := generateBadgeIconImage(pid, number)
-
-	img16 := scaleImage(srcImg, 16)
-	img32 := scaleImage(srcImg, 32)
-	img64 := scaleImage(srcImg, 64)
-	img128 := scaleImage(srcImg, 128)
-
-	var buf16, buf32, buf64, buf128 bytes.Buffer
-	if err := png.Encode(&buf16, img16); err != nil {
-		return nil, err
+	sizes := []int{16, 24, 32, 48, 64, 128}
+	pngData := make([][]byte, 0, len(sizes))
+	for _, size := range sizes {
+		var buf bytes.Buffer
+		if err := png.Encode(&buf, generateBadgeIconImage(pid, number, size)); err != nil {
+			return nil, err
+		}
+		pngData = append(pngData, buf.Bytes())
 	}
-	if err := png.Encode(&buf32, img32); err != nil {
-		return nil, err
-	}
-	if err := png.Encode(&buf64, img64); err != nil {
-		return nil, err
-	}
-	if err := png.Encode(&buf128, img128); err != nil {
-		return nil, err
-	}
-
-	png16Data := buf16.Bytes()
-	png32Data := buf32.Bytes()
-	png64Data := buf64.Bytes()
-	png128Data := buf128.Bytes()
 
 	// ICO 文件格式
 	// 参考：https://en.wikipedia.org/wiki/ICO_(file_format)
@@ -517,56 +427,20 @@ func generateBadgeICO(pid int, number int) ([]byte, error) {
 	header := icoDirHeader{
 		Reserved:  0,
 		ImageType: 1, // ICON
-		NumImages: 4,
-	}
-
-	entriesOffset := uint32(binary.Size(header) + binary.Size(icoDirEntry{})*4)
-	entry16 := icoDirEntry{
-		Width:       16,
-		Height:      16,
-		ColorCount:  0,
-		Reserved:    0,
-		Planes:      1,
-		BitCount:    32,
-		BytesInRes:  uint32(len(png16Data)),
-		ImageOffset: entriesOffset,
-	}
-	entry32 := icoDirEntry{
-		Width:       32,
-		Height:      32,
-		ColorCount:  0,
-		Reserved:    0,
-		Planes:      1,
-		BitCount:    32,
-		BytesInRes:  uint32(len(png32Data)),
-		ImageOffset: entry16.ImageOffset + uint32(len(png16Data)),
-	}
-	entry64 := icoDirEntry{
-		Width:       64,
-		Height:      64,
-		ColorCount:  0,
-		Reserved:    0,
-		Planes:      1,
-		BitCount:    32,
-		BytesInRes:  uint32(len(png64Data)),
-		ImageOffset: entry32.ImageOffset + uint32(len(png32Data)),
-	}
-	entry128 := icoDirEntry{
-		Width: 128, Height: 128, Planes: 1, BitCount: 32,
-		BytesInRes:  uint32(len(png128Data)),
-		ImageOffset: entry64.ImageOffset + uint32(len(png64Data)),
+		NumImages: uint16(len(sizes)),
 	}
 
 	var result bytes.Buffer
 	_ = binary.Write(&result, binary.LittleEndian, header)
-	_ = binary.Write(&result, binary.LittleEndian, entry16)
-	_ = binary.Write(&result, binary.LittleEndian, entry32)
-	_ = binary.Write(&result, binary.LittleEndian, entry64)
-	_ = binary.Write(&result, binary.LittleEndian, entry128)
-	result.Write(png16Data)
-	result.Write(png32Data)
-	result.Write(png64Data)
-	result.Write(png128Data)
+	offset := uint32(binary.Size(header) + binary.Size(icoDirEntry{})*len(sizes))
+	for i, size := range sizes {
+		entry := icoDirEntry{Width: uint8(size), Height: uint8(size), Planes: 1, BitCount: 32, BytesInRes: uint32(len(pngData[i])), ImageOffset: offset}
+		_ = binary.Write(&result, binary.LittleEndian, entry)
+		offset += uint32(len(pngData[i]))
+	}
+	for _, data := range pngData {
+		result.Write(data)
+	}
 
 	return result.Bytes(), nil
 }
@@ -680,7 +554,7 @@ func setBadgeForInstance(pid int, displayNumber int) error {
 
 	var lastErr error
 	successfulWrites := 0
-	for attempt := 0; attempt < 30; attempt++ {
+	for attempt := 0; attempt < 60; attempt++ {
 		if !isProcessAlive(pid) {
 			if lastErr != nil {
 				return lastErr
@@ -691,10 +565,9 @@ func setBadgeForInstance(pid int, displayNumber int) error {
 		err = setWindowIcon(pid, icoPath)
 		if err == nil {
 			successfulWrites++
-			// Chrome may replace WM_SETICON once more while the first tab finishes
-			// initialising. Three bounded writes keep the number without a permanent
-			// watchdog or long-running GDI loop.
-			if successfulWrites >= 3 {
+			// Chrome 初始化首个标签页时可能覆盖一次 WM_SETICON。两次短间隔写入
+			// 即可覆盖该窗口期，同时让编号比旧版最多提前数秒出现。
+			if successfulWrites >= 2 {
 				log.Info("任务栏 badge 图标设置成功",
 					logger.F("pid", pid),
 					logger.F("display_number", displayNumber),
@@ -703,13 +576,17 @@ func setBadgeForInstance(pid int, displayNumber int) error {
 				)
 				return nil
 			}
-			time.Sleep(450 * time.Millisecond)
+			time.Sleep(300 * time.Millisecond)
 			continue
 		}
 
 		lastErr = err
-		if attempt < 29 {
-			time.Sleep(1 * time.Second)
+		if attempt < 59 {
+			if attempt < 20 {
+				time.Sleep(100 * time.Millisecond)
+			} else {
+				time.Sleep(250 * time.Millisecond)
+			}
 		}
 	}
 

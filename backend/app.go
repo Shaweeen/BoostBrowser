@@ -230,7 +230,12 @@ func (a *App) startup(ctx context.Context) {
 		a.ensureBundledGoogleChromeCore()
 		// 同步内存态，确保后续默认内核解析使用刚注册的内置 Chrome。
 		_ = a.browserMgr.ListCores()
-		a.autoDetectCores()
+		// 路径有效性扫描只写诊断日志，不参与内核选择。延后执行可避免大量
+		// 浏览器内核目录在主窗口首次加载的关键路径上同步触盘。
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			a.autoDetectCores()
+		}()
 		a.loadProxies()
 		a.reconcileProfileProxyBindings()
 	} else {

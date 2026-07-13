@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	stdruntime "runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -91,6 +92,27 @@ func extractBadgeNumberFromName(name string) int {
 		n = n*10 + int(c-'0')
 	}
 	return n
+}
+
+// resolveBadgeDisplayNumber 优先使用名称中的显式数字；没有数字时按 ProfileId
+// 固定排序生成序号。Go map 遍历顺序不稳定，不能用于用户可见的任务栏编号。
+func resolveBadgeDisplayNumber(profileId, profileName string, profiles map[string]*browser.Profile) int {
+	if number := extractBadgeNumberFromName(profileName); number > 0 {
+		return number
+	}
+	ids := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
+		if profile != nil && strings.TrimSpace(profile.ProfileId) != "" {
+			ids = append(ids, profile.ProfileId)
+		}
+	}
+	sort.Strings(ids)
+	for index, id := range ids {
+		if id == profileId {
+			return index + 1
+		}
+	}
+	return 0
 }
 
 func (a *App) BrowserInstanceStart(profileId string) (*BrowserProfile, error) {
@@ -519,19 +541,8 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			//   名字 "11"       → badge 11
 			//   名字 "实例-11"  → badge 11
 			// 这样改名后 badge 会跟着变，不再依赖排序位置。
-			// 名字里完全没数字时回退到当前 Profiles map 顺序号，保证至少有个非 0 值
-			// （setBadgeForInstance 在 displayNumber<=0 时会跳过）。
-			displayNumber := extractBadgeNumberFromName(profile.ProfileName)
-			if displayNumber <= 0 {
-				idx := 0
-				for _, p := range a.browserMgr.Profiles {
-					idx++
-					if p.ProfileId == profileId {
-						displayNumber = idx
-						break
-					}
-				}
-			}
+			// 名字里完全没数字时按 ProfileId 固定排序，确保重启前后编号一致。
+			displayNumber := resolveBadgeDisplayNumber(profileId, profile.ProfileName, a.browserMgr.Profiles)
 
 			// 同步注入反检测隐身脚本 + UA 覆写（必须在导航到目标 URL 前完成，
 			// 否则 Chrome Web Store 的首次请求仍会携带错误的 Sec-CH-UA）

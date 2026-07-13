@@ -15,8 +15,9 @@ import (
 )
 
 const browserStartReadyTimeout = 10 * time.Second
-const browserStartStableWindow = 1200 * time.Millisecond
+const browserStartStableWindow = 450 * time.Millisecond
 const browserDebugProbeTimeout = 250 * time.Millisecond
+const browserDebugProbeInterval = 100 * time.Millisecond
 
 var errBrowserDebugPortPending = errors.New("browser debug port pending")
 
@@ -85,7 +86,7 @@ func waitBrowserDebugPortReady(initialDebugPort int, userDataDir string, timeout
 				}
 			}
 		}
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(browserDebugProbeInterval)
 	}
 	if !exitObserved && monitor != nil && monitor.HasExited() {
 		exitResult = monitor.Result()
@@ -100,7 +101,7 @@ func waitBrowserDebugPortReady(initialDebugPort int, userDataDir string, timeout
 					return debugPort, nil
 				}
 			}
-			time.Sleep(150 * time.Millisecond)
+			time.Sleep(browserDebugProbeInterval)
 		}
 	}
 	if exitObserved {
@@ -150,7 +151,7 @@ func waitBrowserDebugPortStable(initialDebugPort int, userDataDir string, timeou
 			}
 			return 0, fmt.Errorf("浏览器调试端口 %d 短暂就绪后又失效：%w", debugPort, err)
 		}
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(browserDebugProbeInterval)
 	}
 	return debugPort, nil
 }

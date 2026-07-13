@@ -8,7 +8,7 @@ import (
 
 const (
 	defaultBrowserStartReadyTimeout = 3 * time.Second
-	defaultBrowserStartStableWindow = 1200 * time.Millisecond
+	defaultBrowserStartStableWindow = 450 * time.Millisecond
 	defaultBrowserStartMaxAttempts  = 5
 )
 
@@ -29,6 +29,11 @@ func browserStartStableWindowMillis(cfg *config.Config) int {
 		return fallback
 	}
 	if cfg.Browser.StartStableWindowMs > 0 {
+		// 1200ms 是旧版本写入所有用户配置的默认值，不代表用户主动调优。
+		// 升级后迁移到新的 450ms 健康窗口；其他自定义值原样保留。
+		if cfg.Browser.StartStableWindowMs == 1200 {
+			return fallback
+		}
 		return cfg.Browser.StartStableWindowMs
 	}
 	return fallback
