@@ -1,12 +1,50 @@
 package backend
 
 import (
+	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 )
+
+func extensionZipForTest(t *testing.T, manifest string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(manifest)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestInstallUnpackedExtensionKeepsOldCopyWhenManifestInvalid(t *testing.T) {
+	root := t.TempDir()
+	extDir := filepath.Join(root, "extensions", "imported", "example")
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "marker.txt"), []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := installUnpackedExtension(root, "example", extensionZipForTest(t, `{"name":"broken"}`))
+	if err == nil {
+		t.Fatal("invalid manifest should be rejected")
+	}
+	data, readErr := os.ReadFile(filepath.Join(extDir, "marker.txt"))
+	if readErr != nil || string(data) != "old" {
+		t.Fatalf("old extension should be preserved: data=%q err=%v", data, readErr)
+	}
+}
 
 func TestRemoveExtensionDirFromLaunchArgs(t *testing.T) {
 	target := `Z:\\Boost Browser\\extensions\\imported\\mcohilncbfahbmgdjkbpemcciiolgcge`

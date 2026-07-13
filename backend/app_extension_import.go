@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -129,15 +128,9 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 		sum := sha256.Sum256(payload)
 		extID = "external-" + hex.EncodeToString(sum[:])[:16]
 	}
-	extDir := filepath.Join(a.appRoot, "extensions", "imported", safePathName(extID))
-	if err := os.RemoveAll(extDir); err != nil {
-		return nil, fmt.Errorf("清理旧扩展目录失败：%w", err)
-	}
-	if err := unzipBytes(zipPayload, extDir); err != nil {
+	extDir, err := installUnpackedExtension(a.appRoot, extID, zipPayload)
+	if err != nil {
 		return nil, err
-	}
-	if _, err := os.Stat(filepath.Join(extDir, "manifest.json")); err != nil {
-		return nil, fmt.Errorf("扩展解包失败：未找到 manifest.json")
 	}
 
 	updated, err := a.bindExtensionDirToProfiles(profileIds, extDir)
@@ -183,36 +176,19 @@ func resolveExtensionDownloadURL(input string, extID string) string {
 }
 
 func validateExtensionDownloadURL(rawURL string) error {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return fmt.Errorf("扩展下载地址无效")
-	}
-	if parsed.Scheme != "https" {
-		return fmt.Errorf("扩展下载地址必须使用 HTTPS")
-	}
-	host := strings.TrimSpace(parsed.Hostname())
-	if host == "" {
-		return fmt.Errorf("扩展下载地址缺少主机名")
-	}
-	if isBlockedExtensionDownloadHost(host) {
-		return fmt.Errorf("扩展下载地址不允许指向本机或内网地址")
+	if _, err := validatePublicRemoteURL(rawURL, false); err != nil {
+		return fmt.Errorf("扩展下载地址无效: %w", err)
 	}
 	return nil
 }
 
 func isBlockedExtensionDownloadHost(host string) bool {
-	lower := strings.ToLower(strings.Trim(host, "[]"))
-	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
-		return true
-	}
-	if ip := net.ParseIP(lower); ip != nil {
-		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
-	}
-	return false
+	return isBlockedRemoteHostname(host)
 }
 
 func downloadExtensionPayload(downloadURL string) ([]byte, error) {
-	client := &http.Client{Timeout: 90 * time.Second}
+	const maxExtensionDownloadBytes = 128 * 1024 * 1024
+	client := newPublicRemoteHTTPClient(90*time.Second, false)
 	req, err := http.NewRequest(http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("扩展下载地址无效：%w", err)
@@ -226,12 +202,15 @@ func downloadExtensionPayload(downloadURL string) ([]byte, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("扩展下载失败：HTTP %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 300*1024*1024))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxExtensionDownloadBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("读取扩展数据失败：%w", err)
 	}
 	if len(data) < 4 {
 		return nil, fmt.Errorf("扩展下载失败：文件为空或格式错误")
+	}
+	if len(data) > maxExtensionDownloadBytes {
+		return nil, fmt.Errorf("扩展下载失败：文件超过 128MB 限制")
 	}
 	return data, nil
 }
@@ -327,6 +306,71 @@ func unzipBytes(data []byte, dest string) error {
 	return nil
 }
 
+func installUnpackedExtension(appRoot string, extID string, zipPayload []byte) (string, error) {
+	parent := filepath.Join(appRoot, "extensions", "imported")
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		return "", fmt.Errorf("创建扩展目录失败：%w", err)
+	}
+	extDir := filepath.Join(parent, safePathName(extID))
+	stageDir, err := os.MkdirTemp(parent, ".installing-")
+	if err != nil {
+		return "", fmt.Errorf("创建扩展暂存目录失败：%w", err)
+	}
+	defer os.RemoveAll(stageDir)
+	if err := unzipBytes(zipPayload, stageDir); err != nil {
+		return "", err
+	}
+	if err := validateUnpackedExtensionManifest(stageDir); err != nil {
+		return "", err
+	}
+
+	backupDir := extDir + ".previous"
+	_ = os.RemoveAll(backupDir)
+	if _, statErr := os.Stat(extDir); statErr == nil {
+		if err := os.Rename(extDir, backupDir); err != nil {
+			return "", fmt.Errorf("替换旧扩展目录失败：%w", err)
+		}
+	} else if !os.IsNotExist(statErr) {
+		return "", fmt.Errorf("检查旧扩展目录失败：%w", statErr)
+	}
+	if err := os.Rename(stageDir, extDir); err != nil {
+		_ = os.Rename(backupDir, extDir)
+		return "", fmt.Errorf("安装扩展目录失败：%w", err)
+	}
+	_ = os.RemoveAll(backupDir)
+	return extDir, nil
+}
+
+func validateUnpackedExtensionManifest(extDir string) error {
+	manifestFile, err := os.Open(filepath.Join(extDir, "manifest.json"))
+	if err != nil {
+		return fmt.Errorf("扩展解包失败：未找到 manifest.json")
+	}
+	defer manifestFile.Close()
+	data, err := io.ReadAll(io.LimitReader(manifestFile, 2*1024*1024+1))
+	if err != nil {
+		return fmt.Errorf("读取扩展 manifest.json 失败：%w", err)
+	}
+	if len(data) > 2*1024*1024 {
+		return fmt.Errorf("扩展 manifest.json 体积异常")
+	}
+	var manifest struct {
+		ManifestVersion int    `json:"manifest_version"`
+		Name            string `json:"name"`
+		Version         string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("扩展 manifest.json 格式无效：%w", err)
+	}
+	if manifest.ManifestVersion != 2 && manifest.ManifestVersion != 3 {
+		return fmt.Errorf("扩展 manifest_version 不受支持：%d", manifest.ManifestVersion)
+	}
+	if strings.TrimSpace(manifest.Name) == "" || strings.TrimSpace(manifest.Version) == "" {
+		return fmt.Errorf("扩展 manifest.json 缺少 name 或 version")
+	}
+	return nil
+}
+
 func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) ([]string, error) {
 	a.browserMgr.Mutex.Lock()
 	defer a.browserMgr.Mutex.Unlock()
@@ -397,15 +441,9 @@ func (a *App) InstallExtensionFromCRXURL(profileID string, crxURL string) (strin
 		sum := sha256.Sum256(payload)
 		extID = "external-" + hex.EncodeToString(sum[:])[:16]
 	}
-	extDir := filepath.Join(a.appRoot, "extensions", "imported", safePathName(extID))
-	if err := os.RemoveAll(extDir); err != nil {
-		return extID, "", fmt.Errorf("清理旧扩展目录失败：%w", err)
-	}
-	if err := unzipBytes(zipPayload, extDir); err != nil {
+	extDir, err := installUnpackedExtension(a.appRoot, extID, zipPayload)
+	if err != nil {
 		return extID, "", err
-	}
-	if _, err := os.Stat(filepath.Join(extDir, "manifest.json")); err != nil {
-		return extID, "", fmt.Errorf("扩展解包失败：未找到 manifest.json")
 	}
 	if _, err := a.bindExtensionDirToProfiles([]string{profileID}, extDir); err != nil {
 		return extID, "", err

@@ -40,6 +40,8 @@ type cdpBrowserVersion struct {
 	WebSocketDebuggerUrl string `json:"webSocketDebuggerUrl"`
 }
 
+var cdpHTTPClient = &http.Client{Timeout: 5 * time.Second}
+
 // cdpMessage 是 CDP 协议消息结构
 type cdpMessage struct {
 	Id     int            `json:"id"`
@@ -59,12 +61,18 @@ type cdpResponse struct {
 // cdpCall 向指定 debugPort 发送单次 CDP 命令并返回 result 字段
 func cdpCall(debugPort int, method string, params map[string]any) (map[string]any, error) {
 	// 1. 获取 WebSocket 调试地址
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/json", debugPort))
+	resp, err := cdpHTTPClient.Get(fmt.Sprintf("http://127.0.0.1:%d/json", debugPort))
 	if err != nil {
 		return nil, fmt.Errorf("CDP /json 请求失败: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("CDP /json 返回 HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("读取 CDP targets 失败: %w", err)
+	}
 
 	var targets []cdpTarget
 	if err := json.Unmarshal(body, &targets); err != nil || len(targets) == 0 {
@@ -111,13 +119,19 @@ func cdpCall(debugPort int, method string, params map[string]any) (map[string]an
 }
 
 func cdpBrowserCall(debugPort int, method string, params map[string]any) error {
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/json/version", debugPort))
+	resp, err := cdpHTTPClient.Get(fmt.Sprintf("http://127.0.0.1:%d/json/version", debugPort))
 	if err != nil {
 		return fmt.Errorf("CDP /json/version 请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("CDP /json/version 返回 HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	if err != nil {
+		return fmt.Errorf("读取 CDP browser target 失败: %w", err)
+	}
 	var version cdpBrowserVersion
 	if err := json.Unmarshal(body, &version); err != nil {
 		return fmt.Errorf("CDP browser target 解析失败: %w", err)
@@ -230,8 +244,19 @@ func (a *App) BrowserExportCookies(profileId string) (string, error) {
 		if expires < 0 {
 			expires = 0
 		}
+		domain := sanitizeNetscapeCookieField(c.Domain)
+		if c.HttpOnly && !strings.HasPrefix(domain, "#HttpOnly_") {
+			domain = "#HttpOnly_" + domain
+		}
 		sb.WriteString(fmt.Sprintf("%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
-			c.Domain, includeSubdomains, c.Path, secure, expires, c.Name, c.Value))
+			domain, includeSubdomains, sanitizeNetscapeCookieField(c.Path), secure, expires,
+			sanitizeNetscapeCookieField(c.Name), sanitizeNetscapeCookieField(c.Value)))
 	}
 	return sb.String(), nil
+}
+
+func sanitizeNetscapeCookieField(value string) string {
+	value = strings.ReplaceAll(value, "\t", " ")
+	value = strings.ReplaceAll(value, "\r", " ")
+	return strings.ReplaceAll(value, "\n", " ")
 }

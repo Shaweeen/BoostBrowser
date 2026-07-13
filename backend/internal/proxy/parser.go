@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -106,7 +107,7 @@ func buildStandardProxyFromClash(node map[string]interface{}, scheme string) str
 	if host == "" || port == 0 {
 		return ""
 	}
-	address := fmt.Sprintf("%s:%d", host, port)
+	address := net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(port))
 	if username != "" {
 		user := url.UserPassword(username, password)
 		return fmt.Sprintf("%s://%s@%s", scheme, user.String(), address)

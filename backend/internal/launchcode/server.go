@@ -70,22 +70,22 @@ type LaunchCallRecord struct {
 
 // LaunchServer 本地 HTTP 唤起服务
 type LaunchServer struct {
-	service     *LaunchCodeService
-	starter     BrowserStarter
-	browserMgr  *browser.Manager
-	port        int
-	server      *http.Server
-	mu          sync.Mutex
-	authMu      sync.RWMutex
-	logMu       sync.Mutex
-	callLogs    []LaunchCallRecord
-	activeMu    sync.RWMutex
-	activePort  int
-	activeID    string
-	activeName  string
-	apiAuth     APIAuthConfig
+	service      *LaunchCodeService
+	starter      BrowserStarter
+	browserMgr   *browser.Manager
+	port         int
+	server       *http.Server
+	mu           sync.Mutex
+	authMu       sync.RWMutex
+	logMu        sync.Mutex
+	callLogs     []LaunchCallRecord
+	activeMu     sync.RWMutex
+	activePort   int
+	activeID     string
+	activeName   string
+	apiAuth      APIAuthConfig
 	extInstaller ExtensionInstaller
-	extInstMu   sync.RWMutex
+	extInstMu    sync.RWMutex
 }
 
 // ExtensionInstaller 由 App 层实现，让 LaunchServer 能在收到 helper 扩展请求后
@@ -121,7 +121,12 @@ func (s *LaunchServer) Start() error {
 
 	s.mu.Lock()
 	s.port = port
-	s.server = &http.Server{Handler: handler}
+	s.server = &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 * 1024,
+	}
 	s.mu.Unlock()
 
 	log := logger.New("LaunchServer")
@@ -365,7 +370,9 @@ func (s *LaunchServer) activeTarget() (int, string, string) {
 	return s.activePort, s.activeID, s.activeName
 }
 
-// localhostMiddleware 只允许 127.0.0.1 访问
+// localhostMiddleware restricts both the peer and browser-controlled headers.
+// Checking RemoteAddr alone is insufficient: a malicious website can target a
+// loopback service through DNS rebinding or cross-origin requests.
 func (s *LaunchServer) localhostMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -376,8 +383,44 @@ func (s *LaunchServer) localhostMiddleware(next http.Handler) http.Handler {
 			})
 			return
 		}
+		requestHost := strings.ToLower(strings.TrimSpace(r.Host))
+		if parsedHost, _, splitErr := net.SplitHostPort(requestHost); splitErr == nil {
+			requestHost = strings.Trim(parsedHost, "[]")
+		}
+		if requestHost != "127.0.0.1" && requestHost != "localhost" {
+			writeJSON(w, http.StatusForbidden, map[string]interface{}{
+				"ok":    false,
+				"error": "forbidden: invalid localhost host header",
+			})
+			return
+		}
+		if !s.isAllowedBrowserOrigin(r) {
+			writeJSON(w, http.StatusForbidden, map[string]interface{}{
+				"ok":    false,
+				"error": "forbidden: cross-origin localhost request",
+			})
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *LaunchServer) isAllowedBrowserOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true // CLI and native automation clients normally omit Origin.
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Hostname() == "" {
+		return false
+	}
+	host := strings.ToLower(strings.Trim(parsed.Hostname(), "[]"))
+	if (parsed.Scheme == "http" || parsed.Scheme == "https") && (host == "127.0.0.1" || host == "localhost") {
+		return true
+	}
+	// The bundled Web Store helper calls an authenticated /api endpoint. Never
+	// allow extension origins onto the unauthenticated CDP reverse-proxy path.
+	return parsed.Scheme == "chrome-extension" && strings.HasPrefix(r.URL.Path, "/api/") && s.APIAuthEnabled()
 }
 
 // handleHealth GET /api/health

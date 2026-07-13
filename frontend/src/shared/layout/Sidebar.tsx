@@ -69,27 +69,25 @@ export function Sidebar() {
     )}>
       {/* Logo */}
       <div className={clsx(
-        'h-14 flex items-center border-b border-[var(--color-border-muted)]',
-        sidebarCollapsed ? 'justify-center px-2' : 'px-5'
+        'h-14 flex items-center overflow-hidden border-b border-[var(--color-border-muted)] transition-[padding] duration-300 ease-out',
+        sidebarCollapsed ? 'px-4' : 'px-5'
       )}>
-        {!sidebarCollapsed ? (
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-full flex-shrink-0 bg-[var(--color-accent)] flex items-center justify-center">
-              <span className="text-xs font-bold text-[var(--color-text-inverse)]">
-                {projectConfig.shortName.charAt(0)}
-              </span>
-            </div>
-            <h2 className="text-base font-semibold text-[var(--color-text-primary)] tracking-tight truncate">
-              {projectConfig.name}
-            </h2>
-          </div>
-        ) : (
-          <div className="w-8 h-8 rounded-full bg-[var(--color-accent)] flex items-center justify-center">
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="flex h-8 w-8 flex-none items-center justify-center rounded-full bg-[var(--color-accent)] shadow-sm transition-transform duration-300 ease-out">
             <span className="text-xs font-bold text-[var(--color-text-inverse)]">
               {projectConfig.shortName.charAt(0)}
             </span>
           </div>
-        )}
+          <h2
+            aria-hidden={sidebarCollapsed}
+            className={clsx(
+              'whitespace-nowrap text-base font-semibold tracking-tight text-[var(--color-text-primary)] transition-[max-width,opacity,transform] duration-300 ease-out',
+              sidebarCollapsed ? 'max-w-0 -translate-x-2 opacity-0' : 'max-w-44 translate-x-0 opacity-100'
+            )}
+          >
+            {projectConfig.name}
+          </h2>
+        </div>
       </div>
 
       {/* Navigation */}

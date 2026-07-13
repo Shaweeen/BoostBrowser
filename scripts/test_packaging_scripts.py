@@ -121,7 +121,11 @@ class PackagingScriptsTest(unittest.TestCase):
 
     def test_no_active_script_keeps_old_machine_specific_paths(self):
         for path in (ROOT / "scripts").rglob("*"):
-            if not path.is_file() or path.name == "test_packaging_scripts.py":
+            if (
+                not path.is_file()
+                or path.name == "test_packaging_scripts.py"
+                or "__pycache__" in path.parts
+            ):
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
             self.assertNotIn("Z:\\", text, f"{path.relative_to(ROOT)} still has old machine-specific Z: paths")

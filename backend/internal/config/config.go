@@ -467,7 +467,7 @@ func (c *Config) Save(configPath string) error {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 		return fmt.Errorf("创建配置目录失败: %w", err)
 	}
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		return fmt.Errorf("写入配置文件失败: %w", err)
 	}
 
@@ -505,7 +505,7 @@ func SaveProxies(path string, proxies []BrowserProxy) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("创建代理目录失败: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("写入代理文件失败: %w", err)
 	}
 	return nil
