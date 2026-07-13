@@ -14,11 +14,13 @@
 #   -RunGoTests              Run go test ./... before packaging
 #   -SourceZip <path>        Use an already downloaded cloakbrowser-windows-x64.zip
 #   -AssetRoot <path>        Asset root containing chrome\..., defaults to repo root
+#   -ManagerOnly             Build redistributable manager without bundled runtimes
 
 param(
     [switch]$SkipKernelInstall,
     [switch]$SkipGoogleFallback,
     [switch]$RunGoTests,
+    [switch]$ManagerOnly,
     [string]$SourceZip = "",
     [string]$AssetRoot = ""
 )
@@ -62,6 +64,10 @@ Run-Step "Checking toolchain" {
 }
 
 Run-Step "Preparing CloakBrowser kernel" {
+    if ($ManagerOnly) {
+        Write-Host "Manager-only edition: no browser kernel will be installed or bundled" -ForegroundColor Green
+        return
+    }
     if (-not $SkipKernelInstall) {
         $args = @('-ExecutionPolicy', 'Bypass', '-File', "$RepoRoot\scripts\install_cloakbrowser_kernel.ps1", '-InstallRoot', $AssetRoot)
         if (-not [string]::IsNullOrWhiteSpace($SourceZip)) { $args += @('-SourceZip', $SourceZip) }
@@ -77,6 +83,10 @@ Run-Step "Preparing CloakBrowser kernel" {
 }
 
 Run-Step "Preparing optional Google Chrome fallback" {
+    if ($ManagerOnly) {
+        Write-Host "Manager-only edition: Google Chrome redistribution is disabled" -ForegroundColor Green
+        return
+    }
     $googleDst = Join-Path $AssetRoot 'chrome\google-148.0.7778.167'
     $googleExe = Join-Path $googleDst 'chrome.exe'
     if ($SkipGoogleFallback) {
@@ -145,8 +155,10 @@ Run-Step "Building release binaries" {
     if ($LASTEXITCODE -ne 0) { throw "build_release.ps1 failed" }
 }
 
-Run-Step "Building full installer" {
-    & powershell -ExecutionPolicy Bypass -File "$RepoRoot\scripts\build_installer.ps1"
+Run-Step "Building installer" {
+    $installerArgs = @('-ExecutionPolicy', 'Bypass', '-File', "$RepoRoot\scripts\build_installer.ps1")
+    if ($ManagerOnly) { $installerArgs += '-ManagerOnly' }
+    & powershell @installerArgs
     if ($LASTEXITCODE -ne 0) { throw "build_installer.ps1 failed" }
 }
 
@@ -155,5 +167,6 @@ Run-Step "Build output" {
         Write-Host ("  - {0,-45} {1,12:N0} bytes" -f $_.Name, $_.Length) -ForegroundColor White
     }
     Write-Host ""
-    Write-Host "Done. Full installer is in: $RepoRoot\build\release" -ForegroundColor Green
+    $edition = if ($ManagerOnly) { 'public manager' } else { 'private full' }
+    Write-Host "Done. $edition installer is in: $RepoRoot\build\release" -ForegroundColor Green
 }

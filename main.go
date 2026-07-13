@@ -151,6 +151,20 @@ func (a *App) shutdown(ctx context.Context) {
 	backend.Stop(a.App, ctx)
 }
 
+func (a *App) recoverWailsCallback(name string, ctx context.Context) {
+	if r := recover(); r != nil {
+		stack := strings.ReplaceAll(string(debug.Stack()), "\n", "\\n")
+		a.RecordLifecycleEvent("wails-callback-panic", []string{
+			"callback=" + strings.TrimSpace(name),
+			fmt.Sprintf("value=%v", r),
+			"stack=" + stack,
+		})
+		if ctx != nil {
+			runtime.LogError(ctx, fmt.Sprintf("%s callback recovered from panic: %v", name, r))
+		}
+	}
+}
+
 func (a *App) shouldBlockClose(ctx context.Context) bool {
 	if syncPanelMode {
 		a.syncPanelCloseMu.Lock()
@@ -171,15 +185,26 @@ func (a *App) CloseWindowSyncPanel() {
 		a.RecordLifecycleEvent("sync-panel-close-request", []string{"action=ignore", "reason=not-sync-panel-mode"})
 		return
 	}
-	if !a.syncPanelStartedAt.IsZero() && time.Since(a.syncPanelStartedAt) < 3*time.Second {
-		a.RecordLifecycleEvent("sync-panel-close-request", []string{"action=ignore", "reason=startup-close-cooldown"})
+	a.syncPanelCloseMu.Lock()
+	ctx := a.wailsCtx
+	a.syncPanelCloseMu.Unlock()
+	a.RecordLifecycleEvent("sync-panel-close-request", []string{"action=hide-panel", "sync=preserved"})
+	if ctx != nil {
+		runtime.WindowHide(ctx)
+	}
+}
+
+// ExitWindowSyncPanel terminates only the assistant UI process. The sync
+// engine lives in the main client and is stopped explicitly by the caller.
+func (a *App) ExitWindowSyncPanel() {
+	if !syncPanelMode {
 		return
 	}
 	a.syncPanelCloseMu.Lock()
 	a.syncPanelCloseAllowed = true
 	ctx := a.wailsCtx
 	a.syncPanelCloseMu.Unlock()
-	a.RecordLifecycleEvent("sync-panel-close-request", []string{"action=quit-panel-only"})
+	a.RecordLifecycleEvent("sync-panel-exit", []string{"action=quit", "reason=user-or-no-running-environments"})
 	if ctx != nil {
 		runtime.Quit(ctx)
 	}
@@ -280,6 +305,8 @@ func main() {
 	if err := backend.EnsureRuntimeLayout(appRoot); err != nil {
 		log.Printf("准备用户数据目录失败: %v", err)
 	}
+	installCrashLogCapture(appRoot)
+	debug.SetTraceback("all")
 	if startupDebugEnabled && backend.RuntimeUsesDetachedState(appRoot) {
 		log.Printf("检测到安装目录需要只读运行，状态目录切换到: %s", backend.RuntimeStateRoot(appRoot))
 	}
@@ -362,21 +389,20 @@ func main() {
 	alwaysOnTop := false
 	disableResize := false
 	if syncPanelMode {
-		title = fmt.Sprintf("%s · 窗口同步", cfg.App.Name)
-		width = 520
-		height = 600
-		// 同步面板现在默认直接以小悬浮窗启动；最小尺寸仅覆盖折叠状态和“显示下面功能”展开状态。
-		minWidth = 448
-		minHeight = 120
-		// 同步器悬浮窗恢复为真实透明宿主，前端再根据聚焦态决定面板的不透明度。
-		// 这样空闲时尽量接近“只有一层透明浮层”，聚焦/操作时再抬高可见度。
-		backgroundColour = &options.RGBA{R: 0, G: 0, B: 0, A: 0}
+		title = fmt.Sprintf("%s · 同步工具", cfg.App.Name)
+		width = 440
+		height = 520
+		minWidth = 136
+		minHeight = 44
+		// Use a fully opaque native host. Transparent/translucent WebView windows
+		// can lose their hit-test surface on blur and appear to disappear.
+		backgroundColour = &options.RGBA{R: 239, G: 245, B: 255, A: 255}
 		frameless = true
 		alwaysOnTop = true
 		disableResize = true
 		windowsOptions = &windows.Options{
-			WebviewIsTransparent:              true,
-			WindowIsTranslucent:               true,
+			WebviewIsTransparent:              false,
+			WindowIsTranslucent:               false,
 			DisableFramelessWindowDecorations: true,
 		}
 	}
@@ -394,6 +420,7 @@ func main() {
 		},
 		BackgroundColour: backgroundColour,
 		OnStartup: func(ctx context.Context) {
+			defer app.recoverWailsCallback("startup", ctx)
 			close(startupReached)
 			app.RecordLifecycleEvent("wails-startup", nil)
 			if startupDebugEnabled {
@@ -448,6 +475,7 @@ func main() {
 			}
 		},
 		OnShutdown: func(ctx context.Context) {
+			defer app.recoverWailsCallback("shutdown", ctx)
 			app.RecordLifecycleEvent("wails-shutdown", nil)
 			if startupDebugEnabled {
 				log.Printf("Wails OnShutdown 已触发")
@@ -459,6 +487,7 @@ func main() {
 		},
 		// 拦截关闭按钮事件，由前端处理自定义对话框
 		OnBeforeClose: func(ctx context.Context) bool {
+			defer app.recoverWailsCallback("before-close", ctx)
 			return app.shouldBlockClose(ctx)
 		},
 		Bind: []interface{}{

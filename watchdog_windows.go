@@ -49,6 +49,10 @@ func runUnexpectedExitWatchdogMode() bool {
 		logWatchdog(appRoot, "watchdog-skip-restart", append([]string{"reason=intentional-exit"}, exitFields...)...)
 		return true
 	}
+	if watchdogRestartLimitReached(appRoot, time.Now()) {
+		logWatchdog(appRoot, "watchdog-skip-restart", append([]string{"reason=restart-loop-fuse"}, exitFields...)...)
+		return true
+	}
 
 	logWatchdog(appRoot, "watchdog-restart", append([]string{"reason=unexpected-parent-exit"}, exitFields...)...)
 	cmd := exec.Command(exePath)
@@ -62,6 +66,28 @@ func runUnexpectedExitWatchdogMode() bool {
 	logWatchdog(appRoot, "watchdog-restarted", fmt.Sprintf("child_pid=%d", cmd.Process.Pid))
 	_ = cmd.Process.Release()
 	return true
+}
+
+func watchdogRestartLimitReached(appRoot string, now time.Time) bool {
+	const window = time.Minute
+	const maxRestarts = 3
+	path := backend.ResolveRuntimePath(appRoot, filepath.Join("data", ".watchdog-restarts"))
+	data, _ := os.ReadFile(path)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	recent := make([]string, 0, maxRestarts)
+	for _, line := range lines {
+		at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(line))
+		if err == nil && now.Sub(at) >= 0 && now.Sub(at) <= window {
+			recent = append(recent, at.Format(time.RFC3339Nano))
+		}
+	}
+	if len(recent) >= maxRestarts {
+		return true
+	}
+	recent = append(recent, now.Format(time.RFC3339Nano))
+	_ = os.MkdirAll(filepath.Dir(path), 0755)
+	_ = os.WriteFile(path, []byte(strings.Join(recent, "\n")+"\n"), 0644)
+	return false
 }
 
 func startUnexpectedExitWatchdog(appRoot string) {

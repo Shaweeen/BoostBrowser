@@ -318,20 +318,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		"--no-first-run",
 		"--no-default-browser-check",
 	}
-	// 窗口尺寸：优先用上次关闭时保存的；没有就用 1280x900 的默认值。
-	if profile.LastWindowWidth >= windowBoundsMinWidth && profile.LastWindowHeight >= windowBoundsMinHeight {
-		args = append(args, fmt.Sprintf("--window-size=%d,%d", profile.LastWindowWidth, profile.LastWindowHeight))
-		// 位置只在尺寸有效且坐标看起来合理时附加，避免把窗口放到屏幕外。
-		// (-32000, -32000) 是 Windows 最小化的标志位，不能复用。
-		if profile.LastWindowX > -10000 && profile.LastWindowY > -10000 {
-			args = append(args, fmt.Sprintf("--window-position=%d,%d", profile.LastWindowX, profile.LastWindowY))
-		}
-	} else {
-		// Chrome for Testing 已能正常启动，不再把浏览器先移到屏幕外压制扩展自动窗口；
-		// 直接使用正常可见窗口，避免启动阶段出现 Default IME/任务栏缩略图等副作用。
-		args = append(args, "--window-size=1280,900")
-	}
-
 	// 非 Cloak 内核仍保留 --search-provider-* 作为启动期兜底。
 	// Cloak 路径下禁止再注入这组命令行参数：实际 packaged 目标里它会留下
 	// default_search_provider 与 runtime row 不一致的 mixed state，最终仍可能
@@ -466,6 +452,13 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
+	// Final authoritative placement pass: fingerprint/profile/API arguments are
+	// already appended, so stale sizes and maximised/fullscreen flags cannot win.
+	args, removedWindowArgs := sanitizeManagedWindowPlacementArgs(args)
+	if len(removedWindowArgs) > 0 {
+		logManagedLaunchArgOverrides(log, profileId, "final.windowPlacement", removedWindowArgs)
+	}
+	args = append(args, "--window-size=1400,600")
 	// 清理 profile 中旧的 unpacked 扩展记录，避免同一个钱包/Header Fix 因旧路径残留显示两份。
 	cleanupStaleManagedUnpackedExtensions(userDataDir, args, a.appRoot)
 	pinAllLoadedExtensionsToToolbar(userDataDir, args)
@@ -513,6 +506,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				logger.F("max_attempts", maxStartAttempts),
 				logger.F("args", strings.Join(args, " ")),
 			)
+			enforceBrowserWindowBounds(profile.Pid, 1400, 600)
 
 			// 调试接口一就绪，执行启动期扩展弹窗抑制，只关闭 Chrome 自动恢复/自动
 			// 打开的 extension 页面/窗口。浏览器现在直接在正常屏幕位置启动，不能再

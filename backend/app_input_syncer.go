@@ -4,6 +4,7 @@ package backend
 
 import (
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
 	"sync"
@@ -35,16 +36,23 @@ type InputSyncer struct {
 	followerDebug []int
 
 	// 原子状态：钩子回调中只读 atomic，不加锁
-	active       int32 // 1=活跃, 0=停止
-	mouseEnabled int32 // 1=启用, 0=禁用
-	keyEnabled   int32 // 1=启用, 0=禁用
+	active             int32 // 1=活跃, 0=停止
+	mouseEnabled       int32 // 1=启用, 0=禁用
+	keyEnabled         int32 // 1=启用, 0=禁用
+	randomDelayEnabled int32
+	randomDelayMinMs   int32
+	randomDelayMaxMs   int32
+	randomDelayMu      sync.Mutex
+	randomDelayNext    map[windows.HWND]time.Time
 
 	mouseHook    uintptr
 	keyHook      uintptr
 	stopCh       chan struct{}
 	hookThreadID uint32
 
-	lastMoveTime int64 // Unix nano
+	lastMoveTime      int64 // Unix nano
+	pageKeyboardFocus int32 // last master click was inside the renderer
+	cdpKeyMu          sync.Mutex
 
 	// URL 同步
 	urlStopCh   chan struct{}
@@ -61,17 +69,16 @@ type InputSyncer struct {
 	keyCount     int32
 	hookInstalls int32
 
-	// 滚轮速度微调：每4格额外补3次方向键，平均 1.75 次/格
-	wheelRemainder int32
-	lastWheelDir   int32
-
 	lifecycleLogger func(event string, fields ...string)
 }
 
 // SyncConfig 同步配置
 type SyncConfig struct {
-	MouseEnabled bool `json:"mouseEnabled"`
-	KeyEnabled   bool `json:"keyEnabled"`
+	MouseEnabled       bool `json:"mouseEnabled"`
+	KeyEnabled         bool `json:"keyEnabled"`
+	RandomDelayEnabled bool `json:"randomDelayEnabled"`
+	RandomDelayMinMs   int  `json:"randomDelayMinMs"`
+	RandomDelayMaxMs   int  `json:"randomDelayMaxMs"`
 }
 
 // NewInputSyncer 创建输入同步器
@@ -83,6 +90,7 @@ func NewInputSyncerWithLogger(lifecycleLogger func(event string, fields ...strin
 	return &InputSyncer{
 		stopCh:          make(chan struct{}),
 		lifecycleLogger: lifecycleLogger,
+		randomDelayNext: make(map[windows.HWND]time.Time),
 	}
 }
 
@@ -149,8 +157,6 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	atomic.StoreInt32(&s.moveCount, 0)
 	atomic.StoreInt32(&s.wheelCount, 0)
 	atomic.StoreInt32(&s.keyCount, 0)
-	atomic.StoreInt32(&s.wheelRemainder, 0)
-	atomic.StoreInt32(&s.lastWheelDir, 0)
 
 	log := logger.New("InputSyncer")
 	log.Info("输入同步已启动",
@@ -294,11 +300,61 @@ func (s *InputSyncer) SetConfig(mouseEnabled, keyEnabled bool) {
 	}
 }
 
+func (s *InputSyncer) SetRandomDelay(enabled bool, minMs, maxMs int) {
+	if minMs < 0 {
+		minMs = 0
+	}
+	if maxMs < minMs {
+		maxMs = minMs
+	}
+	if maxMs > 5000 {
+		maxMs = 5000
+	}
+	atomic.StoreInt32(&s.randomDelayMinMs, int32(minMs))
+	atomic.StoreInt32(&s.randomDelayMaxMs, int32(maxMs))
+	if enabled {
+		atomic.StoreInt32(&s.randomDelayEnabled, 1)
+	} else {
+		atomic.StoreInt32(&s.randomDelayEnabled, 0)
+	}
+}
+
+func (s *InputSyncer) dispatchWithRandomDelay(hwnd windows.HWND, action func()) {
+	if atomic.LoadInt32(&s.randomDelayEnabled) == 0 {
+		action()
+		return
+	}
+	minMs := int(atomic.LoadInt32(&s.randomDelayMinMs))
+	maxMs := int(atomic.LoadInt32(&s.randomDelayMaxMs))
+	delayMs := minMs
+	if maxMs > minMs {
+		delayMs += rand.Intn(maxMs - minMs + 1)
+	}
+	now := time.Now()
+	due := now.Add(time.Duration(delayMs) * time.Millisecond)
+	s.randomDelayMu.Lock()
+	if previous := s.randomDelayNext[hwnd]; !previous.IsZero() && !due.After(previous) {
+		due = previous.Add(time.Millisecond)
+	}
+	s.randomDelayNext[hwnd] = due
+	s.randomDelayMu.Unlock()
+	time.AfterFunc(time.Until(due), action)
+}
+
+func (s *InputSyncer) postMessageWithRandomDelay(hwnd windows.HWND, msg, wparam, lparam uintptr) {
+	s.dispatchWithRandomDelay(hwnd, func() {
+		procPostMessageW.Call(uintptr(hwnd), msg, wparam, lparam)
+	})
+}
+
 // GetConfig 返回当前同步配置
 func (s *InputSyncer) GetConfig() SyncConfig {
 	return SyncConfig{
-		MouseEnabled: atomic.LoadInt32(&s.mouseEnabled) == 1,
-		KeyEnabled:   atomic.LoadInt32(&s.keyEnabled) == 1,
+		MouseEnabled:       atomic.LoadInt32(&s.mouseEnabled) == 1,
+		KeyEnabled:         atomic.LoadInt32(&s.keyEnabled) == 1,
+		RandomDelayEnabled: atomic.LoadInt32(&s.randomDelayEnabled) == 1,
+		RandomDelayMinMs:   int(atomic.LoadInt32(&s.randomDelayMinMs)),
+		RandomDelayMaxMs:   int(atomic.LoadInt32(&s.randomDelayMaxMs)),
 	}
 }
 
@@ -407,6 +463,27 @@ func mapCoordsViaClientArea(screenX, screenY int, masterHwnd, followerHwnd windo
 		return 0, false
 	}
 	return MAKELONG(uint16(int16(clientX)), uint16(int16(clientY))), true
+}
+
+// mapScreenPointToFollower maps a physical screen point from the master client
+// to the equivalent physical screen point in a follower. WM_MOUSEWHEEL requires
+// screen coordinates (unlike button and move messages, which use client
+// coordinates), so reusing mapCoordsChromeManager here causes DPI-dependent
+// drift and incorrect scrolling targets.
+func mapScreenPointToFollower(screenX, screenY int, masterHwnd, followerHwnd windows.HWND) (int, int, bool) {
+	mClientX, mClientY := screenToClient(masterHwnd, screenX, screenY)
+	mW, mH, ok := getClientSize(masterHwnd)
+	if !ok || mW <= 0 || mH <= 0 || mClientX < 0 || mClientY < 0 || mClientX > mW || mClientY > mH {
+		return 0, 0, false
+	}
+	fW, fH, ok := getClientSize(followerHwnd)
+	if !ok || fW <= 0 || fH <= 0 {
+		return 0, 0, false
+	}
+	x := int(float64(mClientX) / float64(mW) * float64(fW))
+	y := int(float64(mClientY) / float64(mH) * float64(fH))
+	left, top, _, _ := getWindowRect(followerHwnd)
+	return int(left) + x, int(top) + y, true
 }
 
 var procEnumChildWindows = user32dll.NewProc("EnumChildWindows")
@@ -582,6 +659,18 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 	msg := uint32(wParam)
 	screenX := int(hook.Pt.X)
 	screenY := int(hook.Pt.Y)
+	if msg == WM_LBUTTONDOWN {
+		insidePage := false
+		if render := findChromeRenderChild(s.masterHwnd); render != 0 {
+			left, top, right, bottom := getWindowRect(render)
+			insidePage = screenX >= int(left) && screenX <= int(right) && screenY >= int(top) && screenY <= int(bottom)
+		}
+		if insidePage {
+			atomic.StoreInt32(&s.pageKeyboardFocus, 1)
+		} else {
+			atomic.StoreInt32(&s.pageKeyboardFocus, 0)
+		}
+	}
 
 	// 获取快照（原子读取，不加锁）
 	followers := s.getFollowerSnapshot()
@@ -589,6 +678,10 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 	switch msg {
 	case WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP:
 		atomic.AddInt32(&s.clickCount, 1)
+		if atomic.LoadInt32(&s.pageKeyboardFocus) == 1 {
+			s.dispatchPageMouseViaCDP(msg, screenX, screenY)
+			return callNextHook(nCode, wParam, lParam)
+		}
 		for _, hwnd := range followers {
 			if !isWindow(hwnd) {
 				continue
@@ -618,9 +711,10 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 			}
 
 			// 发到顶层窗口：先 WM_MOUSEMOVE 让 Chrome 更新 hover 状态
-			procPostMessageW.Call(uintptr(hwnd), WM_MOUSEMOVE, wparam, lparam)
-			// 再发点击消息
-			procPostMessageW.Call(uintptr(hwnd), uintptr(msg), wparam, lparam)
+			s.dispatchWithRandomDelay(hwnd, func() {
+				procPostMessageW.Call(uintptr(hwnd), WM_MOUSEMOVE, wparam, lparam)
+				procPostMessageW.Call(uintptr(hwnd), uintptr(msg), wparam, lparam)
+			})
 
 			// 仅在首次点击时记录详细日志（避免日志过多）
 			if atomic.LoadInt32(&s.clickCount) <= 5 {
@@ -634,87 +728,45 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 
 	case WM_MOUSEWHEEL:
 		atomic.AddInt32(&s.wheelCount, 1)
-		delta := int16(hook.MouseData >> 16) // Windows 原始值，通常 ±120 (WHEEL_DELTA)
-
-		// Ctrl+滚轮 → 缩放
+		// Preserve the exact signed delta, including high-resolution trackpad
+		// values smaller than WHEEL_DELTA. Keyboard approximation loses both
+		// magnitude and cursor target and makes followers scroll at a different
+		// speed. Modifier state is carried in the low word as Win32 expects.
+		wheelDelta := uint16(hook.MouseData >> 16)
+		keyState := uint16(0)
 		if isKeyDown(VK_CONTROL) {
-			for _, hwnd := range followers {
-				if !isWindow(hwnd) {
-					continue
-				}
-				if delta > 0 {
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, VK_CONTROL, makeKeyLParam(VK_CONTROL, true))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, 0xBB, makeKeyLParam(0xBB, true))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, 0xBB, makeKeyLParam(0xBB, false))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, VK_CONTROL, makeKeyLParam(VK_CONTROL, false))
-				} else {
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, VK_CONTROL, makeKeyLParam(VK_CONTROL, true))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, 0xBD, makeKeyLParam(0xBD, true))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, 0xBD, makeKeyLParam(0xBD, false))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, VK_CONTROL, makeKeyLParam(VK_CONTROL, false))
-				}
-			}
-			return callNextHook(nCode, wParam, lParam)
+			keyState |= MK_CONTROL
 		}
-
-		// Windows delta 通常为 ±120 (WHEEL_DELTA)。跟随速度调为：平均 1 notch = 2.5次方向键。
-		// 实现方式：每格至少2次方向键，每累计2格额外补1次；不使用 PageUp/PageDown，避免跳太远。
-		scrollUp := delta > 0
-		notches := int(delta) / 120
-		if notches == 0 {
-			notches = 1 // 高精度滚轮不足120时，也按1格处理
+		if isKeyDown(VK_SHIFT) {
+			keyState |= MK_SHIFT
 		}
-		if notches < 0 {
-			notches = -notches
-		}
-
-		dir := int32(1)
-		if !scrollUp {
-			dir = -1
-		}
-		if atomic.LoadInt32(&s.lastWheelDir) != dir {
-			atomic.StoreInt32(&s.wheelRemainder, 0)
-			atomic.StoreInt32(&s.lastWheelDir, dir)
-		}
-
-		keyPresses := notches * 2
-		rem := atomic.AddInt32(&s.wheelRemainder, int32(notches))
-		if rem >= 2 {
-			extra := rem / 2
-			keyPresses += int(extra)
-			atomic.AddInt32(&s.wheelRemainder, -extra*2)
-		}
-		if keyPresses > 20 {
-			keyPresses = 20
-		}
-
-		vk := uint32(VK_UP)
-		if !scrollUp {
-			vk = VK_DOWN
-		}
-
+		wheelWParam := uintptr(uint32(keyState) | uint32(wheelDelta)<<16)
 		for _, hwnd := range followers {
 			if !isWindow(hwnd) {
 				continue
 			}
-			for i := 0; i < keyPresses; i++ {
-				procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, uintptr(vk), makeKeyLParam(vk, true))
-				procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, uintptr(vk), makeKeyLParam(vk, false))
+			targetX, targetY, ok := mapScreenPointToFollower(screenX, screenY, s.masterHwnd, hwnd)
+			if !ok || targetX < -32768 || targetX > 32767 || targetY < -32768 || targetY > 32767 {
+				continue
 			}
+			wheelLParam := MAKELONG(uint16(int16(targetX)), uint16(int16(targetY)))
+			s.dispatchWithRandomDelay(hwnd, func() {
+				procPostMessageW.Call(uintptr(hwnd), WM_MOUSEWHEEL, wheelWParam, wheelLParam)
+			})
 		}
 
 	case WM_MOUSEMOVE:
 		atomic.AddInt32(&s.moveCount, 1)
 		// 跟随窗口越多，鼠标移动同步越容易把整机拖卡。
 		// 这里按窗口数动态降采样：少量窗口保留手感，多窗口优先稳。
-		throttle := 16 * time.Millisecond
+		throttle := 8 * time.Millisecond
 		switch followerCount := len(followers); {
 		case followerCount >= 10:
-			throttle = 50 * time.Millisecond
-		case followerCount >= 6:
-			throttle = 33 * time.Millisecond
-		case followerCount >= 3:
 			throttle = 24 * time.Millisecond
+		case followerCount >= 6:
+			throttle = 16 * time.Millisecond
+		case followerCount >= 3:
+			throttle = 12 * time.Millisecond
 		}
 		now := time.Now().UnixNano()
 		last := atomic.LoadInt64(&s.lastMoveTime)
@@ -731,7 +783,9 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 			if !ok {
 				continue
 			}
-			procPostMessageW.Call(uintptr(hwnd), WM_MOUSEMOVE, 0, lparam)
+			s.dispatchWithRandomDelay(hwnd, func() {
+				procPostMessageW.Call(uintptr(hwnd), WM_MOUSEMOVE, 0, lparam)
+			})
 		}
 	}
 
@@ -775,6 +829,10 @@ func (s *InputSyncer) keyHookCallback(nCode int, wParam uintptr, lParam uintptr)
 	}
 
 	atomic.AddInt32(&s.keyCount, 1)
+	if atomic.LoadInt32(&s.pageKeyboardFocus) == 1 {
+		s.dispatchPageKeyViaCDP(msg, hook.VkCode, hook.ScanCode, hook.Flags)
+		return callNextHook(nCode, wParam, lParam)
+	}
 
 	// 获取跟随窗口快照
 	followers := s.getFollowerSnapshot()
@@ -796,28 +854,28 @@ func (s *InputSyncer) keyHookCallback(nCode int, wParam uintptr, lParam uintptr)
 			if ctrlPressed {
 				switch vk {
 				case 0x41, 0x43, 0x56, 0x58, 0x5A: // A, C, V, X, Z
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, VK_CONTROL, makeKeyLParam(VK_CONTROL, true))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, uintptr(vk), keyParam)
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, uintptr(vk), makeKeyLParam(vk, false))
-					procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, VK_CONTROL, makeKeyLParam(VK_CONTROL, false))
+					s.postMessageWithRandomDelay(hwnd, WM_KEYDOWN, VK_CONTROL, makeKeyLParam(VK_CONTROL, true))
+					s.postMessageWithRandomDelay(hwnd, WM_KEYDOWN, uintptr(vk), keyParam)
+					s.postMessageWithRandomDelay(hwnd, WM_KEYUP, uintptr(vk), makeKeyLParam(vk, false))
+					s.postMessageWithRandomDelay(hwnd, WM_KEYUP, VK_CONTROL, makeKeyLParam(VK_CONTROL, false))
 					continue
 				}
 			}
 
 			// Alt 组合键
 			if altPressed {
-				procPostMessageW.Call(uintptr(hwnd), WM_SYSKEYDOWN, uintptr(vk), keyParam)
+				s.postMessageWithRandomDelay(hwnd, WM_SYSKEYDOWN, uintptr(vk), keyParam)
 				continue
 			}
 
 			// 特殊键：只发 WM_KEYDOWN
 			if isSpecialKey(vk) {
-				procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, uintptr(vk), keyParam)
+				s.postMessageWithRandomDelay(hwnd, WM_KEYDOWN, uintptr(vk), keyParam)
 			} else {
 				// 普通字符：只发 WM_CHAR
 				ch := toUnicode(uint16(vk), uint16(hook.ScanCode), (hook.Flags&0x01) != 0)
 				if ch != 0 {
-					procPostMessageW.Call(uintptr(hwnd), WM_CHAR, uintptr(ch), keyParam)
+					s.postMessageWithRandomDelay(hwnd, WM_CHAR, uintptr(ch), keyParam)
 				}
 			}
 		} else if msg == WM_KEYUP {
@@ -827,15 +885,139 @@ func (s *InputSyncer) keyHookCallback(nCode int, wParam uintptr, lParam uintptr)
 			if vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU {
 				continue
 			}
-			procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, uintptr(vk), makeKeyLParam(vk, false))
+			s.postMessageWithRandomDelay(hwnd, WM_KEYUP, uintptr(vk), makeKeyLParam(vk, false))
 		} else if msg == WM_SYSKEYDOWN {
-			procPostMessageW.Call(uintptr(hwnd), uintptr(msg), uintptr(vk), makeKeyLParam(vk, true))
+			s.postMessageWithRandomDelay(hwnd, uintptr(msg), uintptr(vk), makeKeyLParam(vk, true))
 		} else if msg == WM_SYSKEYUP {
-			procPostMessageW.Call(uintptr(hwnd), uintptr(msg), uintptr(vk), makeKeyLParam(vk, false))
+			s.postMessageWithRandomDelay(hwnd, uintptr(msg), uintptr(vk), makeKeyLParam(vk, false))
 		}
 	}
 
 	return callNextHook(nCode, wParam, lParam)
+}
+
+func (s *InputSyncer) dispatchPageKeyViaCDP(msg uint32, vk, scanCode, flags uint32) {
+	s.mu.Lock()
+	ports := append([]int(nil), s.followerDebug...)
+	s.mu.Unlock()
+	if len(ports) == 0 {
+		return
+	}
+	ctrl := isKeyDown(VK_CONTROL)
+	alt := isKeyDown(VK_MENU)
+	shift := isKeyDown(VK_SHIFT)
+	modifiers := 0
+	if alt {
+		modifiers |= 1
+	}
+	if ctrl {
+		modifiers |= 2
+	}
+	if shift {
+		modifiers |= 8
+	}
+	down := msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN
+	ch := toUnicode(uint16(vk), uint16(scanCode), (flags&0x01) != 0)
+	go func() {
+		s.cdpKeyMu.Lock()
+		defer s.cdpKeyMu.Unlock()
+		var wg sync.WaitGroup
+		for _, port := range ports {
+			if port <= 0 {
+				continue
+			}
+			wg.Add(1)
+			go func(debugPort int) {
+				defer wg.Done()
+				if down && ch != 0 && !ctrl && !alt {
+					_, _ = cdpCall(debugPort, "Input.insertText", map[string]any{"text": string(rune(ch))})
+					return
+				}
+				params := map[string]any{
+					"type":                  map[bool]string{true: "keyDown", false: "keyUp"}[down],
+					"windowsVirtualKeyCode": int(vk), "nativeVirtualKeyCode": int(vk),
+					"modifiers": modifiers, "key": cdpKeyName(vk),
+				}
+				_, _ = cdpCall(debugPort, "Input.dispatchKeyEvent", params)
+			}(port)
+		}
+		wg.Wait()
+	}()
+}
+
+func (s *InputSyncer) dispatchPageMouseViaCDP(msg uint32, screenX, screenY int) {
+	masterRender := findChromeRenderChild(s.masterHwnd)
+	if masterRender == 0 {
+		return
+	}
+	ml, mt, mr, mb := getWindowRect(masterRender)
+	if mr <= ml || mb <= mt {
+		return
+	}
+	rx := float64(screenX-int(ml)) / float64(mr-ml)
+	ry := float64(screenY-int(mt)) / float64(mb-mt)
+	s.mu.Lock()
+	ports := append([]int(nil), s.followerDebug...)
+	hwnds := append([]windows.HWND(nil), s.followerHwnds...)
+	s.mu.Unlock()
+	button := "left"
+	if msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP {
+		button = "right"
+	}
+	if msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP {
+		button = "middle"
+	}
+	eventType := "mousePressed"
+	if msg == WM_LBUTTONUP || msg == WM_RBUTTONUP || msg == WM_MBUTTONUP {
+		eventType = "mouseReleased"
+	}
+	for i, port := range ports {
+		if port <= 0 || i >= len(hwnds) {
+			continue
+		}
+		render := findChromeRenderChild(hwnds[i])
+		if render == 0 {
+			continue
+		}
+		fl, ft, fr, fb := getWindowRect(render)
+		x, y := rx*float64(fr-fl), ry*float64(fb-ft)
+		go func(debugPort int, px, py float64) {
+			_, _ = cdpCall(debugPort, "Input.dispatchMouseEvent", map[string]any{
+				"type": eventType, "x": px, "y": py, "button": button, "clickCount": 1,
+			})
+		}(port, x, y)
+	}
+}
+
+func cdpKeyName(vk uint32) string {
+	switch vk {
+	case 0x08:
+		return "Backspace"
+	case 0x09:
+		return "Tab"
+	case 0x0D:
+		return "Enter"
+	case 0x1B:
+		return "Escape"
+	case VK_LEFT:
+		return "ArrowLeft"
+	case VK_RIGHT:
+		return "ArrowRight"
+	case VK_UP:
+		return "ArrowUp"
+	case VK_DOWN:
+		return "ArrowDown"
+	case VK_DELETE:
+		return "Delete"
+	case VK_HOME:
+		return "Home"
+	case VK_END:
+		return "End"
+	}
+	if vk >= 0x41 && vk <= 0x5A {
+		return strings.ToLower(string(rune(vk)))
+	}
+	return "Unidentified"
 }
 
 // isSpecialKey 判断是否为非打印特殊键

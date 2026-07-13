@@ -34,7 +34,12 @@ export default defineConfig({
     port: devPort,
     strictPort: true,
     host: '127.0.0.1',
-    cors: true,
+    // Keep source responses same-origin. Broad CORS on a loopback dev server
+    // allows arbitrary websites to read local project files through the browser.
+    cors: false,
+    fs: {
+      strict: true,
+    },
     hmr: disableHmr
       ? false
       : {
@@ -55,4 +60,3 @@ export default defineConfig({
     },
   },
 })
-

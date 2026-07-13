@@ -26,12 +26,18 @@ body {
 }
 
 body.sync-panel-compact {
-  background: transparent;
+  background: #eff5ff;
 }
 
 html:has(body.sync-panel-compact),
 body.sync-panel-compact #root {
-  background: transparent;
+  background: #eff5ff;
+}
+
+html:has(body.sync-panel-compact),
+body.sync-panel-compact,
+body.sync-panel-compact #root {
+  overflow: hidden;
 }
 
 #root {
@@ -90,6 +96,15 @@ button {
 
 button:disabled {
   cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* 输入框重置 */

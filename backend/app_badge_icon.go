@@ -22,16 +22,17 @@ import (
 
 // Windows 常量（badge 图标专用）
 const (
-	WM_SETICON      = 0x0080
-	WM_GETICON      = 0x007F
-	ICON_BIG        = 1
-	ICON_SMALL      = 0
-	IMAGE_ICON      = 1
-	LR_LOADFROMFILE = 0x0010
-	GCL_HICON       = uintptr(0xFFFFFFF2) // -14
-	diNormal        = 3
-	DIB_RGB_COLORS  = 0
-	BI_RGB          = 0
+	WM_SETICON             = 0x0080
+	WM_GETICON             = 0x007F
+	ICON_BIG               = 1
+	ICON_SMALL             = 0
+	IMAGE_ICON             = 1
+	LR_LOADFROMFILE        = 0x0010
+	GCL_HICON              = uintptr(0xFFFFFFF2) // -14
+	diNormal               = 3
+	DIB_RGB_COLORS         = 0
+	BI_RGB                 = 0
+	badgeIconDesignVersion = 4
 )
 
 // badgeIconFileCache 缓存已生成的 badge 图标文件路径（key 为显示序号，value 为 .ico 文件路径）
@@ -212,12 +213,12 @@ func drawCircle(img *image.NRGBA, cx, cy, r int, col color.NRGBA) {
 // generateFallbackIcon 生成固定的旧版 Boost Browser 任务栏底图：蓝色 Chrome-like 圆环。
 // 不读取 chrome.exe 自带图标，避免切到 Google Chrome 后变成官方四色 Chrome 图标。
 func generateFallbackIcon() *image.NRGBA {
-	const size = 64
+	const size = 192
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
-	cx, cy := 32.0, 32.0
-	outerR := 27.0
-	innerR := 13.0
-	centerR := 8.5
+	cx, cy := 96.0, 96.0
+	outerR := 81.0
+	innerR := 39.0
+	centerR := 25.5
 
 	blend := func(dst, src color.NRGBA, alpha float64) color.NRGBA {
 		if alpha < 0 {
@@ -286,42 +287,56 @@ func generateFallbackIcon() *image.NRGBA {
 // 旧实现固定右上角圆形 badge + 3x3 字体，多位数会被圆形裁掉，任务栏缩放后经常只剩红点看不到数字。
 // 新实现按位数自适应为右上角红色胶囊，1~4 位都尽量完整显示。
 func overlayBadgeNumber(img *image.NRGBA, number int) *image.NRGBA {
-	const size = 64
+	size := img.Bounds().Dx()
+	scale := max(1, size/64)
 
 	numStr := fmt.Sprintf("%d", number)
 	if len(numStr) > 4 {
 		numStr = numStr[len(numStr)-4:]
 	}
-	digitW := 10
-	digitH := 16
-	stroke := 3
-	gap := 2
-	if len(numStr) >= 3 {
-		digitW = 8
-		digitH = 14
-		stroke = 2
-		gap = 1
+	digitW := 18 * scale
+	digitH := 26 * scale
+	stroke := 4 * scale
+	gap := 2 * scale
+	padX := 9 * scale
+	padY := 5 * scale
+	switch len(numStr) {
+	case 2:
+		digitW = 13 * scale
+		digitH = 24 * scale
+		stroke = 4 * scale
+		padX = 5 * scale
+	case 3:
+		digitW = 9 * scale
+		digitH = 21 * scale
+		stroke = 3 * scale
+		gap = scale
+		padX = 3 * scale
+	case 4:
+		digitW = 7 * scale
+		digitH = 18 * scale
+		stroke = 2 * scale
+		gap = scale
+		padX = 2 * scale
 	}
 	totalFontWidth := len(numStr)*digitW + (len(numStr)-1)*gap
 	totalFontHeight := digitH
-
-	padX := 5
-	padY := 4
 	pillW := totalFontWidth + padX*2
 	pillH := totalFontHeight + padY*2
 	if pillW < pillH {
 		pillW = pillH
 	}
-	pillX := size - pillW - 2
+	pillX := size - pillW - scale
 	if pillX < 1 {
-		pillX = 1
+		pillX = scale
 	}
-	pillY := 2
+	pillY := scale
 	radius := pillH / 2
 
-	// 白色描边 + 红色底，做成胶囊而不是固定圆，避免 2/3/4 位数字被裁剪。
-	drawRoundedPill(img, pillX-2, pillY-2, pillW+4, pillH+4, radius+2, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
-	drawRoundedPill(img, pillX, pillY, pillW, pillH, radius, color.NRGBA{R: 220, G: 38, B: 38, A: 255})
+	// Thick white keyline and deep red fill remain distinct after Explorer scales
+	// the icon to 24-32 px. The number intentionally occupies most of the badge.
+	drawRoundedPill(img, pillX-2*scale, pillY-2*scale, pillW+4*scale, pillH+4*scale, radius+2*scale, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+	drawRoundedPill(img, pillX, pillY, pillW, pillH, radius, color.NRGBA{R: 205, G: 24, B: 38, A: 255})
 
 	drawStartX := pillX + (pillW-totalFontWidth)/2
 	drawStartY := pillY + (pillH-totalFontHeight)/2
@@ -451,18 +466,17 @@ func scaleImage(src *image.NRGBA, dstSize int) *image.NRGBA {
 	return dst
 }
 
-// generateBadgeICO 生成带编号的 ICO 文件字节数据（包含 16x16、32x32、64x64 三种尺寸）。
+// generateBadgeICO 生成多分辨率编号图标。192px 矢量式源画布是旧版的 3 倍，
+// 再分别降采样，避免先在 64px 上画数字后被 Windows 高 DPI 二次放大而失真。
 func generateBadgeICO(pid int, number int) ([]byte, error) {
-	// 生成 64x64 原图（提取进程图标 + 叠加角标）
 	srcImg := generateBadgeIconImage(pid, number)
 
-	// 缩放到 16x16 和 32x32，同时保留 64x64 原图，Windows 高 DPI 任务栏优先取高清层。
 	img16 := scaleImage(srcImg, 16)
 	img32 := scaleImage(srcImg, 32)
-	img64 := srcImg
+	img64 := scaleImage(srcImg, 64)
+	img128 := scaleImage(srcImg, 128)
 
-	// 编码为 PNG
-	var buf16, buf32, buf64 bytes.Buffer
+	var buf16, buf32, buf64, buf128 bytes.Buffer
 	if err := png.Encode(&buf16, img16); err != nil {
 		return nil, err
 	}
@@ -472,10 +486,14 @@ func generateBadgeICO(pid int, number int) ([]byte, error) {
 	if err := png.Encode(&buf64, img64); err != nil {
 		return nil, err
 	}
+	if err := png.Encode(&buf128, img128); err != nil {
+		return nil, err
+	}
 
 	png16Data := buf16.Bytes()
 	png32Data := buf32.Bytes()
 	png64Data := buf64.Bytes()
+	png128Data := buf128.Bytes()
 
 	// ICO 文件格式
 	// 参考：https://en.wikipedia.org/wiki/ICO_(file_format)
@@ -499,10 +517,10 @@ func generateBadgeICO(pid int, number int) ([]byte, error) {
 	header := icoDirHeader{
 		Reserved:  0,
 		ImageType: 1, // ICON
-		NumImages: 3,
+		NumImages: 4,
 	}
 
-	entriesOffset := uint32(binary.Size(header) + binary.Size(icoDirEntry{})*3)
+	entriesOffset := uint32(binary.Size(header) + binary.Size(icoDirEntry{})*4)
 	entry16 := icoDirEntry{
 		Width:       16,
 		Height:      16,
@@ -533,15 +551,22 @@ func generateBadgeICO(pid int, number int) ([]byte, error) {
 		BytesInRes:  uint32(len(png64Data)),
 		ImageOffset: entry32.ImageOffset + uint32(len(png32Data)),
 	}
+	entry128 := icoDirEntry{
+		Width: 128, Height: 128, Planes: 1, BitCount: 32,
+		BytesInRes:  uint32(len(png128Data)),
+		ImageOffset: entry64.ImageOffset + uint32(len(png64Data)),
+	}
 
 	var result bytes.Buffer
 	_ = binary.Write(&result, binary.LittleEndian, header)
 	_ = binary.Write(&result, binary.LittleEndian, entry16)
 	_ = binary.Write(&result, binary.LittleEndian, entry32)
 	_ = binary.Write(&result, binary.LittleEndian, entry64)
+	_ = binary.Write(&result, binary.LittleEndian, entry128)
 	result.Write(png16Data)
 	result.Write(png32Data)
 	result.Write(png64Data)
+	result.Write(png128Data)
 
 	return result.Bytes(), nil
 }
@@ -569,11 +594,11 @@ func getBadgeICOFilePath(pid int, number int) (string, error) {
 	}
 
 	// 保存到临时目录
-	tmpDir := filepath.Join(os.TempDir(), "boost_browser_badge_icons")
+	tmpDir := filepath.Join(os.TempDir(), "browserstudio_badge_icons")
 	if err := os.MkdirAll(tmpDir, 0755); err != nil {
 		return "", err
 	}
-	icoPath := filepath.Join(tmpDir, fmt.Sprintf("badge_%d.ico", number))
+	icoPath := filepath.Join(tmpDir, fmt.Sprintf("badge_v%d_%d.ico", badgeIconDesignVersion, number))
 	if err := os.WriteFile(icoPath, icoData, 0644); err != nil {
 		return "", err
 	}
@@ -609,7 +634,7 @@ func loadIconFromFile(icoPath string, size int) (windows.HWND, error) {
 
 // setWindowIcon 为指定进程的窗口设置自定义图标。
 func setWindowIcon(pid int, icoPath string) error {
-	hwnd, err := findProcessWindow(pid)
+	hwnd, err := findProcessTreeWindow(pid)
 	if err != nil {
 		return fmt.Errorf("查找窗口失败: %v", err)
 	}
@@ -622,8 +647,8 @@ func setWindowIcon(pid int, icoPath string) error {
 		return fmt.Errorf("加载小图标失败: %v", err)
 	}
 
-	// 加载 32x32 大图标（任务栏大图标 / Alt+Tab）
-	bigIcon, err := loadIconFromFile(icoPath, 32)
+	// Load a true 64px large icon for high-DPI taskbars and Alt+Tab previews.
+	bigIcon, err := loadIconFromFile(icoPath, 64)
 	if err != nil {
 		return fmt.Errorf("加载大图标失败: %v", err)
 	}
@@ -654,6 +679,7 @@ func setBadgeForInstance(pid int, displayNumber int) error {
 	}
 
 	var lastErr error
+	successfulWrites := 0
 	for attempt := 0; attempt < 30; attempt++ {
 		if !isProcessAlive(pid) {
 			if lastErr != nil {
@@ -664,12 +690,21 @@ func setBadgeForInstance(pid int, displayNumber int) error {
 
 		err = setWindowIcon(pid, icoPath)
 		if err == nil {
-			log.Info("任务栏 badge 图标设置成功",
-				logger.F("pid", pid),
-				logger.F("display_number", displayNumber),
-				logger.F("attempt", attempt+1),
-			)
-			return nil
+			successfulWrites++
+			// Chrome may replace WM_SETICON once more while the first tab finishes
+			// initialising. Three bounded writes keep the number without a permanent
+			// watchdog or long-running GDI loop.
+			if successfulWrites >= 3 {
+				log.Info("任务栏 badge 图标设置成功",
+					logger.F("pid", pid),
+					logger.F("display_number", displayNumber),
+					logger.F("attempt", attempt+1),
+					logger.F("writes", successfulWrites),
+				)
+				return nil
+			}
+			time.Sleep(450 * time.Millisecond)
+			continue
 		}
 
 		lastErr = err

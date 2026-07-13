@@ -35,10 +35,22 @@ type SyncProfileInfo struct {
 	Hwnd        int64  `json:"hwnd"`
 	Running     bool   `json:"running"`
 	Status      string `json:"status"` // "running" | "no_window" | "stopped"
+	BadgeNumber int    `json:"badgeNumber"`
 }
 
 // GetSyncProfiles 获取所有可用于同步的实例列表
 func (a *App) GetSyncProfiles() []SyncProfileInfo {
+	if a.panelMode {
+		response, err := callSyncBridge("/profiles", nil)
+		if err == nil {
+			return response.Profiles
+		}
+		return []SyncProfileInfo{}
+	}
+	return a.getSyncProfilesLocal()
+}
+
+func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 	a.reconcileBrowserRuntimeStateOnce()
 	// NOTE: 不要在这里加 browserMgr.Mutex 锁！List() 内部会自行加锁，
 	// 如果外层再锁一次会导致死锁（Go sync.Mutex 不可重入）。
@@ -59,6 +71,7 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 			Pid:         p.Pid,
 			DebugPort:   p.DebugPort,
 			Running:     p.Running,
+			BadgeNumber: extractBadgeNumberFromName(p.ProfileName),
 		}
 		if p.Pid <= 0 {
 			info.Status = "no_window"
@@ -66,7 +79,7 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 			continue
 		}
 
-		hwnd, err := findProcessWindow(p.Pid)
+		hwnd, err := findProcessTreeWindow(p.Pid)
 		if err == nil {
 			info.Hwnd = int64(hwnd)
 			info.Status = "running"
@@ -84,6 +97,14 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 // masterProfileId: 主控实例 ID
 // followerProfileIds: 跟随实例 ID 列表
 func (a *App) StartInputSync(masterProfileId string, followerProfileIds []string) error {
+	if a.panelMode {
+		_, err := callSyncBridge("/start", syncBridgeRequest{MasterID: masterProfileId, FollowerIDs: followerProfileIds})
+		return err
+	}
+	return a.startInputSyncLocal(masterProfileId, followerProfileIds)
+}
+
+func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []string) error {
 	log := logger.New("SyncAPI")
 	a.reconcileBrowserRuntimeStateOnce()
 
@@ -99,7 +120,7 @@ func (a *App) StartInputSync(masterProfileId string, followerProfileIds []string
 		return fmt.Errorf("主控实例未在运行：%s", masterProfileId)
 	}
 
-	masterHwnd, err := findProcessWindow(masterProfile.Pid)
+	masterHwnd, err := findProcessTreeWindow(masterProfile.Pid)
 	if err != nil {
 		return fmt.Errorf("未找到主控实例窗口：%v", err)
 	}
@@ -117,7 +138,7 @@ func (a *App) StartInputSync(masterProfileId string, followerProfileIds []string
 		if !ok || !fp.Running || fp.Pid <= 0 {
 			continue
 		}
-		fhwnd, err := findProcessWindow(fp.Pid)
+		fhwnd, err := findProcessTreeWindow(fp.Pid)
 		if err != nil {
 			continue
 		}
@@ -162,6 +183,14 @@ func (a *App) StartInputSync(masterProfileId string, followerProfileIds []string
 
 // StopInputSync 停止输入同步
 func (a *App) StopInputSync() error {
+	if a.panelMode {
+		_, err := callSyncBridge("/stop", nil)
+		return err
+	}
+	return a.stopInputSyncLocal()
+}
+
+func (a *App) stopInputSyncLocal() error {
 	log := logger.New("SyncAPI")
 
 	syncState.mu.Lock()
@@ -182,6 +211,27 @@ func (a *App) StopInputSync() error {
 
 // GetSyncStatus 获取当前同步状态
 func (a *App) GetSyncStatus() map[string]interface{} {
+	if a.panelMode {
+		response, err := callSyncBridge("/status", nil)
+		if err == nil && response.Status != nil {
+			return response.Status
+		}
+		message := "主客户端同步服务没有返回状态"
+		if err != nil {
+			message = err.Error()
+		}
+		return map[string]interface{}{"active": false, "bridgeError": message}
+	}
+	return a.getSyncStatusLocal()
+}
+
+func (a *App) getSyncStatusLocal() map[string]interface{} {
+	runningProfileCount := 0
+	for _, profile := range a.browserMgr.List() {
+		if profile.Running {
+			runningProfileCount++
+		}
+	}
 	syncState.mu.Lock()
 	defer syncState.mu.Unlock()
 
@@ -191,23 +241,54 @@ func (a *App) GetSyncStatus() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"active":       syncState.active,
-		"masterId":     syncState.masterId,
-		"followerIds":  syncState.followerIds,
-		"mouseEnabled": config.MouseEnabled,
-		"keyEnabled":   config.KeyEnabled,
+		"active":              syncState.active,
+		"masterId":            syncState.masterId,
+		"followerIds":         syncState.followerIds,
+		"mouseEnabled":        config.MouseEnabled,
+		"keyEnabled":          config.KeyEnabled,
+		"randomDelayEnabled":  config.RandomDelayEnabled,
+		"randomDelayMinMs":    config.RandomDelayMinMs,
+		"randomDelayMaxMs":    config.RandomDelayMaxMs,
+		"runningProfileCount": runningProfileCount,
 	}
 }
 
-// UpdateSyncConfig 更新同步配置（鼠标/键盘开关）
+func (a *App) UpdateSyncRandomDelay(enabled bool, minMs, maxMs int) error {
+	if a.panelMode {
+		_, err := callSyncBridge("/delay", syncBridgeRequest{Enabled: enabled, MinMs: minMs, MaxMs: maxMs})
+		return err
+	}
+	return a.updateSyncRandomDelayLocal(enabled, minMs, maxMs)
+}
+
+func (a *App) updateSyncRandomDelayLocal(enabled bool, minMs, maxMs int) error {
+	syncState.mu.Lock()
+	defer syncState.mu.Unlock()
+	if syncState.syncer == nil {
+		return fmt.Errorf("同步未启动")
+	}
+	syncState.syncer.SetRandomDelay(enabled, minMs, maxMs)
+	return nil
+}
+
+// UpdateSyncConfig updates the optional mouse switch. Keyboard synchronisation
+// is an invariant of an active session and cannot be accidentally disabled.
 func (a *App) UpdateSyncConfig(mouseEnabled, keyEnabled bool) error {
+	if a.panelMode {
+		_, err := callSyncBridge("/config", syncBridgeRequest{Mouse: mouseEnabled})
+		return err
+	}
+	return a.updateSyncConfigLocal(mouseEnabled)
+}
+
+func (a *App) updateSyncConfigLocal(mouseEnabled bool) error {
 	syncState.mu.Lock()
 	defer syncState.mu.Unlock()
 
 	if syncState.syncer == nil {
 		return fmt.Errorf("同步未启动")
 	}
-	syncState.syncer.SetConfig(mouseEnabled, keyEnabled)
+	syncState.syncer.SetConfig(mouseEnabled, true)
 	return nil
 }
 
@@ -222,8 +303,40 @@ type TileWindowsResult struct {
 // masterProfileId: 主控实例ID，主控窗口始终放在最左边（index 0）
 // layoutMode: grid | horizontal | vertical
 func (a *App) SyncTileWindows(profileIds []string, masterProfileId string, layoutMode string) (*TileWindowsResult, error) {
+	if a.panelMode {
+		response, err := callSyncBridge("/tile", syncBridgeRequest{ProfileIDs: profileIds, MasterID: masterProfileId, Layout: layoutMode})
+		if err != nil {
+			return nil, err
+		}
+		if response.Tile == nil {
+			return nil, fmt.Errorf("主客户端没有返回窗口排列结果")
+		}
+		return response.Tile, nil
+	}
+	return a.syncTileWindowsLocal(profileIds, masterProfileId, layoutMode)
+}
+
+func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, layoutMode string) (*TileWindowsResult, error) {
 	a.browserMgr.Mutex.Lock()
 	defer a.browserMgr.Mutex.Unlock()
+
+	// Reuse the exact HWNDs already validated by the active sync engine. Chrome
+	// can transfer its top-level frame to a sibling process, so resolving again
+	// from a stored PID is less reliable than the running session snapshot.
+	activeWindows := make(map[string]windows.HWND)
+	syncState.mu.Lock()
+	if syncState.active && syncState.masterHwnd != 0 {
+		activeWindows[syncState.masterId] = syncState.masterHwnd
+		if syncState.syncer != nil {
+			followerWindows := syncState.syncer.getFollowerSnapshot()
+			for i, id := range syncState.followerIds {
+				if i < len(followerWindows) {
+					activeWindows[id] = followerWindows[i]
+				}
+			}
+		}
+	}
+	syncState.mu.Unlock()
 
 	// 收集运行中的实例窗口
 	type winInfo struct {
@@ -232,11 +345,15 @@ func (a *App) SyncTileWindows(profileIds []string, masterProfileId string, layou
 	}
 	var wins []winInfo
 	for _, pid := range profileIds {
+		if hwnd := activeWindows[pid]; hwnd != 0 && isWindow(hwnd) {
+			wins = append(wins, winInfo{hwnd: hwnd, profileId: pid})
+			continue
+		}
 		profile, ok := a.browserMgr.Profiles[pid]
 		if !ok || !profile.Running || profile.Pid <= 0 {
 			continue
 		}
-		hwnd, err := findProcessWindow(profile.Pid)
+		hwnd, err := findProcessTreeWindow(profile.Pid)
 		if err != nil {
 			continue
 		}

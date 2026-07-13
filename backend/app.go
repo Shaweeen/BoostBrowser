@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"boost-browser/backend/internal/activation"
 	"boost-browser/backend/internal/apppath"
 	"boost-browser/backend/internal/browser"
 	"boost-browser/backend/internal/config"
@@ -50,6 +51,7 @@ type App struct {
 	speedScheduler   *browser.ProxySpeedScheduler
 	appRoot          string
 	version          string
+	activationStatus activation.Status
 
 	forceQuit        bool       // 强制退出标志，用于跳过 OnBeforeClose 的拦截
 	quitMode         quitMode   // 退出模式：全量退出 / 仅退出应用
@@ -88,7 +90,7 @@ func (a *App) appName() string {
 			return name
 		}
 	}
-	return "Boost Browser"
+	return "BrowserStudio"
 }
 
 func (a *App) appVersion() string {
@@ -97,6 +99,13 @@ func (a *App) appVersion() string {
 		return "unknown"
 	}
 	return version
+}
+
+// GetActivationStatus exposes provider-neutral activation state to the UI.
+// Future signed or online providers can replace the offline provider without
+// changing this API contract.
+func (a *App) GetActivationStatus() activation.Status {
+	return a.activationStatus
 }
 
 func (a *App) ensureLaunchServerAPIKey(cfg *config.Config) {
@@ -114,6 +123,7 @@ func (a *App) ensureLaunchServerAPIKey(cfg *config.Config) {
 // startup 应用启动时调用
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	a.activationStatus = (activation.OfflineInstallerProvider{}).Verify(a.appRoot)
 	a.lifecycleLog("startup", "version="+a.appVersion())
 	// 写入 Chrome 企业策略到 HKCU，抑制 --no-sandbox 等 unsupported flag
 	// 引发的黄色安全警告 infobar。无需管理员权限，不会被识别为 bot 信号。
@@ -216,7 +226,7 @@ func (a *App) startup(ctx context.Context) {
 	a.migrateToSQLite()
 	a.browserMgr.InitData()
 	if !a.panelMode {
-		// 默认使用随 Boost Browser 打包/下载到 chrome/ 目录内的独立 Google Chrome 内核；不再引用系统安装的 Chrome。
+		// 默认使用随 BrowserStudio 打包/下载到 chrome/ 目录内的独立 Google Chrome 内核；不再引用系统安装的 Chrome。
 		a.ensureBundledGoogleChromeCore()
 		// 同步内存态，确保后续默认内核解析使用刚注册的内置 Chrome。
 		_ = a.browserMgr.ListCores()
@@ -263,7 +273,7 @@ func (a *App) startup(ctx context.Context) {
 		if a.ctx != nil {
 			runtime.EventsEmit(a.ctx, "proxy:bridge:died", map[string]interface{}{
 				"engine": "xray",
-				"key":    key[:8],
+				"key":    shortRuntimeKey(key),
 				"error":  err.Error(),
 			})
 		}
@@ -272,7 +282,7 @@ func (a *App) startup(ctx context.Context) {
 		if a.ctx != nil {
 			runtime.EventsEmit(a.ctx, "proxy:bridge:died", map[string]interface{}{
 				"engine": "singbox",
-				"key":    key[:8],
+				"key":    shortRuntimeKey(key),
 				"error":  err.Error(),
 			})
 		}
@@ -281,11 +291,42 @@ func (a *App) startup(ctx context.Context) {
 	// 主程序被 watchdog 重启时，浏览器子进程仍然存活；启动后立即按
 	// --user-data-dir/--remote-debugging-port 重新接管运行状态，避免实例误显示“已停止”。
 	// crashfix probe: 保留首轮同步，但临时停掉常驻 reconciler，验证它是否是后台 exit_code=2 的来源。
-	a.reconcileBrowserRuntimeStateOnce()
-	if !a.panelMode {
-		a.startCacheAutoCleanScheduler()
+	// A clean installation has no profiles to recover. Running the Windows CIM
+	// process scan in that state only delays startup and, on affected machines,
+	// its five-second timeout can terminate the Wails host with exit code 2.
+	// Recovery is useful only after at least one profile has been registered.
+	profilesForRecovery := a.browserMgr.List()
+	hasRuntimeToRecover := false
+	for _, profile := range profilesForRecovery {
+		if profile.Running || profile.Pid > 0 || profile.DebugPort > 0 {
+			hasRuntimeToRecover = true
+			break
+		}
 	}
+	if hasRuntimeToRecover {
+		a.lifecycleLog("runtime-reconcile", "state=scheduled")
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					a.lifecycleLog("runtime-reconcile", "state=panic-recovered", fmt.Sprintf("error=%v", r), fmt.Sprintf("stack=%s", strings.ReplaceAll(string(debug.Stack()), "\n", "\\n")))
+				}
+			}()
+			a.lifecycleLog("runtime-reconcile", "state=started")
+			a.reconcileBrowserRuntimeStateOnce()
+			a.lifecycleLog("runtime-reconcile", "state=completed")
+		}()
+	} else {
+		a.lifecycleLog("runtime-reconcile", "state=skipped", "reason=no-live-runtime")
+	}
+	// Never run cache maintenance during the Wails startup window. The previous
+	// five-second goroutine overlapped profile/database initialisation and was the
+	// only startup task whose deadline exactly matched the observed exit_code=2
+	// restart loop. Cache cleanup remains available through the explicit UI/API.
+	a.lifecycleLog("cache-auto-clean", "state=deferred", "reason=startup-stability")
 	// a.startBrowserRuntimeReconciler()
+	if !a.panelMode {
+		a.startSyncBridge()
+	}
 
 	// v1.6.12: 暂停启动后台代理测速定时器。
 	// 线上证据显示 v1.6.10/v1.6.11 主程序按 5~7 分钟周期以 exit_code=2 退出，
@@ -296,6 +337,15 @@ func (a *App) startup(ctx context.Context) {
 	a.speedScheduler = nil
 
 	log.Info("应用启动成功")
+	a.lifecycleLog("startup-complete")
+}
+
+func shortRuntimeKey(key string) string {
+	key = strings.TrimSpace(key)
+	if len(key) <= 8 {
+		return key
+	}
+	return key[:8]
 }
 
 // ReloadConfig 开放给前端重新读取配置，用于应对手动修补后的配置重载
@@ -410,6 +460,11 @@ func (a *App) setQuitMode(mode quitMode) {
 }
 
 func (a *App) shouldStopRuntimeServicesOnShutdown() bool {
+	// The sync tool never owns browser runtimes. Its exit must not mark shared
+	// live profiles as stopped in the database.
+	if a.panelMode {
+		return false
+	}
 	return a.quitMode != quitModeAppOnly
 }
 

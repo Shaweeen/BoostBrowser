@@ -5,10 +5,9 @@ import {
   Columns,
   Grip,
   Info,
-  Keyboard,
   LayoutGrid,
   Monitor,
-  MousePointer2,
+  Minimize2,
   Move,
   RefreshCw,
   Rows,
@@ -16,19 +15,18 @@ import {
   X,
 } from 'lucide-react'
 import { Button, Input, Select, toast } from '../../../shared/components'
-import { CloseWindowSyncPanel, IsWindowSyncPanelMode } from '../../../wailsjs/go/main/App'
-import { EventsOn, ScreenGetAll, WindowCenter, WindowSetAlwaysOnTop, WindowSetMinSize, WindowSetPosition, WindowSetSize, WindowShow, WindowUnminimise } from '../../../wailsjs/runtime/runtime'
+import { ExitWindowSyncPanel, IsWindowSyncPanelMode } from '../../../wailsjs/go/main/App'
+import { EventsOn, ScreenGetAll, WindowCenter, WindowGetPosition, WindowSetAlwaysOnTop, WindowSetMinSize, WindowSetPosition, WindowSetSize, WindowShow, WindowUnminimise } from '../../../wailsjs/runtime/runtime'
 import {
   getSyncProfiles,
   getSyncStatus,
   startInputSync,
   stopInputSync,
-  syncCloseAll,
   syncTileWindows,
   type SyncProfileInfo,
   type SyncStatus,
   type TileLayoutMode,
-  updateSyncConfig,
+  updateSyncRandomDelay,
 } from '../api_sync'
 
 function compareProfileName(a: SyncProfileInfo, b: SyncProfileInfo) {
@@ -53,22 +51,24 @@ const LAYOUT_OPTIONS: Array<{ value: TileLayoutMode; label: string }> = [
   { value: 'horizontal', label: '横向排列' },
 ]
 
-const PANEL_EXPANDED_SIZE = { width: 920, height: 680, minWidth: 820, minHeight: 620 }
-const PANEL_COMPACT_STATUS_SIZE = { width: 448, height: 312, minWidth: 320, minHeight: 80 }
-const PANEL_COMPACT_STATUS_COLLAPSED_SIZE = { width: 448, height: 120, minWidth: 320, minHeight: 80 }
-const PANEL_COMPACT_FUNCTION_SIZE = { width: 520, height: 120, minWidth: 520, minHeight: 120 }
+const PANEL_EXPANDED_SIZE = { width: 720, height: 580, minWidth: 680, minHeight: 520 }
+const PANEL_COMPACT_STATUS_SIZE = { width: 400, height: 260, minWidth: 360, minHeight: 80 }
+const PANEL_COMPACT_STATUS_COLLAPSED_SIZE = { width: 400, height: 104, minWidth: 360, minHeight: 80 }
+const PANEL_COMPACT_FUNCTION_SIZE = { width: 440, height: 108, minWidth: 440, minHeight: 108 }
 const PANEL_TOP_MARGIN_PX = 8
 const PANEL_COMPACT_EDGE_PADDING_PX = 0
+const PANEL_MINI_SIZE = { width: 136, height: 44, minWidth: 136, minHeight: 44 }
 
 export function WindowSyncPage() {
   const compactPanelRef = useRef<HTMLDivElement | null>(null)
   const compactPanelLeaveTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
   const syncPanelWindowBootstrappedRef = useRef(false)
+  const autoCollapseTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
   const [syncPanelMode, setSyncPanelMode] = useState(false)
-  const [panelPresentation, setPanelPresentation] = useState<'compact' | 'full'>('full')
+  const [panelPresentation, setPanelPresentation] = useState<'minimized' | 'compact' | 'full'>('full')
   const [showSyncControls, setShowSyncControls] = useState(false)
   const [profiles, setProfiles] = useState<SyncProfileInfo[]>([])
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [masterId, setMasterId] = useState<string | null>(null)
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
   const [starting, setStarting] = useState(false)
@@ -80,8 +80,11 @@ export function WindowSyncPage() {
   const [customCols, setCustomCols] = useState('2')
   const [customRows, setCustomRows] = useState('1')
   const [displayLabel, setDisplayLabel] = useState('当前显示器')
-  const [panelFocused, setPanelFocused] = useState(false)
-  const [panelHovered, setPanelHovered] = useState(false)
+  const [, setPanelFocused] = useState(false)
+  const [, setPanelHovered] = useState(false)
+  const [randomDelayEnabled, setRandomDelayEnabled] = useState(false)
+  const [randomDelayMinMs, setRandomDelayMinMs] = useState('50')
+  const [randomDelayMaxMs, setRandomDelayMaxMs] = useState('200')
 
   const refreshTimer = useRef<ReturnType<typeof setInterval>>()
   const loadProfilesSeq = useRef(0)
@@ -101,6 +104,11 @@ export function WindowSyncPage() {
       const sorted = [...list].sort(compareProfileName)
       setProfiles(sorted)
       setSyncStatus(status)
+      if (status) {
+        setRandomDelayEnabled(status.randomDelayEnabled === true)
+        setRandomDelayMinMs(String(status.randomDelayMinMs || 50))
+        setRandomDelayMaxMs(String(status.randomDelayMaxMs || 200))
+      }
 
       if (status?.active) {
         const nextSelected = new Set([status.masterId, ...(status.followerIds || [])].filter(Boolean))
@@ -109,15 +117,15 @@ export function WindowSyncPage() {
         return
       }
 
+      const runningIds = new Set(sorted.filter(item => item.status === 'running').map(item => item.profileId))
       setSelectedIds(prev => {
-        const runningIds = new Set(sorted.filter(item => item.status === 'running').map(item => item.profileId))
         const next = new Set<string>()
         prev.forEach(id => {
           if (runningIds.has(id)) next.add(id)
         })
         return next
       })
-      setMasterId(prev => (prev && sorted.some(item => item.profileId === prev && item.status === 'running') ? prev : null))
+      setMasterId(prev => (prev && runningIds.has(prev) ? prev : null))
     } finally {
       if (!silent) {
         pendingManualRefreshes.current = Math.max(0, pendingManualRefreshes.current - 1)
@@ -126,7 +134,7 @@ export function WindowSyncPage() {
         }
       }
     }
-  }, [])
+  }, [syncPanelMode])
 
   useEffect(() => {
     let cancelled = false
@@ -179,6 +187,46 @@ export function WindowSyncPage() {
   }, [loadProfiles])
 
   useEffect(() => {
+    if (!syncPanelMode) return
+    let stopped = false
+    let zeroConfirmations = 0
+    let bridgeFailures = 0
+    let recoveryGraceUntil = 0
+    const checkRuntimeState = async () => {
+      const status = await getSyncStatus()
+      if (stopped) return
+      if (!status || status.bridgeError) {
+        bridgeFailures += 1
+        zeroConfirmations = 0
+        recoveryGraceUntil = Date.now() + 15000
+        if (bridgeFailures >= 30) void ExitWindowSyncPanel().catch(() => {})
+        return
+      }
+      bridgeFailures = 0
+      if ((status.runningProfileCount ?? 0) > 0) {
+        // Any client-owned running instance immediately cancels exit.
+        zeroConfirmations = 0
+        return
+      }
+      if (Date.now() < recoveryGraceUntil) {
+        zeroConfirmations = 0
+        return
+      }
+      zeroConfirmations += 1
+      if (zeroConfirmations >= 2) {
+        if (status.active) await stopInputSync()
+        if (!stopped) void ExitWindowSyncPanel().catch(() => {})
+      }
+    }
+    void checkRuntimeState()
+    const timer = window.setInterval(() => { void checkRuntimeState() }, 1000)
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+    }
+  }, [syncPanelMode])
+
+  useEffect(() => {
     const screen = window.screen
     if (!screen) return
     const width = screen.availWidth || screen.width
@@ -202,9 +250,9 @@ export function WindowSyncPage() {
   const compactRunningMode = isSyncing && !syncPanelMode
   const compactSyncStatusMode = syncPanelMode && isSyncing && panelPresentation === 'compact'
   const compactFunctionPanelMode = syncPanelMode && !isSyncing && panelPresentation === 'compact'
+  const minimizedPanelMode = syncPanelMode && panelPresentation === 'minimized'
   const compactPanelInteractive = syncPanelMode && (compactSyncStatusMode || compactFunctionPanelMode)
-  const compactPanelActive = compactPanelInteractive && (panelFocused || panelHovered)
-  const syncControlsVisible = compactSyncStatusMode ? compactPanelActive : showSyncControls
+  const syncControlsVisible = compactSyncStatusMode ? true : showSyncControls
 
   const handleCompactPanelMouseEnter = () => {
     if (compactPanelLeaveTimerRef.current) {
@@ -279,18 +327,26 @@ export function WindowSyncPage() {
     const applyWindowMode = async () => {
       const target = compactSyncStatusMode
           ? (syncControlsVisible ? PANEL_COMPACT_STATUS_SIZE : PANEL_COMPACT_STATUS_COLLAPSED_SIZE)
+          : minimizedPanelMode
+            ? PANEL_MINI_SIZE
           : compactFunctionPanelMode
             ? PANEL_COMPACT_FUNCTION_SIZE
             : PANEL_EXPANDED_SIZE
-      const shouldPinTop = compactSyncStatusMode || compactFunctionPanelMode
+      // The sync tool is a dedicated control surface. Keep every presentation
+      // above the main client and browser windows so expanding it cannot look
+      // like the panel disappeared behind another window.
+      const shouldPinTop = true
       WindowSetAlwaysOnTop(shouldPinTop)
       WindowSetMinSize(target.minWidth, target.minHeight)
       WindowSetSize(target.width, target.height)
-      if (!syncPanelWindowBootstrappedRef.current) {
+      const isFirstShow = !syncPanelWindowBootstrappedRef.current
+      if (isFirstShow) {
         WindowShow()
         WindowUnminimise()
         syncPanelWindowBootstrappedRef.current = true
       }
+      // Preserve the dragged position, but clamp the expanded panel into the
+      // current display so restoring a logo near an edge never goes off-screen.
       if (shouldPinTop) {
         try {
           const screens = await ScreenGetAll()
@@ -298,8 +354,11 @@ export function WindowSyncPage() {
           if (current) {
             const currentX = typeof (current as unknown as { x?: number }).x === 'number' ? (current as unknown as { x: number }).x : 0
             const currentY = typeof (current as unknown as { y?: number }).y === 'number' ? (current as unknown as { y: number }).y : 0
-            const x = Math.round(currentX + (current.width - target.width) / 2)
-            const y = Math.round(currentY + PANEL_TOP_MARGIN_PX)
+            const position = isFirstShow ? null : await WindowGetPosition()
+            const desiredX = position?.x ?? Math.round(currentX + (current.width - target.width) / 2)
+            const desiredY = position?.y ?? Math.round(currentY + PANEL_TOP_MARGIN_PX)
+            const x = Math.max(currentX, Math.min(desiredX, currentX + current.width - target.width))
+            const y = Math.max(currentY, Math.min(desiredY, currentY + current.height - target.height))
             WindowSetPosition(x, y)
             return
           }
@@ -313,11 +372,35 @@ export function WindowSyncPage() {
       void applyWindowMode()
     }, compactSyncStatusMode ? 40 : 0)
     return () => window.clearTimeout(timer)
-  }, [compactFunctionPanelMode, compactSyncStatusMode, syncControlsVisible, syncPanelMode])
+  }, [compactFunctionPanelMode, compactSyncStatusMode, minimizedPanelMode, syncControlsVisible, syncPanelMode])
+
+  useEffect(() => {
+    if (!syncPanelMode || minimizedPanelMode || !isSyncing) {
+      if (autoCollapseTimerRef.current) window.clearTimeout(autoCollapseTimerRef.current)
+      autoCollapseTimerRef.current = null
+      return
+    }
+    const resetAutoCollapse = () => {
+      if (autoCollapseTimerRef.current) window.clearTimeout(autoCollapseTimerRef.current)
+      autoCollapseTimerRef.current = window.setTimeout(() => {
+        setShowSyncControls(false)
+        setToolbarMenu(null)
+        setPanelPresentation('minimized')
+      }, 3000)
+    }
+    const events: Array<keyof WindowEventMap> = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'input']
+    events.forEach(event => window.addEventListener(event, resetAutoCollapse, { passive: true }))
+    resetAutoCollapse()
+    return () => {
+      if (autoCollapseTimerRef.current) window.clearTimeout(autoCollapseTimerRef.current)
+      autoCollapseTimerRef.current = null
+      events.forEach(event => window.removeEventListener(event, resetAutoCollapse))
+    }
+  }, [isSyncing, minimizedPanelMode, syncPanelMode])
 
   useEffect(() => {
     const compactClass = 'sync-panel-compact'
-    if (syncPanelMode && compactSyncStatusMode) {
+    if (syncPanelMode && (compactSyncStatusMode || compactFunctionPanelMode || minimizedPanelMode)) {
       document.body.classList.add(compactClass)
       return () => {
         document.body.classList.remove(compactClass)
@@ -328,7 +411,7 @@ export function WindowSyncPage() {
     return () => {
       document.body.classList.remove(compactClass)
     }
-  }, [compactFunctionPanelMode, compactSyncStatusMode, syncPanelMode])
+  }, [compactFunctionPanelMode, compactSyncStatusMode, minimizedPanelMode, syncPanelMode])
 
   useEffect(() => {
     if (!syncPanelMode) {
@@ -430,7 +513,6 @@ export function WindowSyncPage() {
       toast.error(`启动同步失败：${err}`)
       return
     }
-    toast.success('同步器已启动')
     setPanelPresentation('compact')
     setShowSyncControls(false)
     await loadProfiles()
@@ -442,24 +524,26 @@ export function WindowSyncPage() {
       toast.error(`停止同步失败：${err}`)
       return
     }
-    toast.success('同步已停止')
     setShowSyncControls(false)
     setPanelPresentation('compact')
     setToolbarMenu(null)
     await loadProfiles()
   }
 
-  const handleConfigChange = async (mouseEnabled: boolean, keyEnabled: boolean) => {
+  const handleRandomDelayChange = async (enabled: boolean) => {
     if (!isSyncing) return
-    const err = await updateSyncConfig(mouseEnabled, keyEnabled)
+    const minMs = Math.max(0, Number(randomDelayMinMs) || 0)
+    const maxMs = Math.max(minMs, Number(randomDelayMaxMs) || minMs)
+    const err = await updateSyncRandomDelay(enabled, minMs, maxMs)
     if (err) {
-      toast.error(`更新配置失败：${err}`)
+      toast.error(`更新随机延时失败：${err}`)
       return
     }
-    setSyncStatus(prev => (prev ? { ...prev, mouseEnabled, keyEnabled } : prev))
+    setRandomDelayEnabled(enabled)
+    setSyncStatus(prev => prev ? { ...prev, randomDelayEnabled: enabled, randomDelayMinMs: minMs, randomDelayMaxMs: maxMs } : prev)
   }
 
-  const handleTile = async (layout: TileLayoutMode = tileLayout, toastLabel?: string) => {
+  const handleTile = async (layout: TileLayoutMode = tileLayout, _toastLabel?: string) => {
     const ids = isSyncing ? activeSyncIds : Array.from(selectedIds)
     if (ids.length === 0) {
       toast.error('请先选择要排列的环境')
@@ -471,8 +555,6 @@ export function WindowSyncPage() {
       return
     }
     setTileLayout(result.layout)
-    const layoutText = toastLabel || (result.layout === 'vertical' ? '堆叠' : result.layout === 'horizontal' ? '横向排列' : '平铺')
-    toast.success(`已${layoutText} ${result.count} 个窗口`)
   }
 
   const handleApplyCustomLayout = async () => {
@@ -486,28 +568,41 @@ export function WindowSyncPage() {
     await handleTile(nextLayout, `按 ${cols}×${rows} 自定义排列`)
   }
 
-  const handleCloseAll = async () => {
-    const ids = Array.from(selectedIds)
-    if (ids.length === 0) {
-      toast.error('请先选择要关闭的环境')
-      return
-    }
-    const closed = await syncCloseAll(ids)
-    toast.success(`已关闭 ${closed.length} 个环境`)
-    setSelectedIds(new Set())
-    setMasterId(null)
-    await loadProfiles()
-  }
-
-  const handleClosePanel = () => {
-    if (!syncPanelMode) return
-    void CloseWindowSyncPanel().catch(() => {})
+  const handleExitAssistant = async () => {
+    if (isSyncing) await stopInputSync()
+    await ExitWindowSyncPanel().catch(() => {})
   }
 
   const handleOpenFullPanel = () => {
     if (!syncPanelMode) return
     setShowSyncControls(true)
     setPanelPresentation('full')
+  }
+
+  if (minimizedPanelMode) {
+    return (
+      <div className="relative flex h-11 w-[136px] items-center overflow-hidden bg-[#f8fafc] px-1.5 shadow-[0_8px_22px_rgba(30,58,110,.18)]">
+        <div className="flex h-9 w-9 shrink-0 cursor-move items-center justify-center" title="拖动同步工具" style={{ ['--wails-draggable' as any]: 'drag' }}>
+          <span className="relative flex h-8 w-8 items-center justify-center rounded-[9px] bg-[#17263d] text-[14px] font-black text-white">
+            B
+            <span className={`absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#f7f9fc] ${isSyncing ? 'bg-[#22c55e]' : 'bg-[#f59e0b]'}`} />
+          </span>
+        </div>
+        <button
+          type="button"
+          className="ml-1 flex h-9 min-w-0 flex-1 items-center rounded-[9px] px-1.5 text-left text-[#17263d] transition hover:bg-[#eaf0f8]"
+          onClick={() => setPanelPresentation('compact')}
+          title="展开窗口同步助手"
+          aria-label="展开窗口同步助手"
+          style={{ ['--wails-draggable' as any]: 'no-drag' }}
+        >
+          <span className="min-w-0 flex-1">
+            <span className="block text-[11px] font-semibold leading-4">同步工具</span>
+            <span className="block truncate text-[8px] leading-3 text-[#738199]">{isSyncing ? `${activeSyncCount} 个同步中` : '点击展开'}</span>
+          </span>
+        </button>
+      </div>
+    )
   }
 
   const visibleSelectableProfiles = visibleProfiles.filter(item => item.status === 'running')
@@ -521,7 +616,7 @@ export function WindowSyncPage() {
       <div className="inline-block overflow-visible bg-transparent px-0 pt-0 text-white">
         <div
           ref={compactPanelRef}
-          className="w-[520px] rounded-[24px] border border-[#dbe5f3] bg-[linear-gradient(180deg,#eff5ff_0%,#f6f8fc_45%,#fbfcfe_100%)] px-4 py-4 text-[#111827] shadow-[0_18px_40px_rgba(35,68,135,0.16)] transition-all duration-200"
+          className="w-[440px] border border-[#dbe5f3] bg-[#eff5ff] px-3 py-3 text-[#111827] shadow-[0_14px_32px_rgba(35,68,135,0.14)] transition-all duration-200"
           onMouseEnter={handleCompactPanelMouseEnter}
           onMouseLeave={handleCompactPanelMouseLeave}
         >
@@ -530,9 +625,18 @@ export function WindowSyncPage() {
               <Monitor className="h-4 w-4" />
             </div>
             <div className="min-w-0 flex-1">
-              <div className="whitespace-normal break-words text-[16px] font-semibold leading-5 text-[#111827]">窗口同步功能页</div>
+              <div className="whitespace-normal break-words text-[16px] font-semibold leading-5 text-[#111827]">同步工具</div>
               <div className="mt-1 text-[12px] text-[#667085]">运行中 {compactSelectableProfiles.length} · 共 {compactProfiles.length} · 已选 {selectedCount} · 主控 {displayProfiles.find(item => item.profileId === masterId)?.profileName || displayProfiles.find(item => item.profileId === masterId)?.profileId || '未设置'}</div>
             </div>
+            <button
+              type="button"
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#c8d0dc] bg-white/80 text-[#344054]"
+              onClick={() => setPanelPresentation('minimized')}
+              title="最小化为悬浮图标"
+              style={{ ['--wails-draggable' as any]: 'no-drag' }}
+            >
+              <Minimize2 className="h-4 w-4" />
+            </button>
             <button
               type="button"
               className="inline-flex h-9 items-center justify-center self-center rounded-full border border-[#c8d0dc] bg-white px-3 text-sm font-medium text-[#344054] shadow-[0_8px_18px_rgba(16,24,40,0.08)] transition hover:bg-[#eef2f7] hover:text-[#111827]"
@@ -544,9 +648,9 @@ export function WindowSyncPage() {
             <button
               type="button"
               className="inline-flex h-9 w-9 shrink-0 items-center justify-center self-center rounded-full border border-[#c8d0dc] bg-white text-[#344054] shadow-[0_8px_18px_rgba(16,24,40,0.12)] transition hover:bg-[#eef2f7] hover:text-[#111827]"
-              onClick={handleClosePanel}
-              title="关闭同步窗口"
-              aria-label="关闭同步窗口"
+              onClick={() => void handleExitAssistant()}
+              title="退出同步助手"
+              aria-label="退出同步助手"
               style={{ ['--wails-draggable' as any]: 'no-drag' }}
             >
               <X className="h-4 w-4" />
@@ -599,7 +703,7 @@ export function WindowSyncPage() {
               </button>
             </div>
 
-            <div className="mt-3 max-h-[256px] overflow-auto rounded-2xl border border-[#e5e7eb] bg-[#fbfcfe]/92">
+            <div className="mt-3 max-h-[210px] overflow-auto rounded-xl border border-[#e5e7eb] bg-[#fbfcfe]">
               {compactProfiles.length === 0 ? (
                 <div className="px-6 py-12 text-center text-sm text-[#98a2b3]">暂无可同步实例</div>
               ) : (
@@ -608,7 +712,7 @@ export function WindowSyncPage() {
                   const isMaster = masterId === profile.profileId
                   const isSelectable = profile.status === 'running'
                   return (
-                    <div key={profile.profileId} className={`flex items-center gap-3 border-b border-[#e5e7eb] px-4 py-3 last:border-b-0 ${isMaster ? 'bg-[#eef4ff]' : isSelected ? 'bg-[#f7faff]' : ''}`}>
+                    <div key={profile.profileId} className={`flex items-center gap-2.5 border-b border-[#e5e7eb] px-3 py-2 last:border-b-0 ${isMaster ? 'bg-[#eef4ff]' : isSelected ? 'bg-[#f7faff]' : ''}`}>
                       <button type="button" className="shrink-0" onClick={() => toggleSelect(profile.profileId)} disabled={!isSelectable}>
                         {isSelected || isMaster
                           ? <CheckSquare className="h-4 w-4 text-[#3a6be0]" />
@@ -616,7 +720,7 @@ export function WindowSyncPage() {
                       </button>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <span className="truncate text-sm font-semibold text-[#111827]">{profile.profileName || profile.profileId}</span>
+                          <span className="truncate text-sm font-semibold text-[#111827]">{profile.badgeNumber > 0 ? `#${profile.badgeNumber} · ` : ''}{profile.profileName || profile.profileId}</span>
                           {isMaster && <span className="rounded-full bg-[#d9e7ff] px-2 py-0.5 text-xs font-semibold text-[#3a6be0]">主控</span>}
                           {!isSelectable && <span className="rounded-full bg-[#f2f4f7] px-2 py-0.5 text-xs font-semibold text-[#667085]">无窗口</span>}
                         </div>
@@ -642,8 +746,8 @@ export function WindowSyncPage() {
           </div>
 
           <div className="mt-2 grid grid-cols-[1fr_1fr] gap-2">
-            <Button variant="secondary" className="h-10" onClick={() => void handleCloseAll()} disabled={selectedIds.size === 0}>
-              关闭选中
+            <Button variant="secondary" className="h-9 text-sm" onClick={() => void handleExitAssistant()}>
+              退出同步助手
             </Button>
             <div className="inline-flex h-10 items-center justify-center rounded-2xl bg-[#eef2f7] px-3 text-sm text-[#475467]">
               {masterId ? `主控已设置` : '请先设 1 个主控'}
@@ -659,7 +763,7 @@ export function WindowSyncPage() {
       <div className="inline-block overflow-visible bg-transparent px-0 pt-0 text-white">
         <div
           ref={compactPanelRef}
-          className={`w-[448px] rounded-[24px] border px-3.5 py-3.5 transition-all duration-200 ${compactPanelActive ? 'border-white/28 bg-[rgba(15,23,42,0.78)] shadow-[0_18px_42px_rgba(15,23,42,0.26)] backdrop-blur-[18px]' : 'border-white/10 bg-[rgba(15,23,42,0.18)] shadow-none backdrop-blur-0'}`}
+          className="w-[400px] border border-[#26324a] bg-[#0f172a] px-3 py-3 shadow-[0_12px_28px_rgba(15,23,42,.24)]"
           onMouseEnter={handleCompactPanelMouseEnter}
           onMouseLeave={handleCompactPanelMouseLeave}
         >
@@ -673,11 +777,30 @@ export function WindowSyncPage() {
             </div>
             <button
               type="button"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-white/10 text-white"
+              onClick={() => setPanelPresentation('minimized')}
+              title="最小化为悬浮图标"
+              style={{ ['--wails-draggable' as any]: 'no-drag' }}
+            >
+              <Minimize2 className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
               className="inline-flex h-8 shrink-0 items-center justify-center self-center rounded-full border border-[#e49aa6] bg-[#d74c68] px-3 text-[13px] font-semibold text-white shadow-[0_8px_20px_rgba(215,76,104,0.24)] transition hover:bg-[#e05c76]"
               onClick={() => void handleStopSync()}
               style={{ ['--wails-draggable' as any]: 'no-drag' }}
             >
-              停止
+              重新配置
+            </button>
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/20 bg-white/10 text-white transition hover:border-[#d74c68] hover:bg-[#d74c68]"
+              onClick={() => void handleExitAssistant()}
+              title="退出同步助手"
+              aria-label="退出同步助手"
+              style={{ ['--wails-draggable' as any]: 'no-drag' }}
+            >
+              <X className="h-4 w-4" />
             </button>
           </div>
 
@@ -707,23 +830,23 @@ export function WindowSyncPage() {
               </button>
             </div>
 
-            <div className="mt-2 grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                className={`inline-flex h-9 items-center justify-center gap-2 rounded-2xl px-3 text-[13px] ${syncStatus?.mouseEnabled ? 'bg-[#dff6e5] text-[#173b21]' : 'bg-[#e8edf4] text-[#4a5565] hover:bg-[#dfe6ef]'}`}
-                onClick={() => handleConfigChange(!(syncStatus?.mouseEnabled ?? true), syncStatus?.keyEnabled ?? true)}
-              >
-                <MousePointer2 className="h-4 w-4" />
-                <span>{syncStatus?.mouseEnabled ? '鼠标开' : '鼠标关'}</span>
-              </button>
-              <button
-                type="button"
-                className={`inline-flex h-9 items-center justify-center gap-2 rounded-2xl px-3 text-[13px] ${syncStatus?.keyEnabled ? 'bg-[#dff6e5] text-[#173b21]' : 'bg-[#e8edf4] text-[#4a5565] hover:bg-[#dfe6ef]'}`}
-                onClick={() => handleConfigChange(syncStatus?.mouseEnabled ?? true, !(syncStatus?.keyEnabled ?? true))}
-              >
-                <Keyboard className="h-4 w-4" />
-                <span>{syncStatus?.keyEnabled ? '键盘开' : '键盘关'}</span>
-              </button>
+            <div className="mt-2 rounded-2xl border border-white/14 bg-white/8 p-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[13px] text-white">同步随机延时</span>
+                <button
+                  type="button"
+                  className={`h-7 rounded-full px-3 text-xs ${randomDelayEnabled ? 'bg-[#dff6e5] text-[#173b21]' : 'bg-white/12 text-white/75'}`}
+                  onClick={() => void handleRandomDelayChange(!randomDelayEnabled)}
+                >
+                  {randomDelayEnabled ? '已开启' : '已关闭'}
+                </button>
+              </div>
+              <div className="mt-2 grid grid-cols-[1fr_auto_1fr_auto] items-center gap-2 text-xs text-white/70">
+                <input className="h-8 min-w-0 rounded-lg bg-white/12 px-2 text-white outline-none" type="number" min="0" max="5000" value={randomDelayMinMs} onChange={event => setRandomDelayMinMs(event.target.value)} />
+                <span>至</span>
+                <input className="h-8 min-w-0 rounded-lg bg-white/12 px-2 text-white outline-none" type="number" min="0" max="5000" value={randomDelayMaxMs} onChange={event => setRandomDelayMaxMs(event.target.value)} />
+                <span>ms</span>
+              </div>
             </div>
 
             <button
@@ -852,22 +975,6 @@ export function WindowSyncPage() {
             </button>
 
             <div className="ml-auto flex flex-wrap items-center gap-2 text-sm">
-              <button
-                type="button"
-                className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 ${syncStatus?.mouseEnabled ? 'bg-[#123524] text-[#7cf4a8]' : 'bg-white/10 text-white/75 hover:bg-white/15'}`}
-                onClick={() => handleConfigChange(!(syncStatus?.mouseEnabled ?? true), syncStatus?.keyEnabled ?? true)}
-              >
-                <MousePointer2 className="h-4 w-4" />
-                <span>{syncStatus?.mouseEnabled ? '鼠标开' : '鼠标关'}</span>
-              </button>
-              <button
-                type="button"
-                className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 ${syncStatus?.keyEnabled ? 'bg-[#123524] text-[#7cf4a8]' : 'bg-white/10 text-white/75 hover:bg-white/15'}`}
-                onClick={() => handleConfigChange(syncStatus?.mouseEnabled ?? true, !(syncStatus?.keyEnabled ?? true))}
-              >
-                <Keyboard className="h-4 w-4" />
-                <span>{syncStatus?.keyEnabled ? '键盘开' : '键盘关'}</span>
-              </button>
               <button type="button" className="inline-flex h-9 items-center rounded-xl bg-[#4b1620] px-3.5 text-sm font-medium text-[#ff9db0] hover:bg-[#5a1b27]" onClick={() => void handleStopSync()}>
                 停止同步
               </button>
@@ -882,7 +989,7 @@ export function WindowSyncPage() {
           <div className="flex items-start justify-between gap-4">
             <div>
               <div className="inline-flex items-center gap-2 rounded-2xl bg-[var(--color-bg-muted)] px-4 py-2 text-sm font-semibold text-[var(--color-accent)]">
-                <Monitor className="h-4 w-4" />窗口同步控制台
+                <Monitor className="h-4 w-4" />同步工具
               </div>
               <div className="mt-3 text-sm text-[var(--color-text-secondary)]">
                 {compactRunningMode
@@ -897,9 +1004,9 @@ export function WindowSyncPage() {
               <button
                 type="button"
                 className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-[#d8dee8] bg-white text-[#475467] shadow-sm transition hover:bg-[#f2f4f7] hover:text-[#101828] dark:border-[var(--color-border)] dark:bg-[var(--color-bg-muted)] dark:text-[var(--color-text-secondary)]"
-                onClick={handleClosePanel}
-                title="关闭同步窗口"
-                aria-label="关闭同步窗口"
+                onClick={() => void handleExitAssistant()}
+                title="退出同步助手"
+                aria-label="退出同步助手"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -992,7 +1099,7 @@ export function WindowSyncPage() {
                       <div key={profile.profileId} className="flex items-center gap-3 border-b border-[var(--color-border)] px-4 py-3 last:border-b-0">
                         <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#eefbf3] text-xs font-semibold text-[#2c9c59]">跟</span>
                         <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-semibold text-[var(--color-text-primary)]">{profile.profileName || profile.profileId}</div>
+                          <div className="truncate text-sm font-semibold text-[var(--color-text-primary)]">{profile.badgeNumber > 0 ? `#${profile.badgeNumber} · ` : ''}{profile.profileName || profile.profileId}</div>
                           <div className="mt-1 text-xs text-[var(--color-text-muted)]">PID {profile.pid || '-'} · 正在跟随主控输入</div>
                         </div>
                       </div>
@@ -1024,7 +1131,7 @@ export function WindowSyncPage() {
                         </button>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
-                            <span className="truncate text-sm font-semibold text-[var(--color-text-primary)]">{profile.profileName || profile.profileId}</span>
+                            <span className="truncate text-sm font-semibold text-[var(--color-text-primary)]">{profile.badgeNumber > 0 ? `#${profile.badgeNumber} · ` : ''}{profile.profileName || profile.profileId}</span>
                             {isMaster && <span className="rounded-full bg-[#d9e7ff] px-2 py-0.5 text-xs font-semibold text-[#3a6be0]">主控</span>}
                             {!isMaster && isFollower && <span className="rounded-full bg-[#dcf7e4] px-2 py-0.5 text-xs font-semibold text-[#2c9c59]">跟随</span>}
                           </div>
@@ -1099,8 +1206,8 @@ export function WindowSyncPage() {
               ) : null}
 
               {!isSyncing && (
-                <Button variant="secondary" className="h-11 w-full max-w-[180px]" onClick={() => void handleCloseAll()} disabled={selectedIds.size === 0}>
-                  关闭选中
+                <Button variant="secondary" className="h-10 w-full max-w-[180px]" onClick={() => void handleExitAssistant()}>
+                  退出同步助手
                 </Button>
               )}
 

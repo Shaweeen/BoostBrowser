@@ -85,9 +85,47 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("BOOST_KERNEL_SRC", text)
         self.assertIn("google-148.0.7778.167", text)
 
+    def test_new_windows_private_setup_installs_and_builds_private_edition(self):
+        text = self.read("scripts/setup_new_windows_private.ps1")
+        for package in [
+            "Git.Git",
+            "GoLang.Go",
+            "OpenJS.NodeJS.LTS",
+            "NSIS.NSIS",
+            "Microsoft.EdgeWebView2Runtime",
+            "Microsoft.VCRedist.2015+.x64",
+        ]:
+            self.assertIn(package, text)
+        self.assertIn("go.mod", text)
+        self.assertIn("build_windows_selfuse.ps1", text)
+        self.assertIn("BrowserStudio-Private-Setup", text)
+        self.assertIn("Get-FileHash", text)
+        self.assertIn("-1978335189", text)
+        self.assertIn("already installed and current", text)
+
+    def test_public_manager_build_never_bundles_third_party_runtimes(self):
+        wrapper = self.read("scripts/build_windows_public.ps1")
+        installer = self.read("scripts/build_installer.ps1")
+        public_config = self.read("config.public.yaml")
+
+        self.assertIn("-ManagerOnly", wrapper)
+        self.assertIn("-SkipKernelInstall", wrapper)
+        self.assertIn("-SkipGoogleFallback", wrapper)
+        self.assertIn("if (-not $ManagerOnly -and (Test-Path -LiteralPath $BinSrc))", installer)
+        self.assertIn("if (-not $ManagerOnly) {", installer)
+        self.assertIn("BrowserStudio-Manager-Setup", installer)
+        self.assertRegex(public_config, r"(?m)^\s*cores:\s*\[\]\s*$")
+        self.assertRegex(public_config, r"(?m)^\s*proxies:\s*\[\]\s*$")
+        self.assertNotIn("cloak-146", public_config)
+        self.assertNotIn("google-148", public_config)
+
     def test_no_active_script_keeps_old_machine_specific_paths(self):
         for path in (ROOT / "scripts").rglob("*"):
-            if not path.is_file() or path.name == "test_packaging_scripts.py":
+            if (
+                not path.is_file()
+                or path.name == "test_packaging_scripts.py"
+                or "__pycache__" in path.parts
+            ):
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
             self.assertNotIn("Z:\\", text, f"{path.relative_to(ROOT)} still has old machine-specific Z: paths")

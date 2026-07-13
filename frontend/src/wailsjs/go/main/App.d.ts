@@ -142,6 +142,8 @@ export function ClearIntentionalExitMarker():Promise<void>;
 
 export function CloseWindowSyncPanel():Promise<void>;
 
+export function ExitWindowSyncPanel():Promise<void>;
+
 export function CreateGroup(arg1:browser.GroupInput):Promise<browser.Group>;
 
 export function DeleteGroup(arg1:string):Promise<void>;
@@ -231,6 +233,7 @@ export function TriggerGC():Promise<void>;
 export function UpdateGroup(arg1:string,arg2:browser.GroupInput):Promise<browser.Group>;
 
 export function UpdateSyncConfig(arg1:boolean,arg2:boolean):Promise<void>;
+export function UpdateSyncRandomDelay(arg1:boolean,arg2:number,arg3:number):Promise<void>;
 
 export function ValidateProxyConfig(arg1:string,arg2:string):Promise<backend.ProxyValidationResult>;
 

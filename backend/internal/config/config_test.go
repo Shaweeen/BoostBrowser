@@ -33,7 +33,7 @@ browser: {}
 	if cfg.Database.SQLite.Path != "data/app.db" {
 		t.Fatalf("Database.SQLite.Path 未补齐: got=%q", cfg.Database.SQLite.Path)
 	}
-	if cfg.App.Name != "Boost Browser" {
+	if cfg.App.Name != "BrowserStudio" {
 		t.Fatalf("App.Name 未补齐: got=%q", cfg.App.Name)
 	}
 	if cfg.App.MaxProfileLimit != GithubStarProfileTotal {

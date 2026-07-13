@@ -3,6 +3,7 @@
 package backend
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -119,8 +120,13 @@ func (a *App) reconcileBrowserRuntimeStateOnce() {
 		userDataKey := normalizeRuntimePathKey(a.browserMgr.ResolveUserDataDir(profile))
 		proc, exists := pickRuntimeProcessForSync(byUserDataDir[userDataKey])
 		if profile.Running && isBrowserProfileLive(profile, a.browserMgr.BrowserProcesses[profileId]) {
+			// Chrome may hand the visible top-level frame to a sibling process that
+			// shares the same user-data-dir. A live launcher PID is therefore not
+			// enough: keep it only while it still resolves to a real browser frame.
 			if profile.Pid > 0 {
-				continue
+				if _, windowErr := findProcessTreeWindow(profile.Pid); windowErr == nil {
+					continue
+				}
 			}
 			if !exists {
 				continue
@@ -176,7 +182,7 @@ func pickRuntimeProcessForSync(candidates []browserRuntimeProcess) (browserRunti
 		if proc.PID <= 0 {
 			continue
 		}
-		if _, err := findProcessWindow(proc.PID); err == nil {
+		if _, err := findProcessTreeWindow(proc.PID); err == nil {
 			return proc, true
 		}
 	}
@@ -198,21 +204,12 @@ $items = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Obj
 @($items) | ConvertTo-Json -Depth 3 -Compress
 `, psSingleQuoted(root))
 
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodePowerShellCommand(script))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodePowerShellCommand(script))
 	hideWindow(cmd)
-	// Add a timeout to prevent PowerShell from hanging indefinitely.
-	done := make(chan struct{})
-	var out []byte
-	var cmdErr error
-	go func() {
-		defer close(done)
-		out, cmdErr = cmd.Output()
-	}()
-	select {
-	case <-done:
-		// Command completed.
-	case <-time.After(5 * time.Second):
-		_ = cmd.Process.Kill()
+	out, cmdErr := cmd.Output()
+	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("powershell process discovery timed out after 5s")
 	}
 	if cmdErr != nil {

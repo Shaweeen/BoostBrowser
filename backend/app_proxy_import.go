@@ -24,13 +24,9 @@ func (a *App) BrowserProxyFetchClashByURL(rawURL string) (map[string]interface{}
 		return nil, fmt.Errorf("订阅 URL 不能为空")
 	}
 
-	parsedURL, err := url.Parse(rawURL)
-	if err != nil || parsedURL.Host == "" {
-		return nil, fmt.Errorf("URL 格式无效")
-	}
-	scheme := strings.ToLower(strings.TrimSpace(parsedURL.Scheme))
-	if scheme != "http" && scheme != "https" {
-		return nil, fmt.Errorf("仅支持 http/https URL")
+	parsedURL, err := validatePublicRemoteURL(rawURL, true)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequest(http.MethodGet, parsedURL.String(), nil)
@@ -41,9 +37,7 @@ func (a *App) BrowserProxyFetchClashByURL(rawURL string) (map[string]interface{}
 	req.Header.Set("Accept", "application/yaml,text/yaml,text/plain,*/*")
 	req.Header.Set("Cache-Control", "no-cache")
 
-	client := &http.Client{
-		Timeout: clashSubscriptionTimeout,
-	}
+	client := newPublicRemoteHTTPClient(clashSubscriptionTimeout, true)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("拉取订阅失败: %w", err)

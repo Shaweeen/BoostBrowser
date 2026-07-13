@@ -87,3 +87,10 @@ func TestForceQuitStopsTrackedBrowsers(t *testing.T) {
 		t.Fatal("expected ForceQuit to mark the profile as stopped")
 	}
 }
+
+func TestSyncPanelShutdownNeverStopsSharedBrowserRuntimes(t *testing.T) {
+	app := NewApp(t.TempDir(), true)
+	if app.shouldStopRuntimeServicesOnShutdown() {
+		t.Fatal("sync panel shutdown must not stop or rewrite shared browser runtimes")
+	}
+}

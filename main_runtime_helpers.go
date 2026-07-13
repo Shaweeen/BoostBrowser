@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 var syncPanelMode = hasCLIArg("--sync-panel") || hasCLIArg("--window-sync-panel")
@@ -68,7 +70,15 @@ func (a *App) OpenWindowSyncPanel() error {
 	}
 	cmd := exec.Command(exePath, "--sync-panel")
 	cmd.Dir = appRoot
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Opening the dedicated sync tool is an explicit workspace switch. Keep the
+	// browser environments and the always-on-top tool visible, not the main UI.
+	if a.wailsCtx != nil {
+		runtime.WindowMinimise(a.wailsCtx)
+	}
+	return cmd.Process.Release()
 }
 
 // restoreNativeMainWindowBounds restores/centers the main Wails window. Native

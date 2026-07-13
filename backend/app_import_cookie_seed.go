@@ -84,7 +84,7 @@ func writeImportedCookieSeed(userDataDir string, cookies []importedCookieSeedEnt
 	if err != nil {
 		return fmt.Errorf("序列化 Cookie 暂存文件失败: %w", err)
 	}
-	if err := os.WriteFile(importedCookieSeedPath(userDataDir), data, 0o644); err != nil {
+	if err := os.WriteFile(importedCookieSeedPath(userDataDir), data, 0o600); err != nil {
 		return fmt.Errorf("写入 Cookie 暂存文件失败: %w", err)
 	}
 	return nil

@@ -450,6 +450,9 @@ func TestSanitizeManagedWindowPlacementArgsRemovesWindowSizeAndPosition(t *testi
 		"--lang=en-US",
 		"--window-size=1600,900",
 		"--window-position", "20,40",
+		"--start-maximized",
+		"--start-fullscreen",
+		"--kiosk",
 		"https://example.com",
 	})
 
@@ -458,7 +461,7 @@ func TestSanitizeManagedWindowPlacementArgsRemovesWindowSizeAndPosition(t *testi
 		t.Fatalf("sanitizeManagedWindowPlacementArgs args mismatch: got=%v want=%v", got, wantArgs)
 	}
 
-	wantRemoved := []string{"--window-size", "--window-position"}
+	wantRemoved := []string{"--window-size", "--window-position", "--start-maximized", "--start-fullscreen", "--kiosk"}
 	if !reflect.DeepEqual(removed, wantRemoved) {
 		t.Fatalf("sanitizeManagedWindowPlacementArgs removed mismatch: got=%v want=%v", removed, wantRemoved)
 	}

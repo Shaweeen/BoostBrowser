@@ -1,6 +1,9 @@
 # build_installer.ps1
-# Build full self-use NSIS installer for Boost Browser.
-# Produces build\release\BoostBrowser-Setup-vX.X.X.exe.
+# Build full self-use NSIS installer for BrowserStudio.
+# Produces a private full installer by default, or a redistributable manager
+# installer with -ManagerOnly.
+
+param([switch]$ManagerOnly)
 
 $ErrorActionPreference = 'Stop'
 
@@ -56,15 +59,15 @@ function New-BrandBitmap([string]$Path, [int]$Width, [int]$Height, [bool]$Header
     if ($Header) {
         $font  = New-Object System.Drawing.Font 'Segoe UI', 10, ([System.Drawing.FontStyle]::Bold)
         $font2 = New-Object System.Drawing.Font 'Segoe UI', 7
-        $g.DrawString('Boost Browser', $font, $white, 12, 7)
+        $g.DrawString('BrowserStudio', $font, $white, 12, 7)
         $g.DrawString("v$Version", $font2, $muted, 12, 29)
         $g.FillEllipse($accent, $Width-44, 10, 24, 24)
         $font.Dispose(); $font2.Dispose()
     } else {
         $font  = New-Object System.Drawing.Font 'Segoe UI', 18, ([System.Drawing.FontStyle]::Bold)
         $font2 = New-Object System.Drawing.Font 'Segoe UI', 8
-        $g.DrawString('Boost', $font, $white, 18, 32)
-        $g.DrawString('Browser', $font, $white, 18, 60)
+        $g.DrawString('Browser', $font, $white, 18, 32)
+        $g.DrawString('Studio', $font, $white, 18, 60)
         $g.DrawString('Fingerprint browser', $font2, $muted, 20, 108)
         $g.DrawString("v$Version", $font2, $muted, 20, 128)
         $g.FillEllipse($accent, 102, 180, 34, 34)
@@ -84,11 +87,16 @@ Write-Host "==> Version: v$Version" -ForegroundColor Cyan
 $ReleaseDir = "$RepoRoot\build\release"
 $BoostExe = "$ReleaseDir\boost-browser.exe"
 $UpdaterExe = "$ReleaseDir\updater.exe"
-$Stage = 'C:\Temp\BoostBrowser_installer_staging'
+$ActivationCheckExe = "$ReleaseDir\activation-check.exe"
+$Edition = if ($ManagerOnly) { 'Manager' } else { 'Private' }
+$ProductName = if ($ManagerOnly) { 'BrowserStudio Manager' } else { 'BrowserStudio' }
+$InstallDirName = if ($ManagerOnly) { 'BrowserStudio Manager' } else { 'BrowserStudio' }
+$UninstallKeyName = if ($ManagerOnly) { 'BrowserStudioManager' } else { 'BrowserStudio' }
+$Stage = "C:\Temp\BrowserStudio_${Edition}_installer_staging"
 $Publish = "$RepoRoot\publish\output"
 $NsiPath = "$RepoRoot\publish\boost-browser-installer.nsi"
 $NshPath = "$RepoRoot\publish\boost_nsis_files.nsh"
-$OutExe = "$ReleaseDir\BoostBrowser-Setup-v$Version.exe"
+$OutExe = if ($ManagerOnly) { "$ReleaseDir\BrowserStudio-Manager-Setup-v$Version.exe" } else { "$ReleaseDir\BrowserStudio-Private-Setup-v$Version.exe" }
 $Icon = "$RepoRoot\build\windows\icon.ico"
 $SidebarBmp = "$RepoRoot\publish\boost_sidebar.bmp"
 $HeaderBmp = "$RepoRoot\publish\boost_header.bmp"
@@ -99,13 +107,15 @@ $GoogleKernelSrc = "$AssetRoot\chrome\google-148.0.7778.167"
 $BinSrc = "$AssetRoot\bin"
 # Optional helper extension is intentionally not staged for the self-use clean
 # build. Users requested no default/search helper extension in packaged installs.
-$ConfigSrc = "$RepoRoot\config.yaml"
+$ConfigSrc = if ($ManagerOnly) { "$RepoRoot\config.public.yaml" } else { "$RepoRoot\config.yaml" }
 $AppIconSrc = if (Test-Path -LiteralPath "$AssetRoot\app.ico") { "$AssetRoot\app.ico" } else { "$RepoRoot\build\windows\icon.ico" }
 $AppPngSrc = if (Test-Path -LiteralPath "$AssetRoot\app.png") { "$AssetRoot\app.png" } else { "$RepoRoot\build\appicon.png" }
-
 Require-Path $BoostExe "Missing $BoostExe. Run scripts\build_release.ps1 first."
 Require-Path $UpdaterExe "Missing $UpdaterExe. Run scripts\build_release.ps1 first."
-Require-Path "$CloakKernelSrc\chrome.exe" "Missing CloakBrowser kernel: $CloakKernelSrc\chrome.exe"
+Require-Path $ActivationCheckExe "Missing $ActivationCheckExe. Run scripts\build_release.ps1 first."
+if (-not $ManagerOnly) {
+    Require-Path "$CloakKernelSrc\chrome.exe" "Missing CloakBrowser kernel: $CloakKernelSrc\chrome.exe"
+}
 Require-Path $Icon "Missing icon: $Icon"
 New-Item -ItemType Directory -Force -Path $Publish | Out-Null
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
@@ -120,15 +130,17 @@ Copy-Item -LiteralPath $UpdaterExe -Destination "$Stage\updater.exe" -Force
 if (Test-Path -LiteralPath $ConfigSrc) { Copy-Item -LiteralPath $ConfigSrc -Destination "$Stage\config.yaml" -Force }
 if (Test-Path -LiteralPath $AppIconSrc) { Copy-Item -LiteralPath $AppIconSrc -Destination $Stage -Force }
 if (Test-Path -LiteralPath $AppPngSrc) { Copy-Item -LiteralPath $AppPngSrc -Destination $Stage -Force }
-if (Test-Path -LiteralPath $BinSrc) { Copy-Dir $BinSrc "$Stage\bin" }
+if (-not $ManagerOnly -and (Test-Path -LiteralPath $BinSrc)) { Copy-Dir $BinSrc "$Stage\bin" }
 # Helper extension is intentionally not bundled in the clean self-use package.
 
-New-Item -ItemType Directory -Force -Path "$Stage\chrome" | Out-Null
-Copy-Dir $CloakKernelSrc "$Stage\chrome\cloak-146.0.7680.177"
-if (Test-Path -LiteralPath $GoogleKernelSrc) {
-    Copy-Dir $GoogleKernelSrc "$Stage\chrome\google-148.0.7778.167"
-} else {
-    Write-Host "Optional Google fallback missing; skipped: $GoogleKernelSrc" -ForegroundColor Yellow
+if (-not $ManagerOnly) {
+    New-Item -ItemType Directory -Force -Path "$Stage\chrome" | Out-Null
+    Copy-Dir $CloakKernelSrc "$Stage\chrome\cloak-146.0.7680.177"
+    if (Test-Path -LiteralPath $GoogleKernelSrc) {
+        Copy-Dir $GoogleKernelSrc "$Stage\chrome\google-148.0.7778.167"
+    } else {
+        Write-Host "Optional Google fallback missing; skipped: $GoogleKernelSrc" -ForegroundColor Yellow
+    }
 }
 New-Item -ItemType Directory -Force -Path "$Stage\data" | Out-Null
 
@@ -153,20 +165,21 @@ Write-Host ("   Wrote {0:N0} NSIS lines" -f $out.Count) -ForegroundColor Green
 Write-Host '==> [4/6] Generating NSIS script' -ForegroundColor Yellow
 $nsi = @"
 Unicode True
-!define PRODUCT_NAME "Boost Browser"
+!define PRODUCT_NAME "$ProductName"
 !define PRODUCT_EXE "boost-browser.exe"
 !define PRODUCT_VERSION "$Version"
-!define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoostBrowser"
+!define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\$UninstallKeyName"
 !define APP_ICON "$Icon"
 !define SIDEBAR_BMP "$SidebarBmp"
 !define HEADER_BMP "$HeaderBmp"
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
+!include "nsDialogs.nsh"
 
 Name "`${PRODUCT_NAME} `${PRODUCT_VERSION}"
 OutFile "$OutExe"
-InstallDir "`$LOCALAPPDATA\Programs\Boost Browser"
+InstallDir "`$LOCALAPPDATA\Programs\$InstallDirName"
 InstallDirRegKey HKCU "`${UNINSTALL_KEY}" "InstallLocation"
 RequestExecutionLevel user
 SetCompressor zlib
@@ -180,15 +193,55 @@ UninstallIcon "`${APP_ICON}"
 !define MUI_HEADERIMAGE_UNBITMAP "`${HEADER_BMP}"
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "`$INSTDIR\`${PRODUCT_EXE}"
-!define MUI_FINISHPAGE_RUN_TEXT "Start Boost Browser"
+!define MUI_FINISHPAGE_RUN_TEXT "Start BrowserStudio"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
+Page custom ActivationPage ActivationPageLeave
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
+
+Var ActivationDialog
+Var ActivationInput
+
+Function .onInit
+  InitPluginsDir
+  SetOutPath `$PLUGINSDIR
+  File /oname=activation-check.exe "$ActivationCheckExe"
+FunctionEnd
+
+Function ActivationPage
+  nsDialogs::Create 1018
+  Pop `$ActivationDialog
+  `$`{If} `$ActivationDialog == error
+    Abort
+  `$`{EndIf}
+  !insertmacro MUI_HEADER_TEXT "Activate BrowserStudio" "Enter a valid installation key to continue."
+  `$`{NSD_CreateLabel} 0 8u 100% 24u "Installation key"
+  Pop `$0
+  `$`{NSD_CreatePassword} 0 34u 100% 14u ""
+  Pop `$ActivationInput
+  `$`{NSD_SetFocus} `$ActivationInput
+  nsDialogs::Show
+FunctionEnd
+
+Function ActivationPageLeave
+  `$`{NSD_GetText} `$ActivationInput `$0
+  StrCmp `$0 "" activation_failed
+  FileOpen `$1 "`$PLUGINSDIR\activation.input" w
+  FileWrite `$1 `$0
+  FileClose `$1
+  ExecWait '"`$PLUGINSDIR\activation-check.exe" "`$PLUGINSDIR\activation.input" "`$PLUGINSDIR\activation.marker"' `$2
+  Delete "`$PLUGINSDIR\activation.input"
+  IntCmp `$2 0 activation_ok activation_failed activation_failed
+activation_failed:
+  MessageBox MB_ICONSTOP|MB_OK "Invalid installation key. Installation cannot continue."
+  Abort
+activation_ok:
+FunctionEnd
 
 Function CloseBoostProcesses
   IfFileExists "`$INSTDIR" 0 done
@@ -201,11 +254,12 @@ Function CloseBoostProcesses
 done:
 FunctionEnd
 
-Section "Boost Browser" SecMain
+Section "$ProductName" SecMain
   SectionIn RO
   Call CloseBoostProcesses
   SetOutPath "`$INSTDIR"
   !include "$NshPath"
+  CopyFiles /SILENT "`$PLUGINSDIR\activation.marker" "`$INSTDIR\.browserstudio-activation.json"
   SetOutPath "`$INSTDIR"
   WriteUninstaller "`$INSTDIR\Uninstall.exe"
   CreateDirectory "`$SMPROGRAMS\`${PRODUCT_NAME}"
@@ -214,7 +268,7 @@ Section "Boost Browser" SecMain
   CreateShortcut "`$DESKTOP\`${PRODUCT_NAME}.lnk" "`$INSTDIR\`${PRODUCT_EXE}" "" "`$INSTDIR\`${PRODUCT_EXE}" 0
   WriteRegStr HKCU "`${UNINSTALL_KEY}" "DisplayName" "`${PRODUCT_NAME}"
   WriteRegStr HKCU "`${UNINSTALL_KEY}" "DisplayVersion" "`${PRODUCT_VERSION}"
-  WriteRegStr HKCU "`${UNINSTALL_KEY}" "Publisher" "Boost Browser"
+  WriteRegStr HKCU "`${UNINSTALL_KEY}" "Publisher" "BrowserStudio"
   WriteRegStr HKCU "`${UNINSTALL_KEY}" "InstallLocation" "`$INSTDIR"
   WriteRegStr HKCU "`${UNINSTALL_KEY}" "UninstallString" "`$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "`${UNINSTALL_KEY}" "DisplayIcon" "`$INSTDIR\`${PRODUCT_EXE}"
