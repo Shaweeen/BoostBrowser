@@ -30,6 +30,7 @@ var syncState struct {
 var syncRuntimeDiscovery struct {
 	sync.Mutex
 	lastAttempt time.Time
+	running     bool
 }
 
 // SyncProfileInfo 同步页面的实例信息
@@ -56,12 +57,12 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 	// is only a throttled fallback, not a two-second polling dependency.
 	liveSnapshots, totalSnapshots := a.applyBrowserRuntimeSnapshot()
 	if liveSnapshots == 0 || liveSnapshots < totalSnapshots {
-		a.reconcileSyncRuntimeStateThrottled()
+		a.reconcileSyncRuntimeStateAsync()
 	}
 	// NOTE: 不要在这里加 browserMgr.Mutex 锁！List() 内部会自行加锁，
 	// 如果外层再锁一次会导致死锁（Go sync.Mutex 不可重入）。
 	profiles := a.browserMgr.List()
-	result := make([]SyncProfileInfo, 0, len(profiles))
+	candidates := make([]BrowserProfile, 0, len(profiles))
 
 	for _, p := range profiles {
 		// Return any profile that has a live runtime handle. Older builds could leave
@@ -71,43 +72,67 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 			continue
 		}
 
-		info := SyncProfileInfo{
-			ProfileId:   p.ProfileId,
-			ProfileName: p.ProfileName,
-			Pid:         p.Pid,
-			DebugPort:   p.DebugPort,
-			Running:     p.Running,
-			BadgeNumber: extractBadgeNumberFromName(p.ProfileName),
-		}
-		if p.Pid <= 0 {
-			info.Status = "no_window"
-			result = append(result, info)
-			continue
-		}
-
-		hwnd, err := findProcessTreeWindow(p.Pid)
-		if err == nil {
-			info.Hwnd = int64(hwnd)
-			info.Status = "running"
-		} else {
-			info.Status = "no_window"
-		}
-
-		result = append(result, info)
+		candidates = append(candidates, p)
 	}
+
+	// Resolve independent browser windows concurrently. With 12 environments,
+	// the old serial process-tree scans multiplied the initial panel latency.
+	result := make([]SyncProfileInfo, len(candidates))
+	var wg sync.WaitGroup
+	limit := make(chan struct{}, 8)
+	for i, p := range candidates {
+		i, p := i, p
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			limit <- struct{}{}
+			defer func() { <-limit }()
+			info := SyncProfileInfo{
+				ProfileId:   p.ProfileId,
+				ProfileName: p.ProfileName,
+				Pid:         p.Pid,
+				DebugPort:   p.DebugPort,
+				Running:     p.Running,
+				BadgeNumber: extractBadgeNumberFromName(p.ProfileName),
+			}
+			if p.Pid > 0 {
+				if hwnd, err := findProcessTreeWindow(p.Pid); err == nil {
+					info.Hwnd = int64(hwnd)
+					info.Status = "running"
+				} else {
+					info.Status = "no_window"
+				}
+			} else {
+				info.Status = "no_window"
+			}
+			result[i] = info
+		}()
+	}
+	wg.Wait()
 
 	return result
 }
 
-func (a *App) reconcileSyncRuntimeStateThrottled() {
+func (a *App) reconcileSyncRuntimeStateAsync() {
 	syncRuntimeDiscovery.Lock()
-	if time.Since(syncRuntimeDiscovery.lastAttempt) < 10*time.Second {
+	if syncRuntimeDiscovery.running || time.Since(syncRuntimeDiscovery.lastAttempt) < 2*time.Second {
 		syncRuntimeDiscovery.Unlock()
 		return
 	}
 	syncRuntimeDiscovery.lastAttempt = time.Now()
+	syncRuntimeDiscovery.running = true
 	syncRuntimeDiscovery.Unlock()
-	a.reconcileBrowserRuntimeStateOnce()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				a.lifecycleLog("sync-runtime-discovery-panic", fmt.Sprintf("value=%v", r))
+			}
+			syncRuntimeDiscovery.Lock()
+			syncRuntimeDiscovery.running = false
+			syncRuntimeDiscovery.Unlock()
+		}()
+		a.reconcileBrowserRuntimeStateOnce()
+	}()
 }
 
 // StartInputSync 启动输入同步
@@ -125,31 +150,28 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	log := logger.New("SyncAPI")
 	liveSnapshots, totalSnapshots := a.applyBrowserRuntimeSnapshot()
 	if liveSnapshots == 0 || liveSnapshots < totalSnapshots {
-		a.reconcileSyncRuntimeStateThrottled()
+		a.reconcileSyncRuntimeStateAsync()
 	}
 
-	a.browserMgr.Mutex.Lock()
-	defer a.browserMgr.Mutex.Unlock()
-
 	// 查找主控实例
+	a.browserMgr.Mutex.Lock()
 	masterProfile, ok := a.browserMgr.Profiles[masterProfileId]
 	if !ok {
+		a.browserMgr.Mutex.Unlock()
 		return fmt.Errorf("未找到主控实例：%s", masterProfileId)
 	}
 	if !masterProfile.Running || masterProfile.Pid <= 0 {
+		a.browserMgr.Mutex.Unlock()
 		return fmt.Errorf("主控实例未在运行：%s", masterProfileId)
 	}
-
-	masterHwnd, err := findProcessTreeWindow(masterProfile.Pid)
-	if err != nil {
-		return fmt.Errorf("未找到主控实例窗口：%v", err)
-	}
+	masterSnapshot := *masterProfile
 
 	// 收集跟随窗口
-	var followerHwnds []windows.HWND
-	var followerDebugPorts []int
-	validFollowerIds := make([]string, 0)
-
+	type followerCandidate struct {
+		id      string
+		profile BrowserProfile
+	}
+	followers := make([]followerCandidate, 0, len(followerProfileIds))
 	for _, fid := range followerProfileIds {
 		if fid == masterProfileId {
 			continue // 主控不能同时是跟随
@@ -158,13 +180,43 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 		if !ok || !fp.Running || fp.Pid <= 0 {
 			continue
 		}
-		fhwnd, err := findProcessTreeWindow(fp.Pid)
-		if err != nil {
+		followers = append(followers, followerCandidate{id: fid, profile: *fp})
+	}
+	a.browserMgr.Mutex.Unlock()
+
+	masterHwnd, err := findProcessTreeWindow(masterSnapshot.Pid)
+	if err != nil {
+		return fmt.Errorf("未找到主控实例窗口：%v", err)
+	}
+
+	type followerWindow struct {
+		hwnd      windows.HWND
+		debugPort int
+	}
+	resolved := make([]followerWindow, len(followers))
+	var followerWG sync.WaitGroup
+	for i, candidate := range followers {
+		i, candidate := i, candidate
+		followerWG.Add(1)
+		go func() {
+			defer followerWG.Done()
+			if hwnd, resolveErr := findProcessTreeWindow(candidate.profile.Pid); resolveErr == nil {
+				resolved[i] = followerWindow{hwnd: hwnd, debugPort: candidate.profile.DebugPort}
+			}
+		}()
+	}
+	followerWG.Wait()
+
+	var followerHwnds []windows.HWND
+	var followerDebugPorts []int
+	validFollowerIds := make([]string, 0, len(followers))
+	for i, item := range resolved {
+		if item.hwnd == 0 {
 			continue
 		}
-		followerHwnds = append(followerHwnds, fhwnd)
-		followerDebugPorts = append(followerDebugPorts, fp.DebugPort)
-		validFollowerIds = append(validFollowerIds, fid)
+		followerHwnds = append(followerHwnds, item.hwnd)
+		followerDebugPorts = append(followerDebugPorts, item.debugPort)
+		validFollowerIds = append(validFollowerIds, followers[i].id)
 	}
 
 	if len(followerHwnds) == 0 {
@@ -180,8 +232,8 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	syncer := NewInputSyncerWithLogger(func(event string, fields ...string) {
 		a.lifecycleLog(event, fields...)
 	})
-	masterDebugPort := masterProfile.DebugPort
-	if err := syncer.StartWithURLSync(masterHwnd, followerHwnds, masterProfile.Pid, masterDebugPort, followerDebugPorts); err != nil {
+	masterDebugPort := masterSnapshot.DebugPort
+	if err := syncer.StartWithURLSync(masterHwnd, followerHwnds, masterSnapshot.Pid, masterDebugPort, followerDebugPorts); err != nil {
 		return fmt.Errorf("启动同步失败：%v", err)
 	}
 
@@ -232,11 +284,13 @@ func (a *App) GetSyncStatus() map[string]interface{} {
 
 func (a *App) getSyncStatusLocal() map[string]interface{} {
 	runningProfileCount := 0
-	for _, profile := range a.browserMgr.List() {
-		if profile.Running {
+	a.browserMgr.Mutex.Lock()
+	for _, profile := range a.browserMgr.Profiles {
+		if profile != nil && profile.Running {
 			runningProfileCount++
 		}
 	}
+	a.browserMgr.Mutex.Unlock()
 	syncState.mu.Lock()
 	defer syncState.mu.Unlock()
 

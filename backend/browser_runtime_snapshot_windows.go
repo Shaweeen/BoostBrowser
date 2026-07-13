@@ -59,8 +59,10 @@ func (a *App) persistBrowserRuntimeSnapshotLocked() {
 	}
 }
 
-// Validate both process liveness and a real Chrome top-level frame. A stale
-// snapshot can therefore never surface a recycled PID as a sync target.
+// Apply the main client's shared state using only the cheap process-liveness
+// check. Window resolution is performed once, in parallel, by GetSyncProfiles.
+// Doing it here as well used to duplicate 12 expensive process-tree scans and
+// then block the response on a five-second CIM fallback when only one failed.
 func (a *App) applyBrowserRuntimeSnapshot() (int, int) {
 	if a == nil || a.browserMgr == nil {
 		return 0, 0
@@ -82,13 +84,12 @@ func (a *App) applyBrowserRuntimeSnapshot() (int, int) {
 		if profile == nil || entry.PID <= 0 || !isProcessAlive(entry.PID) {
 			continue
 		}
-		if _, err := findProcessTreeWindow(entry.PID); err != nil {
-			continue
-		}
 		profile.Running = true
 		profile.Pid = entry.PID
 		profile.DebugPort = entry.DebugPort
-		profile.DebugReady = entry.DebugPort > 0 && canConnectDebugPort(entry.DebugPort, 250*time.Millisecond)
+		// Input synchronization only needs HWND/PID. Do not serially dial every
+		// CDP port on the critical list-loading path.
+		profile.DebugReady = entry.DebugPort > 0
 		live++
 	}
 	return live, len(snapshot.Entries)
