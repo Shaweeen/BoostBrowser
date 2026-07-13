@@ -54,7 +54,7 @@ browser:
         - --no-first-run
     default_proxy: ""
     start_ready_timeout_ms: 3000
-    start_stable_window_ms: 1200
+    start_stable_window_ms: 450
     cores:
         - core_id: bundled-cloak-chromium-latest
           core_name: Chromium 146

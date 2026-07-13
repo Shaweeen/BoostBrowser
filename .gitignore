@@ -16,6 +16,8 @@ node_modules/
 
 # Logs / temp
 logs/
+__pycache__/
+*.pyc
 *.log
 *.tmp
 *.bak

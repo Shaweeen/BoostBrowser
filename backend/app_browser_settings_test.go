@@ -16,8 +16,16 @@ func TestBrowserStartTimingSettingsUsesDefaultsWhenUnset(t *testing.T) {
 	if readyMs != 3000 {
 		t.Fatalf("expected default ready timeout 3000ms, got %d", readyMs)
 	}
-	if stableMs != 1200 {
-		t.Fatalf("expected default stable window 1200ms, got %d", stableMs)
+	if stableMs != 450 {
+		t.Fatalf("expected default stable window 450ms, got %d", stableMs)
+	}
+}
+
+func TestBrowserStartTimingSettingsMigratesLegacyStableWindow(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Browser.StartStableWindowMs = 1200
+	if stableMs := browserStartStableWindowMillis(cfg); stableMs != 450 {
+		t.Fatalf("expected legacy stable window to migrate to 450ms, got %d", stableMs)
 	}
 }
 
