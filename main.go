@@ -186,11 +186,12 @@ func (a *App) CloseWindowSyncPanel() {
 		return
 	}
 	a.syncPanelCloseMu.Lock()
+	a.syncPanelCloseAllowed = true
 	ctx := a.wailsCtx
 	a.syncPanelCloseMu.Unlock()
-	a.RecordLifecycleEvent("sync-panel-close-request", []string{"action=hide-panel", "sync=preserved"})
+	a.RecordLifecycleEvent("sync-panel-close-request", []string{"action=quit-panel", "reason=user-click-x"})
 	if ctx != nil {
-		runtime.WindowHide(ctx)
+		runtime.Quit(ctx)
 	}
 }
 
@@ -204,7 +205,7 @@ func (a *App) ExitWindowSyncPanel() {
 	a.syncPanelCloseAllowed = true
 	ctx := a.wailsCtx
 	a.syncPanelCloseMu.Unlock()
-	a.RecordLifecycleEvent("sync-panel-exit", []string{"action=quit", "reason=user-or-no-running-environments"})
+	a.RecordLifecycleEvent("sync-panel-exit", []string{"action=quit", "reason=user-explicit-exit"})
 	if ctx != nil {
 		runtime.Quit(ctx)
 	}

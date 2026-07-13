@@ -61,17 +61,17 @@ func (a *App) persistBrowserRuntimeSnapshotLocked() {
 
 // Validate both process liveness and a real Chrome top-level frame. A stale
 // snapshot can therefore never surface a recycled PID as a sync target.
-func (a *App) applyBrowserRuntimeSnapshot() int {
+func (a *App) applyBrowserRuntimeSnapshot() (int, int) {
 	if a == nil || a.browserMgr == nil {
-		return 0
+		return 0, 0
 	}
 	data, err := os.ReadFile(a.browserRuntimeSnapshotPath())
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	var snapshot browserRuntimeSnapshot
 	if json.Unmarshal(data, &snapshot) != nil || time.Since(snapshot.UpdatedAt) > 7*24*time.Hour {
-		return 0
+		return 0, 0
 	}
 
 	live := 0
@@ -91,5 +91,5 @@ func (a *App) applyBrowserRuntimeSnapshot() int {
 		profile.DebugReady = entry.DebugPort > 0 && canConnectDebugPort(entry.DebugPort, 250*time.Millisecond)
 		live++
 	}
-	return live
+	return live, len(snapshot.Entries)
 }

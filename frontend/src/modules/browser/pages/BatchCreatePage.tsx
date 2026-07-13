@@ -78,8 +78,8 @@ export function BatchCreatePage() {
       toast.error('批量创建数量需在 1~200 之间')
       return
     }
-    if (startIndex < 0) {
-      toast.error('起始序号不能为负数')
+    if (startIndex < 1) {
+      toast.error('起始序号不能小于 1')
       return
     }
 
@@ -90,7 +90,10 @@ export function BatchCreatePage() {
     }
     try {
       const created = await batchCreateBrowserProfiles(prefix.trim(), startIndex, count, payload)
-      toast.success(`成功创建 ${created.length} 个实例`)
+      const firstName = created[0]?.profileName
+      const lastName = created[created.length - 1]?.profileName
+      const range = firstName && lastName ? `（${firstName} 至 ${lastName}）` : ''
+      toast.success(`成功创建 ${created.length} 个实例${range}`)
       setIsDirty(false)
       navigate('/browser/list')
     } catch (error: any) {
@@ -138,12 +141,12 @@ export function BatchCreatePage() {
               placeholder="实例"
             />
           </FormItem>
-          <FormItem label="起始序号" hint="第一个实例的编号">
+          <FormItem label="起始序号" hint="自动跳过历史已使用编号">
             <Input
               type="number"
-              min={0}
+              min={1}
               value={startIndex}
-              onChange={e => setStartIndex(Math.max(0, parseInt(e.target.value) || 1))}
+              onChange={e => setStartIndex(Math.max(1, parseInt(e.target.value) || 1))}
             />
           </FormItem>
           <FormItem label="创建数量" hint="1~200">

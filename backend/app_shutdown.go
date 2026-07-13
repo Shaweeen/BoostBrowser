@@ -9,6 +9,7 @@ import (
 type browserProcessSnapshot struct {
 	profileID string
 	cmd       *exec.Cmd
+	pid       int
 }
 
 func (a *App) stopRuntimeServices() {
@@ -45,14 +46,37 @@ func (a *App) stopTrackedBrowserProcesses() {
 	}
 
 	a.browserMgr.Mutex.Lock()
-	cmds := make([]*exec.Cmd, 0, len(a.browserMgr.BrowserProcesses))
-	for _, cmd := range a.browserMgr.BrowserProcesses {
-		cmds = append(cmds, cmd)
+	processes := make([]browserProcessSnapshot, 0, len(a.browserMgr.Profiles))
+	seenPIDs := make(map[int]struct{})
+	for profileID, profile := range a.browserMgr.Profiles {
+		if profile == nil {
+			continue
+		}
+		cmd := a.browserMgr.BrowserProcesses[profileID]
+		pid := profile.Pid
+		if cmd != nil && cmd.Process != nil && cmd.Process.Pid > 0 {
+			pid = cmd.Process.Pid
+		}
+		if pid <= 0 || (!profile.Running && cmd == nil) {
+			continue
+		}
+		if _, exists := seenPIDs[pid]; exists {
+			continue
+		}
+		seenPIDs[pid] = struct{}{}
+		processes = append(processes, browserProcessSnapshot{profileID: profileID, cmd: cmd, pid: pid})
 	}
 	a.browserMgr.Mutex.Unlock()
 
-	for _, cmd := range cmds {
-		_ = a.stopProcessCmd(cmd)
+	// Keep shutdown sequential. Besides avoiding taskkill races, the PID fallback
+	// closes browser processes recovered after a client restart, where no
+	// os/exec.Cmd object exists in this process anymore.
+	for _, process := range processes {
+		if process.cmd != nil {
+			_ = a.stopProcessCmd(process.cmd)
+		} else {
+			_ = a.stopProcessPID(process.pid)
+		}
 	}
 
 	a.browserMgr.Mutex.Lock()

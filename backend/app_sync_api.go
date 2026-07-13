@@ -54,7 +54,8 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 	// Prefer the main client's shared runtime snapshot. A full Windows CIM scan
 	// is only a throttled fallback, not a two-second polling dependency.
-	if a.applyBrowserRuntimeSnapshot() == 0 {
+	liveSnapshots, totalSnapshots := a.applyBrowserRuntimeSnapshot()
+	if liveSnapshots == 0 || liveSnapshots < totalSnapshots {
 		a.reconcileSyncRuntimeStateThrottled()
 	}
 	// NOTE: 不要在这里加 browserMgr.Mutex 锁！List() 内部会自行加锁，
@@ -122,7 +123,8 @@ func (a *App) StartInputSync(masterProfileId string, followerProfileIds []string
 
 func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []string) error {
 	log := logger.New("SyncAPI")
-	if a.applyBrowserRuntimeSnapshot() == 0 {
+	liveSnapshots, totalSnapshots := a.applyBrowserRuntimeSnapshot()
+	if liveSnapshots == 0 || liveSnapshots < totalSnapshots {
 		a.reconcileSyncRuntimeStateThrottled()
 	}
 

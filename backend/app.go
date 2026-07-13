@@ -656,6 +656,7 @@ func (a *App) BrowserProfileCreate(input BrowserProfileInput) (*BrowserProfile, 
 // BrowserProfileBatchCreate 批量创建实例配置
 // 按照 namePrefix + 起始序号 ~ namePrefix + 结束序号 生成多个实例，共用其他字段
 func (a *App) BrowserProfileBatchCreate(prefix string, startIndex int, count int, input BrowserProfileInput) ([]*BrowserProfile, error) {
+	prefix = strings.TrimSpace(prefix)
 	if prefix == "" {
 		prefix = "实例"
 	}
@@ -665,9 +666,14 @@ func (a *App) BrowserProfileBatchCreate(prefix string, startIndex int, count int
 	if count > 200 {
 		return nil, fmt.Errorf("单次批量创建不能超过200个")
 	}
-	if startIndex < 0 {
+	if startIndex < 1 {
 		startIndex = 1
 	}
+	reservedStart, err := a.reserveProfileNameRange(prefix, startIndex, count)
+	if err != nil {
+		return nil, err
+	}
+	startIndex = reservedStart
 
 	// 剥离 input 里所有「基础身份 + 种子」相关字段（前端面板的预设/默认值会注入一份）。
 	// 否则所有批量创建出来的实例都会共用同一份身份与种子，指纹看起来一模一样。
