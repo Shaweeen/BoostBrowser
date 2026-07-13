@@ -669,11 +669,27 @@ func (a *App) BrowserProfileBatchCreate(prefix string, startIndex int, count int
 	if startIndex < 1 {
 		startIndex = 1
 	}
-	reservedStart, err := a.reserveProfileNameRange(prefix, startIndex, count)
-	if err != nil {
-		return nil, err
+
+	// Validate the complete requested range before creating anything. Deleted
+	// names are intentionally reusable; only profiles that currently exist
+	// block creation. Preflight keeps the batch all-or-nothing for name clashes.
+	existingNames := make(map[string]string)
+	for _, profile := range a.browserMgr.List() {
+		name := strings.TrimSpace(profile.ProfileName)
+		if name != "" {
+			existingNames[strings.ToLower(name)] = name
+		}
 	}
-	startIndex = reservedStart
+	conflicts := make([]string, 0)
+	for i := 0; i < count; i++ {
+		name := fmt.Sprintf("%s-%d", prefix, startIndex+i)
+		if existing, found := existingNames[strings.ToLower(name)]; found {
+			conflicts = append(conflicts, existing)
+		}
+	}
+	if len(conflicts) > 0 {
+		return nil, fmt.Errorf("环境编号已存在：%s。请修改名称前缀或起始序号后重试", strings.Join(conflicts, "、"))
+	}
 
 	// 剥离 input 里所有「基础身份 + 种子」相关字段（前端面板的预设/默认值会注入一份）。
 	// 否则所有批量创建出来的实例都会共用同一份身份与种子，指纹看起来一模一样。

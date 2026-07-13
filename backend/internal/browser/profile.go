@@ -223,6 +223,10 @@ func (m *Manager) Create(input ProfileInput) (*Profile, error) {
 	m.InitData()
 	m.Mutex.Lock()
 	defer m.Mutex.Unlock()
+	input.ProfileName = strings.TrimSpace(input.ProfileName)
+	if conflict := m.findProfileNameConflictLocked(input.ProfileName, ""); conflict != "" {
+		return nil, fmt.Errorf("环境名称已存在：%s。请修改环境名称或编号后重试", conflict)
+	}
 
 	// 实例数量上限已取消（不再受 MaxProfileLimit 约束）
 
@@ -375,6 +379,10 @@ func (m *Manager) Update(profileId string, input ProfileInput) (*Profile, error)
 		log.Error("浏览器配置不存在", logger.F("profile_id", profileId))
 		return nil, fmt.Errorf("profile not found")
 	}
+	input.ProfileName = strings.TrimSpace(input.ProfileName)
+	if conflict := m.findProfileNameConflictLocked(input.ProfileName, profileId); conflict != "" {
+		return nil, fmt.Errorf("环境名称已存在：%s。请修改环境名称或编号后重试", conflict)
+	}
 	profile.ProfileName = input.ProfileName
 	profile.UserDataDir = input.UserDataDir
 	profile.CoreId = normalizeProfileCoreID(input.CoreId)
@@ -400,6 +408,23 @@ func (m *Manager) Update(profileId string, input ProfileInput) (*Profile, error)
 		return nil, err
 	}
 	return profile, nil
+}
+
+func (m *Manager) findProfileNameConflictLocked(name, excludeProfileID string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	for profileID, profile := range m.Profiles {
+		if profile == nil || profileID == excludeProfileID {
+			continue
+		}
+		existing := strings.TrimSpace(profile.ProfileName)
+		if strings.EqualFold(existing, name) {
+			return existing
+		}
+	}
+	return ""
 }
 
 // Delete 删除配置（默认只删除配置记录，不删除浏览器缓存/用户数据目录）

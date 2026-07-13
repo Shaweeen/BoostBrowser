@@ -84,6 +84,7 @@ export function BatchCreatePage() {
     }
 
     setSaving(true)
+	setSaveError('')
     const payload: BrowserProfileInput = {
       ...formData,
       launchArgs: normalizeLaunchArgs(launchArgsText.split('\n')),
@@ -141,7 +142,7 @@ export function BatchCreatePage() {
               placeholder="实例"
             />
           </FormItem>
-          <FormItem label="起始序号" hint="自动跳过历史已使用编号">
+          <FormItem label="起始序号" hint="已删除编号可重新使用；现有编号不可重复">
             <Input
               type="number"
               min={1}
