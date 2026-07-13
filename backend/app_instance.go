@@ -1154,6 +1154,7 @@ func (a *App) markProfileStoppedLocked(profileId string, profile *BrowserProfile
 	if a.launchServer != nil {
 		a.launchServer.ClearActiveProfile(profileId)
 	}
+	a.persistBrowserRuntimeSnapshotLocked()
 }
 
 func (a *App) openBrowserWindowForRunningProfile(profile *BrowserProfile, extraLaunchArgs []string, startURLs []string) error {

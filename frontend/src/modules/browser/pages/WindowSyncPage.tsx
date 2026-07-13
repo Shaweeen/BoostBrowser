@@ -187,44 +187,6 @@ export function WindowSyncPage() {
   }, [loadProfiles])
 
   useEffect(() => {
-    if (!syncPanelMode) return
-    let stopped = false
-    let zeroConfirmations = 0
-    let recoveryGraceUntil = 0
-    const checkRuntimeState = async () => {
-      const status = await getSyncStatus()
-      if (stopped) return
-      if (!status || status.bridgeError) {
-        zeroConfirmations = 0
-        recoveryGraceUntil = Date.now() + 15000
-        // A transient backend/database error must never close the independent
-        // sync process. The next successful poll will reconcile real runtimes.
-        return
-      }
-      if ((status.runningProfileCount ?? 0) > 0) {
-        // Any running browser instance immediately cancels exit.
-        zeroConfirmations = 0
-        return
-      }
-      if (Date.now() < recoveryGraceUntil) {
-        zeroConfirmations = 0
-        return
-      }
-      zeroConfirmations += 1
-      if (zeroConfirmations >= 2) {
-        if (status.active) await stopInputSync()
-        if (!stopped) void ExitWindowSyncPanel().catch(() => {})
-      }
-    }
-    void checkRuntimeState()
-    const timer = window.setInterval(() => { void checkRuntimeState() }, 1000)
-    return () => {
-      stopped = true
-      window.clearInterval(timer)
-    }
-  }, [syncPanelMode])
-
-  useEffect(() => {
     const screen = window.screen
     if (!screen) return
     const width = screen.availWidth || screen.width

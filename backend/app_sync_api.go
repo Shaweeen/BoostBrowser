@@ -5,6 +5,7 @@ package backend
 import (
 	"fmt"
 	"sync"
+	"time"
 	"unsafe"
 
 	"boost-browser/backend/internal/logger"
@@ -24,6 +25,11 @@ var syncState struct {
 	followerIds []string
 	masterId    string
 	active      bool
+}
+
+var syncRuntimeDiscovery struct {
+	sync.Mutex
+	lastAttempt time.Time
 }
 
 // SyncProfileInfo 同步页面的实例信息
@@ -46,7 +52,11 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 }
 
 func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
-	a.reconcileBrowserRuntimeStateOnce()
+	// Prefer the main client's shared runtime snapshot. A full Windows CIM scan
+	// is only a throttled fallback, not a two-second polling dependency.
+	if a.applyBrowserRuntimeSnapshot() == 0 {
+		a.reconcileSyncRuntimeStateThrottled()
+	}
 	// NOTE: 不要在这里加 browserMgr.Mutex 锁！List() 内部会自行加锁，
 	// 如果外层再锁一次会导致死锁（Go sync.Mutex 不可重入）。
 	profiles := a.browserMgr.List()
@@ -88,6 +98,17 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 	return result
 }
 
+func (a *App) reconcileSyncRuntimeStateThrottled() {
+	syncRuntimeDiscovery.Lock()
+	if time.Since(syncRuntimeDiscovery.lastAttempt) < 10*time.Second {
+		syncRuntimeDiscovery.Unlock()
+		return
+	}
+	syncRuntimeDiscovery.lastAttempt = time.Now()
+	syncRuntimeDiscovery.Unlock()
+	a.reconcileBrowserRuntimeStateOnce()
+}
+
 // StartInputSync 启动输入同步
 // masterProfileId: 主控实例 ID
 // followerProfileIds: 跟随实例 ID 列表
@@ -101,7 +122,9 @@ func (a *App) StartInputSync(masterProfileId string, followerProfileIds []string
 
 func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []string) error {
 	log := logger.New("SyncAPI")
-	a.reconcileBrowserRuntimeStateOnce()
+	if a.applyBrowserRuntimeSnapshot() == 0 {
+		a.reconcileSyncRuntimeStateThrottled()
+	}
 
 	a.browserMgr.Mutex.Lock()
 	defer a.browserMgr.Mutex.Unlock()

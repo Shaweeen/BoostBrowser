@@ -103,6 +103,7 @@ func (a *App) markProfileRunningLocked(profileId string, profile *BrowserProfile
 		// a.startWindowBoundsTracker(profileId, debugPort)
 		a.startLastTabsTracker(profileId, debugPort)
 	}
+	a.persistBrowserRuntimeSnapshotLocked()
 }
 
 func (a *App) markProfileDebugReadyLocked(profile *BrowserProfile, debugPort int) {

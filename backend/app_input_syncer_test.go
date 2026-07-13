@@ -3,8 +3,13 @@
 package backend
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
+
+	"boost-browser/backend/internal/browser"
+	"boost-browser/backend/internal/config"
 
 	"golang.org/x/sys/windows"
 )
@@ -81,5 +86,33 @@ func TestWindowEnumerationCallbacksAreProcessReusable(t *testing.T) {
 		if processWindowEnumCallback != processCallback || chromeRenderChildEnumCallback != renderCallback || browserWindowRestoreEnumCallback != restoreCallback {
 			t.Fatal("Win32 callback address changed; repeated lookup would exhaust the callback table")
 		}
+	}
+}
+
+func TestMainProcessPersistsBrowserRuntimeSnapshot(t *testing.T) {
+	root := t.TempDir()
+	app := NewApp(root, false)
+	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
+	app.browserMgr.Profiles["profile-1"] = &browser.Profile{
+		ProfileId: "profile-1",
+		Running:   true,
+		Pid:       4321,
+		DebugPort: 32123,
+	}
+
+	app.browserMgr.Mutex.Lock()
+	app.persistBrowserRuntimeSnapshotLocked()
+	app.browserMgr.Mutex.Unlock()
+
+	data, err := os.ReadFile(filepath.Join(root, "data", "browser-runtime.json"))
+	if err != nil {
+		t.Fatalf("read runtime snapshot: %v", err)
+	}
+	var snapshot browserRuntimeSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatalf("decode runtime snapshot: %v", err)
+	}
+	if len(snapshot.Entries) != 1 || snapshot.Entries[0].ProfileID != "profile-1" || snapshot.Entries[0].PID != 4321 {
+		t.Fatalf("unexpected runtime snapshot: %+v", snapshot)
 	}
 }
