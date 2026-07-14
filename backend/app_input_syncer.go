@@ -105,6 +105,7 @@ type SyncConfig struct {
 
 type cdpKeyEvent struct {
 	ports     []int
+	hwnds     []windows.HWND
 	down      bool
 	vk        uint32
 	character rune
@@ -1025,8 +1026,9 @@ func (s *InputSyncer) keyHookCallback(nCode int, wParam uintptr, lParam uintptr)
 func (s *InputSyncer) dispatchPageKeyViaCDP(msg uint32, vk, scanCode, flags uint32) {
 	s.mu.Lock()
 	ports := append([]int(nil), s.followerDebug...)
+	hwnds := append([]windows.HWND(nil), s.followerHwnds...)
 	s.mu.Unlock()
-	if len(ports) == 0 {
+	if len(hwnds) == 0 {
 		return
 	}
 	ctrl := isKeyDown(VK_CONTROL)
@@ -1044,7 +1046,7 @@ func (s *InputSyncer) dispatchPageKeyViaCDP(msg uint32, vk, scanCode, flags uint
 	}
 	down := msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN
 	ch := toUnicode(uint16(vk), uint16(scanCode), (flags&0x01) != 0)
-	event := cdpKeyEvent{ports: ports, down: down, vk: vk, character: ch, modifiers: modifiers}
+	event := cdpKeyEvent{ports: ports, hwnds: hwnds, down: down, vk: vk, character: ch, modifiers: modifiers}
 	select {
 	case s.cdpKeyQueue <- event:
 	default:
@@ -1059,15 +1061,22 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
 			return
 		case event := <-queue:
 			var wg sync.WaitGroup
-			for _, port := range event.ports {
-				if port <= 0 {
-					continue
+			for i, hwnd := range event.hwnds {
+				port := 0
+				if i < len(event.ports) {
+					port = event.ports[i]
 				}
 				wg.Add(1)
-				go func(debugPort int) {
+				go func(debugPort int, follower windows.HWND) {
 					defer wg.Done()
+					if debugPort <= 0 {
+						s.dispatchPageKeyFallback(follower, event)
+						return
+					}
 					if event.down && event.character != 0 && event.modifiers&3 == 0 {
-						_, _ = cdpCall(debugPort, "Input.insertText", map[string]any{"text": string(event.character)})
+						if _, err := cdpCall(debugPort, "Input.insertText", map[string]any{"text": string(event.character)}); err != nil {
+							s.dispatchPageKeyFallback(follower, event)
+						}
 						return
 					}
 					params := map[string]any{
@@ -1075,12 +1084,33 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
 						"windowsVirtualKeyCode": int(event.vk), "nativeVirtualKeyCode": int(event.vk),
 						"modifiers": event.modifiers, "key": cdpKeyName(event.vk),
 					}
-					_, _ = cdpCall(debugPort, "Input.dispatchKeyEvent", params)
-				}(port)
+					if _, err := cdpCall(debugPort, "Input.dispatchKeyEvent", params); err != nil {
+						s.dispatchPageKeyFallback(follower, event)
+					}
+				}(port, hwnd)
 			}
 			wg.Wait()
 		}
 	}
+}
+
+func (s *InputSyncer) dispatchPageKeyFallback(hwnd windows.HWND, event cdpKeyEvent) {
+	if !isWindow(hwnd) {
+		return
+	}
+	target := findChromeRenderChild(hwnd)
+	if target == 0 {
+		target = hwnd
+	}
+	if event.down && event.character != 0 && event.modifiers&3 == 0 {
+		s.postMessageWithRandomDelay(target, WM_CHAR, uintptr(event.character), makeKeyLParam(event.vk, true))
+		return
+	}
+	message := uintptr(WM_KEYUP)
+	if event.down {
+		message = WM_KEYDOWN
+	}
+	s.postMessageWithRandomDelay(target, message, uintptr(event.vk), makeKeyLParam(event.vk, event.down))
 }
 
 func (s *InputSyncer) dispatchPageMouseViaCDP(msg uint32, screenX, screenY int) {
@@ -1109,22 +1139,49 @@ func (s *InputSyncer) dispatchPageMouseViaCDP(msg uint32, screenX, screenY int) 
 	if msg == WM_LBUTTONUP || msg == WM_RBUTTONUP || msg == WM_MBUTTONUP {
 		eventType = "mouseReleased"
 	}
-	for i, port := range ports {
-		if port <= 0 || i >= len(hwnds) {
+	for i, hwnd := range hwnds {
+		port := 0
+		if i < len(ports) {
+			port = ports[i]
+		}
+		if port <= 0 {
+			s.dispatchPageMouseFallback(hwnd, msg, screenX, screenY)
 			continue
 		}
-		render := findChromeRenderChild(hwnds[i])
+		render := findChromeRenderChild(hwnd)
 		if render == 0 {
+			s.dispatchPageMouseFallback(hwnd, msg, screenX, screenY)
 			continue
 		}
 		fl, ft, fr, fb := getWindowRect(render)
 		x, y := rx*float64(fr-fl), ry*float64(fb-ft)
-		go func(debugPort int, px, py float64) {
-			_, _ = cdpCall(debugPort, "Input.dispatchMouseEvent", map[string]any{
+		go func(debugPort int, follower windows.HWND, px, py float64) {
+			if _, err := cdpCall(debugPort, "Input.dispatchMouseEvent", map[string]any{
 				"type": eventType, "x": px, "y": py, "button": button, "clickCount": 1,
-			})
-		}(port, x, y)
+			}); err != nil {
+				s.dispatchPageMouseFallback(follower, msg, screenX, screenY)
+			}
+		}(port, hwnd, x, y)
 	}
+}
+
+func (s *InputSyncer) dispatchPageMouseFallback(hwnd windows.HWND, msg uint32, screenX, screenY int) {
+	if !isWindow(hwnd) {
+		return
+	}
+	lparam, ok := mapCoordsChromeManager(screenX, screenY, s.masterHwnd, hwnd)
+	if !ok {
+		return
+	}
+	wparam := uintptr(0)
+	if msg == WM_LBUTTONDOWN {
+		wparam = MK_LBUTTON
+	} else if msg == WM_RBUTTONDOWN {
+		wparam = MK_RBUTTON
+	} else if msg == WM_MBUTTONDOWN {
+		wparam = MK_MBUTTON
+	}
+	s.postMessageWithRandomDelay(hwnd, uintptr(msg), wparam, lparam)
 }
 
 func cdpKeyName(vk uint32) string {
