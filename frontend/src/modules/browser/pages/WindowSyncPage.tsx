@@ -89,8 +89,11 @@ export function WindowSyncPage() {
   const refreshTimer = useRef<ReturnType<typeof setInterval>>()
   const loadProfilesSeq = useRef(0)
   const pendingManualRefreshes = useRef(0)
+  const silentRefreshInFlight = useRef(false)
   const loadProfiles = useCallback(async (options?: { silent?: boolean }) => {
     const silent = options?.silent === true
+    if (silent && silentRefreshInFlight.current) return
+    if (silent) silentRefreshInFlight.current = true
     const seq = ++loadProfilesSeq.current
     if (!silent) {
       pendingManualRefreshes.current += 1
@@ -127,6 +130,7 @@ export function WindowSyncPage() {
       })
       setMasterId(prev => (prev && runningIds.has(prev) ? prev : null))
     } finally {
+      if (silent) silentRefreshInFlight.current = false
       if (!silent) {
         pendingManualRefreshes.current = Math.max(0, pendingManualRefreshes.current - 1)
         if (pendingManualRefreshes.current === 0) {
@@ -152,7 +156,7 @@ export function WindowSyncPage() {
     void loadProfiles({ silent: true })
     refreshTimer.current = setInterval(() => {
       void loadProfiles({ silent: true })
-    }, 2000)
+    }, 1000)
 
     const handleWindowFocus = () => {
       void loadProfiles({ silent: true })
@@ -185,46 +189,6 @@ export function WindowSyncPage() {
       offUpdated?.()
     }
   }, [loadProfiles])
-
-  useEffect(() => {
-    if (!syncPanelMode) return
-    let stopped = false
-    let zeroConfirmations = 0
-    let bridgeFailures = 0
-    let recoveryGraceUntil = 0
-    const checkRuntimeState = async () => {
-      const status = await getSyncStatus()
-      if (stopped) return
-      if (!status || status.bridgeError) {
-        bridgeFailures += 1
-        zeroConfirmations = 0
-        recoveryGraceUntil = Date.now() + 15000
-        if (bridgeFailures >= 30) void ExitWindowSyncPanel().catch(() => {})
-        return
-      }
-      bridgeFailures = 0
-      if ((status.runningProfileCount ?? 0) > 0) {
-        // Any client-owned running instance immediately cancels exit.
-        zeroConfirmations = 0
-        return
-      }
-      if (Date.now() < recoveryGraceUntil) {
-        zeroConfirmations = 0
-        return
-      }
-      zeroConfirmations += 1
-      if (zeroConfirmations >= 2) {
-        if (status.active) await stopInputSync()
-        if (!stopped) void ExitWindowSyncPanel().catch(() => {})
-      }
-    }
-    void checkRuntimeState()
-    const timer = window.setInterval(() => { void checkRuntimeState() }, 1000)
-    return () => {
-      stopped = true
-      window.clearInterval(timer)
-    }
-  }, [syncPanelMode])
 
   useEffect(() => {
     const screen = window.screen

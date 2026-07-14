@@ -4,6 +4,7 @@ package backend
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"unsafe"
 
@@ -198,70 +199,86 @@ func getClientSize(hwnd windows.HWND) (int, int, bool) {
 // 如果直接按标题最长选择，会给这些 IME 辅助窗口设置任务栏 badge，导致 Alt+Tab/任务栏
 // 出现“不应该有”的 Default IME 缩略图。因此这里优先选择 Chrome_WidgetWin_* 主窗口，
 // 并显式排除 IME/输入法辅助窗口。
-func findProcessWindow(pid int) (windows.HWND, error) {
-	type winCandidate struct {
-		hwnd     windows.HWND
-		title    string
-		class    string
-		titleLen int
-		score    int
+type processWindowCandidate struct {
+	hwnd  windows.HWND
+	score int
+}
+
+type processWindowSearch struct {
+	pid        int
+	candidates []processWindowCandidate
+}
+
+// EnumWindows callbacks allocated through windows.NewCallback are backed by a
+// process-wide, finite Go callback table and cannot be released. Creating one
+// on every lookup eventually terminates the Wails host (especially while badge
+// retries and input sync repeatedly resolve nine or more Chromium windows).
+// Keep exactly one callback and pass per-call state through lParam instead.
+var processWindowEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lParam uintptr) uintptr {
+	defer func() {
+		_ = recover()
+	}()
+	search := (*processWindowSearch)(unsafe.Pointer(lParam))
+	if search == nil {
+		return 0
 	}
-	var candidates []winCandidate
+	var windowPID uint32
+	procGetWindowThreadProcessID.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&windowPID)))
+	if int(windowPID) != search.pid {
+		return 1 // 继续
+	}
 
-	cb := windows.NewCallback(func(hwnd windows.HWND, lParam uintptr) uintptr {
-		var windowPID uint32
-		procGetWindowThreadProcessID.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&windowPID)))
-		if int(windowPID) != pid {
-			return 1 // 继续
-		}
+	visible, _, _ := procIsWindowVisible.Call(uintptr(hwnd))
+	if visible == 0 {
+		return 1
+	}
 
-		visible, _, _ := procIsWindowVisible.Call(uintptr(hwnd))
-		if visible == 0 {
+	title := getWindowTitle(hwnd)
+	className := getWindowClassName(hwnd)
+	if isAuxiliaryIMEWindowTitleOrClass(title, className) {
+		return 1
+	}
+	// Only a real Chrome top-level browser frame may participate in sync.
+	// Chrome_WidgetWin_0 and titled renderer/extension helper HWNDs can be
+	// visible transiently; selecting one makes tiling/show operations surface
+	// an undecorated white window over the page.
+	isPrimaryClass := strings.EqualFold(className, "Chrome_WidgetWin_1") || strings.EqualFold(className, "Chrome_MainWindow")
+	isCloakTopLevelFallback := strings.EqualFold(className, "Chrome_WidgetWin_0") && strings.TrimSpace(title) != ""
+	if !isPrimaryClass && !isCloakTopLevelFallback {
+		return 1
+	}
+	// Chrome_WidgetWin_0 is also used by transient helpers. Only accept an
+	// unowned, titled top-level frame as the CloakBrowser fallback.
+	if isCloakTopLevelFallback {
+		const gwOwner = 4
+		owner, _, _ := procGetWindow.Call(uintptr(hwnd), gwOwner)
+		if owner != 0 {
 			return 1
 		}
+	}
+	clientW, clientH, ok := getClientSize(hwnd)
+	if !ok || clientW < 320 || clientH < 240 || clientW > 10000 || clientH > 10000 {
+		return 1
+	}
 
-		title := getWindowTitle(hwnd)
-		className := getWindowClassName(hwnd)
-		if isAuxiliaryIMEWindowTitleOrClass(title, className) {
-			return 1
-		}
-		// Only a real Chrome top-level browser frame may participate in sync.
-		// Chrome_WidgetWin_0 and titled renderer/extension helper HWNDs can be
-		// visible transiently; selecting one makes tiling/show operations surface
-		// an undecorated white window over the page.
-		isPrimaryClass := strings.EqualFold(className, "Chrome_WidgetWin_1") || strings.EqualFold(className, "Chrome_MainWindow")
-		isCloakTopLevelFallback := strings.EqualFold(className, "Chrome_WidgetWin_0") && strings.TrimSpace(title) != ""
-		if !isPrimaryClass && !isCloakTopLevelFallback {
-			return 1
-		}
-		// Chrome_WidgetWin_0 is also used by transient helpers. Only accept an
-		// unowned, titled top-level frame as the CloakBrowser fallback.
-		if isCloakTopLevelFallback {
-			const gwOwner = 4
-			owner, _, _ := procGetWindow.Call(uintptr(hwnd), gwOwner)
-			if owner != 0 {
-				return 1
-			}
-		}
-		clientW, clientH, ok := getClientSize(hwnd)
-		if !ok || clientW < 320 || clientH < 240 || clientW > 10000 || clientH > 10000 {
-			return 1
-		}
+	score := len(title)
+	score += 10000 + clientW*clientH/1000
+	search.candidates = append(search.candidates, processWindowCandidate{hwnd: hwnd, score: score})
+	return 1 // 继续找
+})
 
-		score := len(title)
-		score += 10000 + clientW*clientH/1000
-		candidates = append(candidates, winCandidate{hwnd: hwnd, title: title, class: className, titleLen: len(title), score: score})
-		return 1 // 继续找
-	})
+func findProcessWindow(pid int) (windows.HWND, error) {
+	search := &processWindowSearch{pid: pid}
 
-	procEnumWindows.Call(cb, 0)
+	procEnumWindows.Call(processWindowEnumCallback, uintptr(unsafe.Pointer(search)))
+	runtime.KeepAlive(search)
 
-	if len(candidates) == 0 {
+	if len(search.candidates) == 0 {
 		return 0, fmt.Errorf("未找到 PID=%d 的浏览器主窗口", pid)
 	}
 
-	best := candidates[0]
-	for _, c := range candidates[1:] {
+	best := search.candidates[0]
+	for _, c := range search.candidates[1:] {
 		if c.score > best.score {
 			best = c
 		}

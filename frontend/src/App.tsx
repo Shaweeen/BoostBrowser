@@ -250,10 +250,12 @@ function CloseConfirmModal() {
       try {
         await saveMainWindowBoundsSnapshot()
       } catch {}
-      await Promise.race([
-        ForceQuitApp(),
-        new Promise((resolve) => setTimeout(resolve, 1200)),
-      ])
+      // ForceQuit closes tracked Chromium processes sequentially before the
+      // Wails host exits. Never race it with an unconditional early Quit: with
+      // many environments that used to terminate the manager first and leave
+      // browser windows behind.
+      await ForceQuitApp()
+      return
     } catch (error) {
       console.error('ForceQuit failed, falling back to runtime.Quit()', error)
     }

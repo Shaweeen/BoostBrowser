@@ -186,16 +186,17 @@ func (a *App) CloseWindowSyncPanel() {
 		return
 	}
 	a.syncPanelCloseMu.Lock()
+	a.syncPanelCloseAllowed = true
 	ctx := a.wailsCtx
 	a.syncPanelCloseMu.Unlock()
-	a.RecordLifecycleEvent("sync-panel-close-request", []string{"action=hide-panel", "sync=preserved"})
+	a.RecordLifecycleEvent("sync-panel-close-request", []string{"action=quit-panel", "reason=user-click-x"})
 	if ctx != nil {
-		runtime.WindowHide(ctx)
+		runtime.Quit(ctx)
 	}
 }
 
-// ExitWindowSyncPanel terminates only the assistant UI process. The sync
-// engine lives in the main client and is stopped explicitly by the caller.
+// ExitWindowSyncPanel terminates the independent assistant process. Its
+// OnShutdown callback releases panel-owned hooks without touching browsers.
 func (a *App) ExitWindowSyncPanel() {
 	if !syncPanelMode {
 		return
@@ -204,7 +205,7 @@ func (a *App) ExitWindowSyncPanel() {
 	a.syncPanelCloseAllowed = true
 	ctx := a.wailsCtx
 	a.syncPanelCloseMu.Unlock()
-	a.RecordLifecycleEvent("sync-panel-exit", []string{"action=quit", "reason=user-or-no-running-environments"})
+	a.RecordLifecycleEvent("sync-panel-exit", []string{"action=quit", "reason=user-explicit-exit"})
 	if ctx != nil {
 		runtime.Quit(ctx)
 	}

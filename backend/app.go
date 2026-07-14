@@ -329,8 +329,12 @@ func (a *App) startup(ctx context.Context) {
 	// restart loop. Cache cleanup remains available through the explicit UI/API.
 	a.lifecycleLog("cache-auto-clean", "state=deferred", "reason=startup-stability")
 	// a.startBrowserRuntimeReconciler()
-	if !a.panelMode {
-		a.startSyncBridge()
+	if a.panelMode {
+		a.lifecycleLog("sync-engine-owner", "mode=panel-process", "isolation=main-client")
+	} else {
+		// 全局鼠标/键盘 Hook 不得运行在主 Wails 宿主中。同步面板是独立
+		// 进程并直接持有同步引擎，主客户端崩溃或重启时同步仍保持运行。
+		a.lifecycleLog("sync-engine-owner", "mode=external-panel", "bridge=disabled")
 	}
 
 	// v1.6.12: 暂停启动后台代理测速定时器。
@@ -409,6 +413,7 @@ func (a *App) applyRuntimeConfig(cfg config.RuntimeConfig) {
 func (a *App) shutdown(ctx context.Context) {
 	log := logger.New("App")
 	a.lifecycleLog("shutdown", fmt.Sprintf("mode=%d", a.quitMode), fmt.Sprintf("forceQuit=%t", a.forceQuit))
+	stopPanelOwnedSync(a)
 	if a.shouldStopRuntimeServicesOnShutdown() {
 		log.Info("应用正在关闭...")
 		a.stopRuntimeServices()
@@ -651,6 +656,7 @@ func (a *App) BrowserProfileCreate(input BrowserProfileInput) (*BrowserProfile, 
 // BrowserProfileBatchCreate 批量创建实例配置
 // 按照 namePrefix + 起始序号 ~ namePrefix + 结束序号 生成多个实例，共用其他字段
 func (a *App) BrowserProfileBatchCreate(prefix string, startIndex int, count int, input BrowserProfileInput) ([]*BrowserProfile, error) {
+	prefix = strings.TrimSpace(prefix)
 	if prefix == "" {
 		prefix = "实例"
 	}
@@ -660,8 +666,29 @@ func (a *App) BrowserProfileBatchCreate(prefix string, startIndex int, count int
 	if count > 200 {
 		return nil, fmt.Errorf("单次批量创建不能超过200个")
 	}
-	if startIndex < 0 {
+	if startIndex < 1 {
 		startIndex = 1
+	}
+
+	// Validate the complete requested range before creating anything. Deleted
+	// names are intentionally reusable; only profiles that currently exist
+	// block creation. Preflight keeps the batch all-or-nothing for name clashes.
+	existingNames := make(map[string]string)
+	for _, profile := range a.browserMgr.List() {
+		name := strings.TrimSpace(profile.ProfileName)
+		if name != "" {
+			existingNames[strings.ToLower(name)] = name
+		}
+	}
+	conflicts := make([]string, 0)
+	for i := 0; i < count; i++ {
+		name := fmt.Sprintf("%s-%d", prefix, startIndex+i)
+		if existing, found := existingNames[strings.ToLower(name)]; found {
+			conflicts = append(conflicts, existing)
+		}
+	}
+	if len(conflicts) > 0 {
+		return nil, fmt.Errorf("环境编号已存在：%s。请修改名称前缀或起始序号后重试", strings.Join(conflicts, "、"))
 	}
 
 	// 剥离 input 里所有「基础身份 + 种子」相关字段（前端面板的预设/默认值会注入一份）。

@@ -5,6 +5,7 @@ package backend
 import (
 	"boost-browser/backend/internal/logger"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -200,42 +201,55 @@ func startExtensionPopupSizer(pid int) {
 // windows owned by the launched browser process back onscreen after automatic
 // extension targets were closed, so startup wallet/onboarding pages never flash
 // onscreen while later manual toolbar clicks still open normally.
+type browserWindowRestoreSearch struct {
+	pidSet map[uint32]bool
+}
+
+var browserWindowRestoreEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lParam uintptr) uintptr {
+	defer func() {
+		_ = recover()
+	}()
+	search := (*browserWindowRestoreSearch)(unsafe.Pointer(lParam))
+	if search == nil {
+		return 0
+	}
+	var windowPID uint32
+	procGetWindowThreadProcessID.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&windowPID)))
+	if !search.pidSet[windowPID] {
+		return 1
+	}
+
+	title := strings.TrimSpace(getWindowTitle(hwnd))
+	className := strings.TrimSpace(getWindowClassName(hwnd))
+	if title == "" || isAuxiliaryIMEWindowTitleOrClass(title, className) || isStrongExtensionPopupTitle(strings.ToLower(title)) {
+		return 1
+	}
+
+	procShowWindow.Call(uintptr(hwnd), swRestore)
+	if rect, ok := getTopLevelWindowRect(hwnd); ok {
+		if x, y, w, h, shouldMove := startupBrowserWindowPlacement(rect); shouldMove {
+			procSetWindowPos.Call(
+				uintptr(hwnd),
+				0,
+				uintptr(x),
+				uintptr(y),
+				uintptr(w),
+				uintptr(h),
+				SWP_NOZORDER|SWP_SHOWWINDOW,
+			)
+		}
+	}
+	procSetForegroundWindow.Call(uintptr(hwnd))
+	return 1
+})
+
 func restoreBrowserWindowsAfterStartup(pid int) {
 	if pid <= 0 {
 		return
 	}
-	pidSet := collectProcessTreePIDs(pid)
-	cb := windows.NewCallback(func(hwnd windows.HWND, lParam uintptr) uintptr {
-		var windowPID uint32
-		procGetWindowThreadProcessID.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&windowPID)))
-		if !pidSet[windowPID] {
-			return 1
-		}
-
-		title := strings.TrimSpace(getWindowTitle(hwnd))
-		className := strings.TrimSpace(getWindowClassName(hwnd))
-		if title == "" || isAuxiliaryIMEWindowTitleOrClass(title, className) || isStrongExtensionPopupTitle(strings.ToLower(title)) {
-			return 1
-		}
-
-		procShowWindow.Call(uintptr(hwnd), swRestore)
-		if rect, ok := getTopLevelWindowRect(hwnd); ok {
-			if x, y, w, h, shouldMove := startupBrowserWindowPlacement(rect); shouldMove {
-				procSetWindowPos.Call(
-					uintptr(hwnd),
-					0,
-					uintptr(x),
-					uintptr(y),
-					uintptr(w),
-					uintptr(h),
-					SWP_NOZORDER|SWP_SHOWWINDOW,
-				)
-			}
-		}
-		procSetForegroundWindow.Call(uintptr(hwnd))
-		return 1
-	})
-	procEnumWindows.Call(cb, 0)
+	search := &browserWindowRestoreSearch{pidSet: collectProcessTreePIDs(pid)}
+	procEnumWindows.Call(browserWindowRestoreEnumCallback, uintptr(unsafe.Pointer(search)))
+	runtime.KeepAlive(search)
 }
 
 func startupBrowserWindowPlacement(rect winRect) (int, int, int, int, bool) {

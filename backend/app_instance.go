@@ -1154,6 +1154,7 @@ func (a *App) markProfileStoppedLocked(profileId string, profile *BrowserProfile
 	if a.launchServer != nil {
 		a.launchServer.ClearActiveProfile(profileId)
 	}
+	a.persistBrowserRuntimeSnapshotLocked()
 }
 
 func (a *App) openBrowserWindowForRunningProfile(profile *BrowserProfile, extraLaunchArgs []string, startURLs []string) error {
@@ -1235,21 +1236,8 @@ func (a *App) stopProcessCmd(cmd *exec.Cmd) error {
 
 	// Windows 下优先非强制 taskkill，尽量让 Chromium 走正常退出路径，减少“恢复页面”提示。
 	if stdruntime.GOOS == "windows" {
-		pid := cmd.Process.Pid
-		if pid > 0 {
-			softKillCmd := exec.Command("taskkill", "/PID", fmt.Sprintf("%d", pid), "/T")
-			hideWindow(softKillCmd)
-			if err := softKillCmd.Run(); err == nil {
-				if waitProcessExitWindows(pid, 3*time.Second) {
-					return nil
-				}
-				forceKillCmd := exec.Command("taskkill", "/F", "/PID", fmt.Sprintf("%d", pid), "/T")
-				hideWindow(forceKillCmd)
-				if forceErr := forceKillCmd.Run(); forceErr == nil {
-					_ = waitProcessExitWindows(pid, 2*time.Second)
-					return nil
-				}
-			}
+		if err := a.stopProcessPID(cmd.Process.Pid); err == nil {
+			return nil
 		}
 	}
 
@@ -1258,6 +1246,34 @@ func (a *App) stopProcessCmd(cmd *exec.Cmd) error {
 		return nil
 	}
 	return err
+}
+
+func (a *App) stopProcessPID(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	if stdruntime.GOOS == "windows" {
+		softKillCmd := exec.Command("taskkill", "/PID", fmt.Sprintf("%d", pid), "/T")
+		hideWindow(softKillCmd)
+		if err := softKillCmd.Run(); err == nil && waitProcessExitWindows(pid, 3*time.Second) {
+			return nil
+		}
+		forceKillCmd := exec.Command("taskkill", "/F", "/PID", fmt.Sprintf("%d", pid), "/T")
+		hideWindow(forceKillCmd)
+		if err := forceKillCmd.Run(); err != nil {
+			return err
+		}
+		_ = waitProcessExitWindows(pid, 2*time.Second)
+		return nil
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if err := process.Kill(); err != nil && !isProcessAlreadyFinished(err) {
+		return err
+	}
+	return nil
 }
 
 func isProcessAlreadyFinished(err error) bool {

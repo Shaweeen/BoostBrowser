@@ -15,12 +15,14 @@
 #   -SourceZip <path>        Use an already downloaded cloakbrowser-windows-x64.zip
 #   -AssetRoot <path>        Asset root containing chrome\..., defaults to repo root
 #   -ManagerOnly             Build redistributable manager without bundled runtimes
+#   -NoInstall               Build Setup only; do not launch it after packaging
 
 param(
     [switch]$SkipKernelInstall,
     [switch]$SkipGoogleFallback,
     [switch]$RunGoTests,
     [switch]$ManagerOnly,
+    [switch]$NoInstall,
     [string]$SourceZip = "",
     [string]$AssetRoot = ""
 )
@@ -28,6 +30,8 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
+$BuildVersion = (Get-Content "$RepoRoot\wails.json" -Raw | ConvertFrom-Json).info.productVersion
+if ([string]::IsNullOrWhiteSpace($BuildVersion)) { throw "Missing info.productVersion in wails.json" }
 
 if ([string]::IsNullOrWhiteSpace($AssetRoot)) { $AssetRoot = $RepoRoot }
 $env:BOOST_KERNEL_SRC = $AssetRoot
@@ -169,4 +173,21 @@ Run-Step "Build output" {
     Write-Host ""
     $edition = if ($ManagerOnly) { 'public manager' } else { 'private full' }
     Write-Host "Done. $edition installer is in: $RepoRoot\build\release" -ForegroundColor Green
+}
+
+if (-not $NoInstall) {
+    Run-Step "Starting Setup installer" {
+        $setupName = if ($ManagerOnly) {
+            "BrowserStudio-Manager-Setup-v$BuildVersion.exe"
+        } else {
+            "BrowserStudio-Private-Setup-v$BuildVersion.exe"
+        }
+        $setupPath = Join-Path "$RepoRoot\build\release" $setupName
+        if (-not (Test-Path -LiteralPath $setupPath)) { throw "Missing completed Setup installer: $setupPath" }
+        Write-Host "Starting: $setupPath" -ForegroundColor Green
+        $setupProcess = Start-Process -FilePath $setupPath -Wait -PassThru
+        if ($setupProcess.ExitCode -ne 0) { throw "Setup installer failed or was cancelled: exit $($setupProcess.ExitCode)" }
+    }
+} else {
+    Write-Host "Setup launch skipped by -NoInstall" -ForegroundColor Yellow
 }
