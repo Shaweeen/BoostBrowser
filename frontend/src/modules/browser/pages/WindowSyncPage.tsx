@@ -26,7 +26,6 @@ import {
   type SyncProfileInfo,
   type SyncStatus,
   type TileLayoutMode,
-  updateSyncRandomDelay,
 } from '../api_sync'
 
 function compareProfileName(a: SyncProfileInfo, b: SyncProfileInfo) {
@@ -37,7 +36,6 @@ function compareProfileName(a: SyncProfileInfo, b: SyncProfileInfo) {
 
 type FilterMode = 'all' | 'selected' | 'master' | 'followers'
 type ToolbarMenu = 'layout' | null
-type DelayPreset = '1ms' | '5ms' | 'random'
 
 const FILTER_OPTIONS: Array<{ value: FilterMode; label: string }> = [
   { value: 'all', label: '全部实例' },
@@ -83,7 +81,6 @@ export function WindowSyncPage() {
   const [displayLabel, setDisplayLabel] = useState('当前显示器')
   const [, setPanelFocused] = useState(false)
   const [, setPanelHovered] = useState(false)
-  const [delayPreset, setDelayPreset] = useState<DelayPreset>('1ms')
 
   const refreshTimer = useRef<ReturnType<typeof setInterval>>()
   const loadProfilesSeq = useRef(0)
@@ -106,12 +103,6 @@ export function WindowSyncPage() {
       const sorted = [...list].sort(compareProfileName)
       setProfiles(sorted)
       setSyncStatus(status)
-      if (status) {
-        if (status.randomDelayMinMs === 5 && status.randomDelayMaxMs === 5) setDelayPreset('5ms')
-        else if (status.randomDelayMinMs === 1 && status.randomDelayMaxMs === 5) setDelayPreset('random')
-        else setDelayPreset('1ms')
-      }
-
       if (status?.active) {
         const nextSelected = new Set([status.masterId, ...(status.followerIds || [])].filter(Boolean))
         setSelectedIds(nextSelected)
@@ -476,8 +467,6 @@ export function WindowSyncPage() {
       toast.error(`启动同步失败：${err}`)
       return
     }
-    const [delayMin, delayMax] = delayPreset === '5ms' ? [5, 5] : delayPreset === 'random' ? [1, 5] : [1, 1]
-    await updateSyncRandomDelay(true, delayMin, delayMax)
     setPanelPresentation('compact')
     setShowSyncControls(false)
     await loadProfiles()
@@ -493,18 +482,6 @@ export function WindowSyncPage() {
     setPanelPresentation('compact')
     setToolbarMenu(null)
     await loadProfiles()
-  }
-
-  const handleDelayPresetChange = async (preset: DelayPreset) => {
-    if (!isSyncing) return
-    const [minMs, maxMs] = preset === '5ms' ? [5, 5] : preset === 'random' ? [1, 5] : [1, 1]
-    const err = await updateSyncRandomDelay(true, minMs, maxMs)
-    if (err) {
-      toast.error(`更新随机延时失败：${err}`)
-      return
-    }
-    setDelayPreset(preset)
-    setSyncStatus(prev => prev ? { ...prev, randomDelayEnabled: true, randomDelayMinMs: minMs, randomDelayMaxMs: maxMs } : prev)
   }
 
   const handleTile = async (layout: TileLayoutMode = tileLayout, _toastLabel?: string) => {
@@ -791,22 +768,6 @@ export function WindowSyncPage() {
               >
                 <Columns className="h-4 w-4" />横排
               </button>
-            </div>
-
-            <div className="mt-2 rounded-2xl border border-white/14 bg-white/8 p-2.5">
-              <span className="text-[13px] text-white">同步延时</span>
-              <div className="mt-2 grid grid-cols-3 gap-2">
-                {([['1ms', '1 ms'], ['5ms', '5 ms'], ['random', '随机 1–5 ms']] as Array<[DelayPreset, string]>).map(([value, label]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    className={`h-8 rounded-lg px-2 text-xs ${delayPreset === value ? 'bg-[#dff6e5] text-[#173b21]' : 'bg-white/12 text-white/80 hover:bg-white/18'}`}
-                    onClick={() => void handleDelayPresetChange(value)}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
             </div>
 
             <button

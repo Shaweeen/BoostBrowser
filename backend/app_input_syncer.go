@@ -194,6 +194,9 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	atomic.StoreInt32(&s.active, 1)
 	atomic.StoreInt32(&s.mouseEnabled, 1)
 	atomic.StoreInt32(&s.keyEnabled, 1)
+	atomic.StoreInt32(&s.randomDelayEnabled, 1)
+	atomic.StoreInt32(&s.randomDelayMinMs, 3)
+	atomic.StoreInt32(&s.randomDelayMaxMs, 8)
 	s.stopCh = make(chan struct{})
 	s.stopOnce = sync.Once{}
 	s.cdpKeyQueue = make(chan cdpKeyEvent, 512)
@@ -469,11 +472,24 @@ const GA_ROOT = 2
 // isMasterForeground 检查主控窗口或其子窗口是否在前台
 func (s *InputSyncer) isMasterForeground() bool {
 	fg, _, _ := procGetForegroundWindow.Call()
-	if windows.HWND(fg) == s.masterHwnd {
+	if fg == 0 {
+		return false
+	}
+	foreground := windows.HWND(fg)
+	if foreground == s.masterHwnd {
 		return true
 	}
-	root := getAncestor(windows.HWND(fg), GA_ROOT)
-	return root == s.masterHwnd
+	root := getAncestor(foreground, GA_ROOT)
+	if root == s.masterHwnd {
+		return true
+	}
+	// Chromium can place omnibox/render focus on another top-level HWND owned by
+	// the same browser process. Requiring exact HWND equality filters every
+	// keyboard/mouse hook event even though the selected master is foreground.
+	var masterWindowPID, foregroundPID uint32
+	procGetWindowThreadProcessID.Call(uintptr(s.masterHwnd), uintptr(unsafe.Pointer(&masterWindowPID)))
+	procGetWindowThreadProcessID.Call(uintptr(root), uintptr(unsafe.Pointer(&foregroundPID)))
+	return masterWindowPID != 0 && masterWindowPID == foregroundPID
 }
 
 // getFollowerSnapshot 获取跟随窗口列表的原子快照（钩子回调中使用）

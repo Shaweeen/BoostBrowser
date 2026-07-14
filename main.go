@@ -434,6 +434,7 @@ func main() {
 			if syncPanelMode {
 				runtime.WindowCenter(wailsCtx)
 			} else {
+				runtime.WindowSetAlwaysOnTop(wailsCtx, false)
 				restoreNativeMainWindowBounds(wailsCtx, app)
 				if shouldEnableGlobalWindowWatchers() {
 					app.RecordLifecycleEvent("global-window-watchers", []string{"state=enabled", "source=env:BOOST_BROWSER_ENABLE_GLOBAL_WINDOW_WATCHERS"})
