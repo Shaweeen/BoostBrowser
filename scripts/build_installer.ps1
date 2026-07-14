@@ -313,6 +313,9 @@ Unblock-File $OutExe -ErrorAction SilentlyContinue
 
 Write-Host '==> [6/6] Done' -ForegroundColor Green
 $hash = (Get-FileHash $OutExe -Algorithm SHA256).Hash.ToLower()
+$hashPath = "$OutExe.sha256"
+[IO.File]::WriteAllText($hashPath, $hash, (New-Object Text.UTF8Encoding($false)))
+if ((Get-Item $hashPath).Length -ne 64) { throw "Installer SHA256 file is invalid: $hashPath" }
 $size = (Get-Item $OutExe).Length
 Write-Host ''
 Write-Host '================================================================' -ForegroundColor Cyan
