@@ -7,8 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 var syncPanelMode = hasCLIArg("--sync-panel") || hasCLIArg("--window-sync-panel")
@@ -73,11 +71,9 @@ func (a *App) OpenWindowSyncPanel() error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	// Opening the dedicated sync tool is an explicit workspace switch. Keep the
-	// browser environments and the always-on-top tool visible, not the main UI.
-	if a.wailsCtx != nil {
-		runtime.WindowMinimise(a.wailsCtx)
-	}
+	// Keep the stable v1.7.16 panel process behaviour, but do not force the main
+	// WebView window into the affected Windows minimise state. Users can switch
+	// between the client and the assistant directly from the taskbar.
 	return cmd.Process.Release()
 }
 
