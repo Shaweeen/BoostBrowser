@@ -194,9 +194,11 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	atomic.StoreInt32(&s.active, 1)
 	atomic.StoreInt32(&s.mouseEnabled, 1)
 	atomic.StoreInt32(&s.keyEnabled, 1)
-	atomic.StoreInt32(&s.randomDelayEnabled, 1)
-	atomic.StoreInt32(&s.randomDelayMinMs, 3)
-	atomic.StoreInt32(&s.randomDelayMaxMs, 8)
+	// Default to immediate delivery. Delay is enabled only after the user
+	// explicitly selects a preset in the sync assistant.
+	atomic.StoreInt32(&s.randomDelayEnabled, 0)
+	atomic.StoreInt32(&s.randomDelayMinMs, 0)
+	atomic.StoreInt32(&s.randomDelayMaxMs, 0)
 	s.stopCh = make(chan struct{})
 	s.stopOnce = sync.Once{}
 	s.cdpKeyQueue = make(chan cdpKeyEvent, 512)

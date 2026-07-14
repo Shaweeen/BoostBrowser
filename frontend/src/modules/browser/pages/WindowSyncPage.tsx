@@ -83,7 +83,7 @@ export function WindowSyncPage() {
   const [displayLabel, setDisplayLabel] = useState('当前显示器')
   const [, setPanelFocused] = useState(false)
   const [, setPanelHovered] = useState(false)
-  const [delayPreset, setDelayPreset] = useState<DelayPreset>('random')
+  const [delayPreset, setDelayPreset] = useState<DelayPreset | null>(null)
 
   const refreshTimer = useRef<ReturnType<typeof setInterval>>()
   const loadProfilesSeq = useRef(0)
@@ -107,9 +107,12 @@ export function WindowSyncPage() {
       setProfiles(sorted)
       setSyncStatus(status)
       if (status?.active) {
-        if (status.randomDelayMinMs === 1 && status.randomDelayMaxMs === 1) setDelayPreset('1ms')
+        if (!status.randomDelayEnabled) setDelayPreset(null)
+        else if (status.randomDelayMinMs === 1 && status.randomDelayMaxMs === 1) setDelayPreset('1ms')
         else if (status.randomDelayMinMs === 5 && status.randomDelayMaxMs === 5) setDelayPreset('5ms')
         else setDelayPreset('random')
+      } else {
+        setDelayPreset(null)
       }
       if (status?.active) {
         const nextSelected = new Set([status.masterId, ...(status.followerIds || [])].filter(Boolean))
@@ -494,6 +497,16 @@ export function WindowSyncPage() {
 
   const handleDelayPresetChange = async (preset: DelayPreset) => {
     if (!isSyncing) return
+    if (delayPreset === preset) {
+      const err = await updateSyncRandomDelay(false, 0, 0)
+      if (err) {
+        toast.error(`关闭同步延时失败：${err}`)
+        return
+      }
+      setDelayPreset(null)
+      setSyncStatus(prev => prev ? { ...prev, randomDelayEnabled: false, randomDelayMinMs: 0, randomDelayMaxMs: 0 } : prev)
+      return
+    }
     const [minMs, maxMs] = preset === '1ms' ? [1, 1] : preset === '5ms' ? [5, 5] : [3, 8]
     const err = await updateSyncRandomDelay(true, minMs, maxMs)
     if (err) {
