@@ -21,7 +21,10 @@ var (
 	procGetWindowTextW             = user32SingleInstance.NewProc("GetWindowTextW")
 	procIsWindowVisibleSingle      = user32SingleInstance.NewProc("IsWindowVisible")
 	procShowWindow                 = user32SingleInstance.NewProc("ShowWindow")
+	procShowWindowAsync            = user32SingleInstance.NewProc("ShowWindowAsync")
 	procSetForegroundWindow        = user32SingleInstance.NewProc("SetForegroundWindow")
+	procSetActiveWindow            = user32SingleInstance.NewProc("SetActiveWindow")
+	procSwitchToThisWindow         = user32SingleInstance.NewProc("SwitchToThisWindow")
 	procBringWindowToTop           = user32SingleInstance.NewProc("BringWindowToTop")
 	procGetWindowThreadProcessIDSI = user32SingleInstance.NewProc("GetWindowThreadProcessId")
 )
@@ -62,9 +65,8 @@ var existingWindowEnumCallback = windows.NewCallback(func(hwnd uintptr, lparam u
 	if title == "" {
 		return 1
 	}
-	lowerTitle := strings.ToLower(title)
 	for _, keyword := range search.keywords {
-		if strings.Contains(lowerTitle, strings.ToLower(keyword)) {
+		if strings.EqualFold(title, keyword) {
 			search.target = windows.Handle(hwnd)
 			return 0
 		}
@@ -148,7 +150,10 @@ func focusExistingWindowByKeywords(keywords []string) bool {
 		procShowWindow.Call(uintptr(search.target), swShow)
 	}
 	procShowWindow.Call(uintptr(search.target), swRestore)
+	procShowWindowAsync.Call(uintptr(search.target), swRestore)
 	procBringWindowToTop.Call(uintptr(search.target))
+	procSetActiveWindow.Call(uintptr(search.target))
 	procSetForegroundWindow.Call(uintptr(search.target))
+	procSwitchToThisWindow.Call(uintptr(search.target), 1)
 	return true
 }

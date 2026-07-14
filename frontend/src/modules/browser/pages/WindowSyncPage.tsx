@@ -37,6 +37,7 @@ function compareProfileName(a: SyncProfileInfo, b: SyncProfileInfo) {
 
 type FilterMode = 'all' | 'selected' | 'master' | 'followers'
 type ToolbarMenu = 'layout' | null
+type DelayPreset = '1ms' | '5ms' | 'random'
 
 const FILTER_OPTIONS: Array<{ value: FilterMode; label: string }> = [
   { value: 'all', label: '全部实例' },
@@ -82,9 +83,7 @@ export function WindowSyncPage() {
   const [displayLabel, setDisplayLabel] = useState('当前显示器')
   const [, setPanelFocused] = useState(false)
   const [, setPanelHovered] = useState(false)
-  const [randomDelayEnabled, setRandomDelayEnabled] = useState(false)
-  const [randomDelayMinMs, setRandomDelayMinMs] = useState('50')
-  const [randomDelayMaxMs, setRandomDelayMaxMs] = useState('200')
+  const [delayPreset, setDelayPreset] = useState<DelayPreset>('1ms')
 
   const refreshTimer = useRef<ReturnType<typeof setInterval>>()
   const loadProfilesSeq = useRef(0)
@@ -108,9 +107,9 @@ export function WindowSyncPage() {
       setProfiles(sorted)
       setSyncStatus(status)
       if (status) {
-        setRandomDelayEnabled(status.randomDelayEnabled === true)
-        setRandomDelayMinMs(String(status.randomDelayMinMs || 50))
-        setRandomDelayMaxMs(String(status.randomDelayMaxMs || 200))
+        if (status.randomDelayMinMs === 5 && status.randomDelayMaxMs === 5) setDelayPreset('5ms')
+        else if (status.randomDelayMinMs === 1 && status.randomDelayMaxMs === 5) setDelayPreset('random')
+        else setDelayPreset('1ms')
       }
 
       if (status?.active) {
@@ -477,6 +476,8 @@ export function WindowSyncPage() {
       toast.error(`启动同步失败：${err}`)
       return
     }
+    const [delayMin, delayMax] = delayPreset === '5ms' ? [5, 5] : delayPreset === 'random' ? [1, 5] : [1, 1]
+    await updateSyncRandomDelay(true, delayMin, delayMax)
     setPanelPresentation('compact')
     setShowSyncControls(false)
     await loadProfiles()
@@ -494,17 +495,16 @@ export function WindowSyncPage() {
     await loadProfiles()
   }
 
-  const handleRandomDelayChange = async (enabled: boolean) => {
+  const handleDelayPresetChange = async (preset: DelayPreset) => {
     if (!isSyncing) return
-    const minMs = Math.max(0, Number(randomDelayMinMs) || 0)
-    const maxMs = Math.max(minMs, Number(randomDelayMaxMs) || minMs)
-    const err = await updateSyncRandomDelay(enabled, minMs, maxMs)
+    const [minMs, maxMs] = preset === '5ms' ? [5, 5] : preset === 'random' ? [1, 5] : [1, 1]
+    const err = await updateSyncRandomDelay(true, minMs, maxMs)
     if (err) {
       toast.error(`更新随机延时失败：${err}`)
       return
     }
-    setRandomDelayEnabled(enabled)
-    setSyncStatus(prev => prev ? { ...prev, randomDelayEnabled: enabled, randomDelayMinMs: minMs, randomDelayMaxMs: maxMs } : prev)
+    setDelayPreset(preset)
+    setSyncStatus(prev => prev ? { ...prev, randomDelayEnabled: true, randomDelayMinMs: minMs, randomDelayMaxMs: maxMs } : prev)
   }
 
   const handleTile = async (layout: TileLayoutMode = tileLayout, _toastLabel?: string) => {
@@ -533,7 +533,6 @@ export function WindowSyncPage() {
   }
 
   const handleExitAssistant = async () => {
-    if (isSyncing) await stopInputSync()
     await ExitWindowSyncPanel().catch(() => {})
   }
 
@@ -795,21 +794,18 @@ export function WindowSyncPage() {
             </div>
 
             <div className="mt-2 rounded-2xl border border-white/14 bg-white/8 p-2.5">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-[13px] text-white">同步随机延时</span>
-                <button
-                  type="button"
-                  className={`h-7 rounded-full px-3 text-xs ${randomDelayEnabled ? 'bg-[#dff6e5] text-[#173b21]' : 'bg-white/12 text-white/75'}`}
-                  onClick={() => void handleRandomDelayChange(!randomDelayEnabled)}
-                >
-                  {randomDelayEnabled ? '已开启' : '已关闭'}
-                </button>
-              </div>
-              <div className="mt-2 grid grid-cols-[1fr_auto_1fr_auto] items-center gap-2 text-xs text-white/70">
-                <input className="h-8 min-w-0 rounded-lg bg-white/12 px-2 text-white outline-none" type="number" min="0" max="5000" value={randomDelayMinMs} onChange={event => setRandomDelayMinMs(event.target.value)} />
-                <span>至</span>
-                <input className="h-8 min-w-0 rounded-lg bg-white/12 px-2 text-white outline-none" type="number" min="0" max="5000" value={randomDelayMaxMs} onChange={event => setRandomDelayMaxMs(event.target.value)} />
-                <span>ms</span>
+              <span className="text-[13px] text-white">同步延时</span>
+              <div className="mt-2 grid grid-cols-3 gap-2">
+                {([['1ms', '1 ms'], ['5ms', '5 ms'], ['random', '随机 1–5 ms']] as Array<[DelayPreset, string]>).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className={`h-8 rounded-lg px-2 text-xs ${delayPreset === value ? 'bg-[#dff6e5] text-[#173b21]' : 'bg-white/12 text-white/80 hover:bg-white/18'}`}
+                    onClick={() => void handleDelayPresetChange(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
               </div>
             </div>
 

@@ -27,6 +27,8 @@ var syncState struct {
 	active      bool
 }
 
+var syncSessionMu sync.Mutex
+
 var syncRuntimeDiscovery struct {
 	sync.Mutex
 	lastAttempt time.Time
@@ -75,41 +77,29 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 		candidates = append(candidates, p)
 	}
 
-	// Resolve independent browser windows concurrently. With 12 environments,
-	// the old serial process-tree scans multiplied the initial panel latency.
-	result := make([]SyncProfileInfo, len(candidates))
-	var wg sync.WaitGroup
-	limit := make(chan struct{}, 8)
-	for i, p := range candidates {
-		i, p := i, p
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			limit <- struct{}{}
-			defer func() { <-limit }()
-			info := SyncProfileInfo{
-				ProfileId:   p.ProfileId,
-				ProfileName: p.ProfileName,
-				Pid:         p.Pid,
-				DebugPort:   p.DebugPort,
-				Running:     p.Running,
-				BadgeNumber: extractBadgeNumberFromName(p.ProfileName),
-			}
-			if p.Pid > 0 {
-				if hwnd, err := findProcessTreeWindow(p.Pid); err == nil {
-					info.Hwnd = int64(hwnd)
-					info.Status = "running"
-				} else {
-					info.Status = "no_window"
-				}
-			} else {
-				info.Status = "no_window"
-			}
-			result[i] = info
-		}()
+	rootPIDs := make([]int, 0, len(candidates))
+	for _, profile := range candidates {
+		if profile.Pid > 0 {
+			rootPIDs = append(rootPIDs, profile.Pid)
+		}
 	}
-	wg.Wait()
-
+	resolvedWindows := findProcessTreeWindows(rootPIDs)
+	result := make([]SyncProfileInfo, len(candidates))
+	resolvedCount := 0
+	for i, p := range candidates {
+		info := SyncProfileInfo{ProfileId: p.ProfileId, ProfileName: p.ProfileName, Pid: p.Pid, DebugPort: p.DebugPort, Running: p.Running, BadgeNumber: extractBadgeNumberFromName(p.ProfileName)}
+		if hwnd := resolvedWindows[p.Pid]; hwnd != 0 {
+			info.Hwnd = int64(hwnd)
+			info.Status = "running"
+			resolvedCount++
+		} else {
+			info.Status = "no_window"
+		}
+		result[i] = info
+	}
+	if resolvedCount < len(candidates) {
+		a.reconcileSyncRuntimeStateAsync()
+	}
 	return result
 }
 
@@ -147,6 +137,8 @@ func (a *App) StartInputSync(masterProfileId string, followerProfileIds []string
 }
 
 func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []string) error {
+	syncSessionMu.Lock()
+	defer syncSessionMu.Unlock()
 	log := logger.New("SyncAPI")
 	liveSnapshots, totalSnapshots := a.applyBrowserRuntimeSnapshot()
 	if liveSnapshots == 0 || liveSnapshots < totalSnapshots {
@@ -184,28 +176,23 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	}
 	a.browserMgr.Mutex.Unlock()
 
-	masterHwnd, err := findProcessTreeWindow(masterSnapshot.Pid)
-	if err != nil {
-		return fmt.Errorf("未找到主控实例窗口：%v", err)
-	}
-
 	type followerWindow struct {
 		hwnd      windows.HWND
 		debugPort int
 	}
-	resolved := make([]followerWindow, len(followers))
-	var followerWG sync.WaitGroup
-	for i, candidate := range followers {
-		i, candidate := i, candidate
-		followerWG.Add(1)
-		go func() {
-			defer followerWG.Done()
-			if hwnd, resolveErr := findProcessTreeWindow(candidate.profile.Pid); resolveErr == nil {
-				resolved[i] = followerWindow{hwnd: hwnd, debugPort: candidate.profile.DebugPort}
-			}
-		}()
+	rootPIDs := []int{masterSnapshot.Pid}
+	for _, candidate := range followers {
+		rootPIDs = append(rootPIDs, candidate.profile.Pid)
 	}
-	followerWG.Wait()
+	resolvedWindows := findProcessTreeWindows(rootPIDs)
+	masterHwnd := resolvedWindows[masterSnapshot.Pid]
+	if masterHwnd == 0 {
+		return fmt.Errorf("未找到主控实例窗口")
+	}
+	resolved := make([]followerWindow, len(followers))
+	for i, candidate := range followers {
+		resolved[i] = followerWindow{hwnd: resolvedWindows[candidate.profile.Pid], debugPort: candidate.profile.DebugPort}
+	}
 
 	var followerHwnds []windows.HWND
 	var followerDebugPorts []int
@@ -223,9 +210,13 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 		return fmt.Errorf("没有可用的跟随实例")
 	}
 
-	// 如果已有同步器在运行，先停止
-	if syncState.syncer != nil && syncState.syncer.IsActive() {
-		syncState.syncer.Stop()
+	syncState.mu.Lock()
+	oldSyncer := syncState.syncer
+	syncState.syncer = nil
+	syncState.active = false
+	syncState.mu.Unlock()
+	if oldSyncer != nil {
+		oldSyncer.Stop()
 	}
 
 	// 创建并启动同步器（带 CDP URL 同步，URL 同步默认由崩溃隔离开关关闭）
@@ -259,19 +250,22 @@ func (a *App) StopInputSync() error {
 }
 
 func (a *App) stopInputSyncLocal() error {
+	syncSessionMu.Lock()
+	defer syncSessionMu.Unlock()
 	log := logger.New("SyncAPI")
 
 	syncState.mu.Lock()
-	defer syncState.mu.Unlock()
-
-	if syncState.syncer != nil {
-		syncState.syncer.Stop()
-		syncState.syncer = nil
-	}
+	syncer := syncState.syncer
+	syncState.syncer = nil
 	syncState.active = false
 	syncState.masterHwnd = 0
 	syncState.masterId = ""
 	syncState.followerIds = nil
+	syncState.mu.Unlock()
+
+	if syncer != nil {
+		syncer.Stop()
+	}
 
 	log.Info("输入同步已停止")
 	return nil
@@ -302,7 +296,7 @@ func (a *App) getSyncStatusLocal() map[string]interface{} {
 	return map[string]interface{}{
 		"active":              syncState.active,
 		"masterId":            syncState.masterId,
-		"followerIds":         syncState.followerIds,
+		"followerIds":         append([]string(nil), syncState.followerIds...),
 		"mouseEnabled":        config.MouseEnabled,
 		"keyEnabled":          config.KeyEnabled,
 		"randomDelayEnabled":  config.RandomDelayEnabled,

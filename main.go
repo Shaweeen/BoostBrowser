@@ -185,14 +185,7 @@ func (a *App) CloseWindowSyncPanel() {
 		a.RecordLifecycleEvent("sync-panel-close-request", []string{"action=ignore", "reason=not-sync-panel-mode"})
 		return
 	}
-	a.syncPanelCloseMu.Lock()
-	a.syncPanelCloseAllowed = true
-	ctx := a.wailsCtx
-	a.syncPanelCloseMu.Unlock()
-	a.RecordLifecycleEvent("sync-panel-close-request", []string{"action=quit-panel", "reason=user-click-x"})
-	if ctx != nil {
-		runtime.Quit(ctx)
-	}
+	a.quitSyncPanel("sync-panel-close-request", "user-click-x")
 }
 
 // ExitWindowSyncPanel terminates the independent assistant process. Its
@@ -201,11 +194,18 @@ func (a *App) ExitWindowSyncPanel() {
 	if !syncPanelMode {
 		return
 	}
+	a.quitSyncPanel("sync-panel-exit", "user-explicit-exit")
+}
+
+func (a *App) quitSyncPanel(event, reason string) {
 	a.syncPanelCloseMu.Lock()
 	a.syncPanelCloseAllowed = true
 	ctx := a.wailsCtx
 	a.syncPanelCloseMu.Unlock()
-	a.RecordLifecycleEvent("sync-panel-exit", []string{"action=quit", "reason=user-explicit-exit"})
+	a.RecordLifecycleEvent(event, []string{"action=stop-and-quit", "reason=" + reason})
+	// Release process-global mouse/keyboard hooks before destroying WebView2.
+	// OnShutdown calls this again defensively; StopInputSync is idempotent.
+	_ = a.App.StopInputSync()
 	if ctx != nil {
 		runtime.Quit(ctx)
 	}

@@ -209,6 +209,43 @@ type processWindowSearch struct {
 	candidates []processWindowCandidate
 }
 
+type processWindowsBatchSearch struct {
+	pidToRoot map[int]int
+	best      map[int]processWindowCandidate
+}
+
+func scoreBrowserTopLevelWindow(hwnd windows.HWND) (processWindowCandidate, bool) {
+	visible, _, _ := procIsWindowVisible.Call(uintptr(hwnd))
+	if visible == 0 {
+		return processWindowCandidate{}, false
+	}
+
+	title := getWindowTitle(hwnd)
+	className := getWindowClassName(hwnd)
+	if isAuxiliaryIMEWindowTitleOrClass(title, className) {
+		return processWindowCandidate{}, false
+	}
+	isPrimaryClass := strings.EqualFold(className, "Chrome_WidgetWin_1") || strings.EqualFold(className, "Chrome_MainWindow")
+	isCloakTopLevelFallback := strings.EqualFold(className, "Chrome_WidgetWin_0") && strings.TrimSpace(title) != ""
+	if !isPrimaryClass && !isCloakTopLevelFallback {
+		return processWindowCandidate{}, false
+	}
+	if isCloakTopLevelFallback {
+		const gwOwner = 4
+		owner, _, _ := procGetWindow.Call(uintptr(hwnd), gwOwner)
+		if owner != 0 {
+			return processWindowCandidate{}, false
+		}
+	}
+	clientW, clientH, ok := getClientSize(hwnd)
+	if !ok || clientW < 320 || clientH < 240 || clientW > 10000 || clientH > 10000 {
+		return processWindowCandidate{}, false
+	}
+
+	score := len(title) + 10000 + clientW*clientH/1000
+	return processWindowCandidate{hwnd: hwnd, score: score}, true
+}
+
 // EnumWindows callbacks allocated through windows.NewCallback are backed by a
 // process-wide, finite Go callback table and cannot be released. Creating one
 // on every lookup eventually terminates the Wails host (especially while badge
@@ -228,43 +265,32 @@ var processWindowEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lPar
 		return 1 // 继续
 	}
 
-	visible, _, _ := procIsWindowVisible.Call(uintptr(hwnd))
-	if visible == 0 {
-		return 1
+	if candidate, ok := scoreBrowserTopLevelWindow(hwnd); ok {
+		search.candidates = append(search.candidates, candidate)
 	}
-
-	title := getWindowTitle(hwnd)
-	className := getWindowClassName(hwnd)
-	if isAuxiliaryIMEWindowTitleOrClass(title, className) {
-		return 1
-	}
-	// Only a real Chrome top-level browser frame may participate in sync.
-	// Chrome_WidgetWin_0 and titled renderer/extension helper HWNDs can be
-	// visible transiently; selecting one makes tiling/show operations surface
-	// an undecorated white window over the page.
-	isPrimaryClass := strings.EqualFold(className, "Chrome_WidgetWin_1") || strings.EqualFold(className, "Chrome_MainWindow")
-	isCloakTopLevelFallback := strings.EqualFold(className, "Chrome_WidgetWin_0") && strings.TrimSpace(title) != ""
-	if !isPrimaryClass && !isCloakTopLevelFallback {
-		return 1
-	}
-	// Chrome_WidgetWin_0 is also used by transient helpers. Only accept an
-	// unowned, titled top-level frame as the CloakBrowser fallback.
-	if isCloakTopLevelFallback {
-		const gwOwner = 4
-		owner, _, _ := procGetWindow.Call(uintptr(hwnd), gwOwner)
-		if owner != 0 {
-			return 1
-		}
-	}
-	clientW, clientH, ok := getClientSize(hwnd)
-	if !ok || clientW < 320 || clientH < 240 || clientW > 10000 || clientH > 10000 {
-		return 1
-	}
-
-	score := len(title)
-	score += 10000 + clientW*clientH/1000
-	search.candidates = append(search.candidates, processWindowCandidate{hwnd: hwnd, score: score})
 	return 1 // 继续找
+})
+
+var processWindowsBatchEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lParam uintptr) uintptr {
+	defer func() { _ = recover() }()
+	search := (*processWindowsBatchSearch)(unsafe.Pointer(lParam))
+	if search == nil {
+		return 0
+	}
+	var windowPID uint32
+	procGetWindowThreadProcessID.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&windowPID)))
+	rootPID, ok := search.pidToRoot[int(windowPID)]
+	if !ok {
+		return 1
+	}
+	candidate, ok := scoreBrowserTopLevelWindow(hwnd)
+	if !ok {
+		return 1
+	}
+	if previous, exists := search.best[rootPID]; !exists || candidate.score > previous.score {
+		search.best[rootPID] = candidate
+	}
+	return 1
 })
 
 func findProcessWindow(pid int) (windows.HWND, error) {
@@ -338,4 +364,71 @@ func findProcessTreeWindow(rootPID int) (windows.HWND, error) {
 		queue = append(queue, children[pid]...)
 	}
 	return 0, fmt.Errorf("未找到 PID=%d 进程树中的浏览器主窗口", rootPID)
+}
+
+// findProcessTreeWindows resolves multiple Chromium roots with one process
+// snapshot and one EnumWindows pass. This avoids multiplying system scans by
+// the number of selected environments on every panel refresh/start.
+func findProcessTreeWindows(rootPIDs []int) map[int]windows.HWND {
+	result := make(map[int]windows.HWND, len(rootPIDs))
+	if len(rootPIDs) == 0 {
+		return result
+	}
+	const th32csSnapProcess = 0x00000002
+	const invalidHandleValue = ^uintptr(0)
+	type processEntry32 struct {
+		Size            uint32
+		Usage           uint32
+		ProcessID       uint32
+		DefaultHeapID   uintptr
+		ModuleID        uint32
+		Threads         uint32
+		ParentProcessID uint32
+		PriClassBase    int32
+		Flags           uint32
+		ExeFile         [260]uint16
+	}
+	snapshot, _, _ := procCreateToolhelp32Snapshot.Call(th32csSnapProcess, 0)
+	if snapshot == invalidHandleValue || snapshot == 0 {
+		return result
+	}
+	defer windows.CloseHandle(windows.Handle(snapshot))
+
+	children := make(map[int][]int)
+	var entry processEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	ret, _, _ := procProcess32FirstW.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
+	for ret != 0 {
+		children[int(entry.ParentProcessID)] = append(children[int(entry.ParentProcessID)], int(entry.ProcessID))
+		entry.Size = uint32(unsafe.Sizeof(entry))
+		ret, _, _ = procProcess32NextW.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
+	}
+
+	pidToRoot := make(map[int]int)
+	for _, rootPID := range rootPIDs {
+		if rootPID <= 0 {
+			continue
+		}
+		queue := []int{rootPID}
+		seen := make(map[int]struct{})
+		for len(queue) > 0 {
+			pid := queue[0]
+			queue = queue[1:]
+			if _, exists := seen[pid]; exists {
+				continue
+			}
+			seen[pid] = struct{}{}
+			if _, claimed := pidToRoot[pid]; !claimed {
+				pidToRoot[pid] = rootPID
+			}
+			queue = append(queue, children[pid]...)
+		}
+	}
+	search := &processWindowsBatchSearch{pidToRoot: pidToRoot, best: make(map[int]processWindowCandidate)}
+	procEnumWindows.Call(processWindowsBatchEnumCallback, uintptr(unsafe.Pointer(search)))
+	runtime.KeepAlive(search)
+	for rootPID, candidate := range search.best {
+		result[rootPID] = candidate.hwnd
+	}
+	return result
 }

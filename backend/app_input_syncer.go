@@ -49,11 +49,13 @@ type InputSyncer struct {
 	mouseHook    uintptr
 	keyHook      uintptr
 	stopCh       chan struct{}
+	stopOnce     sync.Once
 	hookThreadID uint32
 
 	lastMoveTime      int64 // Unix nano
 	pageKeyboardFocus int32 // last master click was inside the renderer
-	cdpKeyMu          sync.Mutex
+	cdpKeyQueue       chan cdpKeyEvent
+	cdpKeyDrops       int32
 
 	// URL 同步
 	urlStopCh   chan struct{}
@@ -101,6 +103,14 @@ type SyncConfig struct {
 	RandomDelayMaxMs   int  `json:"randomDelayMaxMs"`
 }
 
+type cdpKeyEvent struct {
+	ports     []int
+	down      bool
+	vk        uint32
+	character rune
+	modifiers int
+}
+
 // NewInputSyncer 创建输入同步器
 func NewInputSyncer() *InputSyncer {
 	return NewInputSyncerWithLogger(nil)
@@ -111,6 +121,7 @@ func NewInputSyncerWithLogger(lifecycleLogger func(event string, fields ...strin
 		stopCh:          make(chan struct{}),
 		lifecycleLogger: lifecycleLogger,
 		randomDelayNext: make(map[windows.HWND]time.Time),
+		cdpKeyQueue:     make(chan cdpKeyEvent, 512),
 	}
 }
 
@@ -183,6 +194,8 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	atomic.StoreInt32(&s.mouseEnabled, 1)
 	atomic.StoreInt32(&s.keyEnabled, 1)
 	s.stopCh = make(chan struct{})
+	s.stopOnce = sync.Once{}
+	s.cdpKeyQueue = make(chan cdpKeyEvent, 512)
 	ready := make(chan error, 1)
 
 	// 重置诊断计数器
@@ -190,6 +203,7 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	atomic.StoreInt32(&s.moveCount, 0)
 	atomic.StoreInt32(&s.wheelCount, 0)
 	atomic.StoreInt32(&s.keyCount, 0)
+	atomic.StoreInt32(&s.cdpKeyDrops, 0)
 
 	log := logger.New("InputSyncer")
 	log.Info("输入同步已启动",
@@ -211,6 +225,7 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 
 	activeInputSyncer.Store(s)
 	s.mu.Unlock()
+	go s.cdpKeyDispatchLoop(s.stopCh, s.cdpKeyQueue)
 
 	// 安装全局鼠标和键盘钩子。启动必须等待安装结果；旧逻辑在安装
 	// 失败时仍立即返回成功，前端因此会显示“同步中”但没有任何事件。
@@ -242,11 +257,7 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	case <-time.After(3 * time.Second):
 		activeInputSyncer.CompareAndSwap(s, nil)
 		atomic.StoreInt32(&s.active, 0)
-		select {
-		case <-s.stopCh:
-		default:
-			close(s.stopCh)
-		}
+		s.signalStop()
 		s.mu.Lock()
 		hookThreadID := s.hookThreadID
 		s.mu.Unlock()
@@ -304,7 +315,7 @@ func (s *InputSyncer) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if atomic.LoadInt32(&s.active) == 0 {
+	if atomic.LoadInt32(&s.active) == 0 && s.mouseHook == 0 && s.keyHook == 0 && s.hookThreadID == 0 {
 		return
 	}
 
@@ -314,7 +325,7 @@ func (s *InputSyncer) Stop() {
 
 	atomic.StoreInt32(&s.active, 0)
 	activeInputSyncer.CompareAndSwap(s, nil)
-	close(s.stopCh)
+	s.signalStop()
 
 	// 停止 URL 同步
 	if s.urlStopCh != nil {
@@ -346,6 +357,10 @@ func (s *InputSyncer) Stop() {
 	log := logger.New("InputSyncer")
 	log.Info("输入同步已停止")
 	s.lifecycle("sync-input-stop", fmt.Sprintf("clicks=%d", atomic.LoadInt32(&s.clickCount)), fmt.Sprintf("moves=%d", atomic.LoadInt32(&s.moveCount)), fmt.Sprintf("wheels=%d", atomic.LoadInt32(&s.wheelCount)), fmt.Sprintf("keys=%d", atomic.LoadInt32(&s.keyCount)))
+}
+
+func (s *InputSyncer) signalStop() {
+	s.stopOnce.Do(func() { close(s.stopCh) })
 }
 
 // IsActive 返回同步是否活跃
@@ -428,11 +443,12 @@ func (s *InputSyncer) GetConfig() SyncConfig {
 // GetStats 返回同步诊断统计
 func (s *InputSyncer) GetStats() map[string]int32 {
 	return map[string]int32{
-		"clicks": atomic.LoadInt32(&s.clickCount),
-		"moves":  atomic.LoadInt32(&s.moveCount),
-		"wheels": atomic.LoadInt32(&s.wheelCount),
-		"keys":   atomic.LoadInt32(&s.keyCount),
-		"hooks":  atomic.LoadInt32(&s.hookInstalls),
+		"clicks":      atomic.LoadInt32(&s.clickCount),
+		"moves":       atomic.LoadInt32(&s.moveCount),
+		"wheels":      atomic.LoadInt32(&s.wheelCount),
+		"keys":        atomic.LoadInt32(&s.keyCount),
+		"hooks":       atomic.LoadInt32(&s.hookInstalls),
+		"cdpKeyDrops": atomic.LoadInt32(&s.cdpKeyDrops),
 	}
 }
 
@@ -682,6 +698,24 @@ func (s *InputSyncer) installHooks(ready chan<- error) {
 		ready <- fmt.Errorf("键鼠 Hook 安装失败（mouse=%#x, keyboard=%#x, mouseErr=%v/%d, keyErr=%v/%d）", mouseHook, keyHook, mouseErr, mouseErrno, keyErr, keyErrno)
 		return
 	}
+	defer func() {
+		unhookWindowsHookEx := user32dll.NewProc("UnhookWindowsHookEx")
+		if mouseHook != 0 {
+			unhookWindowsHookEx.Call(mouseHook)
+		}
+		if keyHook != 0 {
+			unhookWindowsHookEx.Call(keyHook)
+		}
+		s.mu.Lock()
+		if s.mouseHook == mouseHook {
+			s.mouseHook = 0
+		}
+		if s.keyHook == keyHook {
+			s.keyHook = 0
+		}
+		s.hookThreadID = 0
+		s.mu.Unlock()
+	}()
 	ready <- nil
 
 	type MSG struct {
@@ -1010,31 +1044,43 @@ func (s *InputSyncer) dispatchPageKeyViaCDP(msg uint32, vk, scanCode, flags uint
 	}
 	down := msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN
 	ch := toUnicode(uint16(vk), uint16(scanCode), (flags&0x01) != 0)
-	go func() {
-		s.cdpKeyMu.Lock()
-		defer s.cdpKeyMu.Unlock()
-		var wg sync.WaitGroup
-		for _, port := range ports {
-			if port <= 0 {
-				continue
+	event := cdpKeyEvent{ports: ports, down: down, vk: vk, character: ch, modifiers: modifiers}
+	select {
+	case s.cdpKeyQueue <- event:
+	default:
+		atomic.AddInt32(&s.cdpKeyDrops, 1)
+	}
+}
+
+func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cdpKeyEvent) {
+	for {
+		select {
+		case <-stopCh:
+			return
+		case event := <-queue:
+			var wg sync.WaitGroup
+			for _, port := range event.ports {
+				if port <= 0 {
+					continue
+				}
+				wg.Add(1)
+				go func(debugPort int) {
+					defer wg.Done()
+					if event.down && event.character != 0 && event.modifiers&3 == 0 {
+						_, _ = cdpCall(debugPort, "Input.insertText", map[string]any{"text": string(event.character)})
+						return
+					}
+					params := map[string]any{
+						"type":                  map[bool]string{true: "keyDown", false: "keyUp"}[event.down],
+						"windowsVirtualKeyCode": int(event.vk), "nativeVirtualKeyCode": int(event.vk),
+						"modifiers": event.modifiers, "key": cdpKeyName(event.vk),
+					}
+					_, _ = cdpCall(debugPort, "Input.dispatchKeyEvent", params)
+				}(port)
 			}
-			wg.Add(1)
-			go func(debugPort int) {
-				defer wg.Done()
-				if down && ch != 0 && !ctrl && !alt {
-					_, _ = cdpCall(debugPort, "Input.insertText", map[string]any{"text": string(rune(ch))})
-					return
-				}
-				params := map[string]any{
-					"type":                  map[bool]string{true: "keyDown", false: "keyUp"}[down],
-					"windowsVirtualKeyCode": int(vk), "nativeVirtualKeyCode": int(vk),
-					"modifiers": modifiers, "key": cdpKeyName(vk),
-				}
-				_, _ = cdpCall(debugPort, "Input.dispatchKeyEvent", params)
-			}(port)
+			wg.Wait()
 		}
-		wg.Wait()
-	}()
+	}
 }
 
 func (s *InputSyncer) dispatchPageMouseViaCDP(msg uint32, screenX, screenY int) {
