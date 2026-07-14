@@ -352,6 +352,10 @@ func (a *App) SyncTileWindows(profileIds []string, masterProfileId string, layou
 }
 
 func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, layoutMode string) (*TileWindowsResult, error) {
+	// The main management client is a separate process from the sync assistant.
+	// Minimise it before arranging browser windows so it cannot cover the grid.
+	minimizeMainClientWindow()
+
 	a.browserMgr.Mutex.Lock()
 	defer a.browserMgr.Mutex.Unlock()
 

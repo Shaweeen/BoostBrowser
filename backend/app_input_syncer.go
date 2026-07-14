@@ -1084,25 +1084,27 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
 				}
 				wg.Add(1)
 				go func(debugPort int, follower windows.HWND) {
-					defer wg.Done()
-					if debugPort <= 0 {
-						s.dispatchPageKeyFallback(follower, event)
-						return
-					}
-					if event.down && event.character != 0 && event.modifiers&3 == 0 {
-						if _, err := cdpCall(debugPort, "Input.insertText", map[string]any{"text": string(event.character)}); err != nil {
+					s.dispatchWithRandomDelay(follower, func() {
+						defer wg.Done()
+						if debugPort <= 0 {
+							s.dispatchPageKeyFallback(follower, event)
+							return
+						}
+						if event.down && event.character != 0 && event.modifiers&3 == 0 {
+							if _, err := cdpCall(debugPort, "Input.insertText", map[string]any{"text": string(event.character)}); err != nil {
+								s.dispatchPageKeyFallback(follower, event)
+							}
+							return
+						}
+						params := map[string]any{
+							"type":                  map[bool]string{true: "keyDown", false: "keyUp"}[event.down],
+							"windowsVirtualKeyCode": int(event.vk), "nativeVirtualKeyCode": int(event.vk),
+							"modifiers": event.modifiers, "key": cdpKeyName(event.vk),
+						}
+						if _, err := cdpCall(debugPort, "Input.dispatchKeyEvent", params); err != nil {
 							s.dispatchPageKeyFallback(follower, event)
 						}
-						return
-					}
-					params := map[string]any{
-						"type":                  map[bool]string{true: "keyDown", false: "keyUp"}[event.down],
-						"windowsVirtualKeyCode": int(event.vk), "nativeVirtualKeyCode": int(event.vk),
-						"modifiers": event.modifiers, "key": cdpKeyName(event.vk),
-					}
-					if _, err := cdpCall(debugPort, "Input.dispatchKeyEvent", params); err != nil {
-						s.dispatchPageKeyFallback(follower, event)
-					}
+					})
 				}(port, hwnd)
 			}
 			wg.Wait()
@@ -1171,13 +1173,13 @@ func (s *InputSyncer) dispatchPageMouseViaCDP(msg uint32, screenX, screenY int) 
 		}
 		fl, ft, fr, fb := getWindowRect(render)
 		x, y := rx*float64(fr-fl), ry*float64(fb-ft)
-		go func(debugPort int, follower windows.HWND, px, py float64) {
-			if _, err := cdpCall(debugPort, "Input.dispatchMouseEvent", map[string]any{
-				"type": eventType, "x": px, "y": py, "button": button, "clickCount": 1,
+		s.dispatchWithRandomDelay(hwnd, func() {
+			if _, err := cdpCall(port, "Input.dispatchMouseEvent", map[string]any{
+				"type": eventType, "x": x, "y": y, "button": button, "clickCount": 1,
 			}); err != nil {
-				s.dispatchPageMouseFallback(follower, msg, screenX, screenY)
+				s.dispatchPageMouseFallback(hwnd, msg, screenX, screenY)
 			}
-		}(port, hwnd, x, y)
+		})
 	}
 }
 

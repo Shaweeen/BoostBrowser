@@ -293,6 +293,44 @@ var processWindowsBatchEnumCallback = windows.NewCallback(func(hwnd windows.HWND
 	return 1
 })
 
+type exactTitleWindowSearch struct {
+	title  string
+	target windows.HWND
+}
+
+var exactTitleWindowEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lParam uintptr) uintptr {
+	defer func() { _ = recover() }()
+	search := (*exactTitleWindowSearch)(unsafe.Pointer(lParam))
+	if search == nil {
+		return 0
+	}
+	length, _, _ := procGetWindowTextLengthW.Call(uintptr(hwnd))
+	if length == 0 {
+		return 1
+	}
+	buffer := make([]uint16, int(length)+1)
+	procGetWindowTextW.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)))
+	if windows.UTF16ToString(buffer) != search.title {
+		return 1
+	}
+	search.target = hwnd
+	return 0
+})
+
+// minimizeMainClientWindow hides only the normal BrowserStudio management
+// window. The dedicated sync assistant has a different title and remains on
+// top while browser environments are tiled.
+func minimizeMainClientWindow() bool {
+	search := &exactTitleWindowSearch{title: "BrowserStudio"}
+	procEnumWindows.Call(exactTitleWindowEnumCallback, uintptr(unsafe.Pointer(search)))
+	runtime.KeepAlive(search)
+	if search.target == 0 {
+		return false
+	}
+	procShowWindow.Call(uintptr(search.target), 6) // SW_MINIMIZE
+	return true
+}
+
 func findProcessWindow(pid int) (windows.HWND, error) {
 	search := &processWindowSearch{pid: pid}
 
