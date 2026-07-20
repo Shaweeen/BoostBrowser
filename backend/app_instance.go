@@ -116,16 +116,24 @@ func resolveBadgeDisplayNumber(profileId, profileName string, profiles map[strin
 }
 
 func (a *App) BrowserInstanceStart(profileId string) (*BrowserProfile, error) {
-	return a.browserInstanceStartInternal(profileId, nil, nil, false, false)
+	return a.browserInstanceStartInternal(profileId, nil, nil, false, false, false)
 }
 
 // BrowserInstanceStartWithParams 通过额外参数启动实例（仅本次启动生效，不落库）
 func (a *App) BrowserInstanceStartWithParams(profileId string, extraLaunchArgs []string, startURLs []string, skipDefaultStartURLs bool) (*BrowserProfile, error) {
-	return a.browserInstanceStartInternal(profileId, extraLaunchArgs, startURLs, skipDefaultStartURLs, true)
+	return a.browserInstanceStartInternal(profileId, extraLaunchArgs, startURLs, skipDefaultStartURLs, true, false)
 }
 
-func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []string, startURLs []string, skipDefaultStartURLs bool, preferVisibleWindow bool) (*BrowserProfile, error) {
+func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []string, startURLs []string, skipDefaultStartURLs bool, preferVisibleWindow bool, allowRabbyImport bool) (*BrowserProfile, error) {
 	log := logger.New("Browser")
+	if !allowRabbyImport {
+		a.rabbyImportMu.Lock()
+		blocked := a.rabbyImportActive[profileId]
+		a.rabbyImportMu.Unlock()
+		if blocked {
+			return nil, fmt.Errorf("该环境正在执行 Rabby 钱包导入，请等待完成")
+		}
+	}
 	a.browserMgr.Mutex.Lock()
 	defer a.browserMgr.Mutex.Unlock()
 

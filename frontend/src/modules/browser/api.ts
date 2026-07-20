@@ -1,4 +1,4 @@
-import type { BrowserProfile, BrowserProfileInput, BrowserTab, BrowserSettings, BrowserCore, BrowserCoreInput, BrowserCoreValidateResult, BrowserProxy, BrowserCoreExtended, CookieInfo, SnapshotInfo, BrowserBookmark, BrowserGroup, BrowserGroupInput, BrowserGroupWithCount, ProxyIPHealthResult, ExtensionImportResult, GlobalManagedExtension } from './types'
+import type { BrowserProfile, BrowserProfileInput, BrowserTab, BrowserSettings, BrowserCore, BrowserCoreInput, BrowserCoreValidateResult, BrowserProxy, BrowserCoreExtended, CookieInfo, SnapshotInfo, BrowserBookmark, BrowserGroup, BrowserGroupInput, BrowserGroupWithCount, ProxyIPHealthResult, ExtensionImportResult, GlobalManagedExtension, RabbyWalletBatchExecuteInput, RabbyWalletImportPreview, RabbyWalletImportResult } from './types'
 
 const getBindings = async () => {
   try {
@@ -996,4 +996,40 @@ export async function moveInstancesToGroup(profileIds: string[], groupId: string
     return true
   }
   return false
+}
+
+// ============================================================================
+// Rabby wallet batch import
+// ============================================================================
+
+export async function prepareRabbyWalletImport(): Promise<RabbyWalletImportPreview> {
+  const bindings: any = await getBindings()
+  if (!bindings?.RabbyWalletBatchPrepare) {
+    throw new Error('当前客户端不支持 Rabby 批量导入，请更新后重试')
+  }
+  return await bindings.RabbyWalletBatchPrepare()
+}
+
+export async function exportRabbyWalletImportTemplate(): Promise<Record<string, any>> {
+  const bindings: any = await getBindings()
+  if (!bindings?.RabbyWalletExportImportTemplate) {
+    throw new Error('当前客户端不支持导出 Rabby 模板，请更新后重试')
+  }
+  return await bindings.RabbyWalletExportImportTemplate()
+}
+
+export async function executeRabbyWalletImport(input: RabbyWalletBatchExecuteInput): Promise<RabbyWalletImportResult> {
+  const bindings: any = await getBindings()
+  if (!bindings?.RabbyWalletBatchExecute) {
+    throw new Error('当前客户端不支持 Rabby 批量导入，请更新后重试')
+  }
+  return await bindings.RabbyWalletBatchExecute(input)
+}
+
+export async function cancelRabbyWalletImport(sessionId: string): Promise<void> {
+  if (!sessionId) return
+  const bindings: any = await getBindings()
+  if (bindings?.RabbyWalletBatchCancel) {
+    await bindings.RabbyWalletBatchCancel(sessionId)
+  }
 }

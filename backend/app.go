@@ -53,13 +53,16 @@ type App struct {
 	version          string
 	activationStatus activation.Status
 
-	forceQuit        bool       // 强制退出标志，用于跳过 OnBeforeClose 的拦截
-	quitMode         quitMode   // 退出模式：全量退出 / 仅退出应用
-	maintenanceMu    sync.Mutex // 维护类操作（初始化/导入/导出）互斥锁
-	bridgeMu         sync.Mutex
-	xrayBridgeRefs   map[string]string
-	stopServicesOnce sync.Once
-	finalizeOnce     sync.Once
+	forceQuit         bool       // 强制退出标志，用于跳过 OnBeforeClose 的拦截
+	quitMode          quitMode   // 退出模式：全量退出 / 仅退出应用
+	maintenanceMu     sync.Mutex // 维护类操作（初始化/导入/导出）互斥锁
+	bridgeMu          sync.Mutex
+	xrayBridgeRefs    map[string]string
+	rabbyImportMu     sync.Mutex
+	rabbyImports      map[string]*rabbyWalletImportSession
+	rabbyImportActive map[string]bool
+	stopServicesOnce  sync.Once
+	finalizeOnce      sync.Once
 }
 
 // NewApp 创建新的应用实例
@@ -77,10 +80,12 @@ func NewApp(appRoot string, args ...interface{}) *App {
 		}
 	}
 	return &App{
-		appRoot:        strings.TrimSpace(appRoot),
-		panelMode:      panelMode,
-		version:        version,
-		xrayBridgeRefs: make(map[string]string),
+		appRoot:           strings.TrimSpace(appRoot),
+		panelMode:         panelMode,
+		version:           version,
+		xrayBridgeRefs:    make(map[string]string),
+		rabbyImports:      make(map[string]*rabbyWalletImportSession),
+		rabbyImportActive: make(map[string]bool),
 	}
 }
 
@@ -412,6 +417,12 @@ func (a *App) applyRuntimeConfig(cfg config.RuntimeConfig) {
 
 func (a *App) shutdown(ctx context.Context) {
 	log := logger.New("App")
+	a.rabbyImportMu.Lock()
+	for sessionID := range a.rabbyImports {
+		a.clearRabbyImportLocked(sessionID)
+	}
+	a.rabbyImportActive = make(map[string]bool)
+	a.rabbyImportMu.Unlock()
 	a.lifecycleLog("shutdown", fmt.Sprintf("mode=%d", a.quitMode), fmt.Sprintf("forceQuit=%t", a.forceQuit))
 	stopPanelOwnedSync(a)
 	if a.shouldStopRuntimeServicesOnShutdown() {

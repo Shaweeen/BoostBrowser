@@ -178,6 +178,22 @@ export function BrowserGlobalExtensionRemove(arg1) {
   return window['go']['main']['App']['BrowserGlobalExtensionRemove'](arg1);
 }
 
+export function RabbyWalletBatchPrepare() {
+  return window['go']['main']['App']['RabbyWalletBatchPrepare']();
+}
+
+export function RabbyWalletExportImportTemplate() {
+  return window['go']['main']['App']['RabbyWalletExportImportTemplate']();
+}
+
+export function RabbyWalletBatchExecute(arg1) {
+  return window['go']['main']['App']['RabbyWalletBatchExecute'](arg1);
+}
+
+export function RabbyWalletBatchCancel(arg1) {
+  return window['go']['main']['App']['RabbyWalletBatchCancel'](arg1);
+}
+
 export function BrowserProfileImportExtension(arg1, arg2) {
   return window['go']['main']['App']['BrowserProfileImportExtension'](arg1, arg2);
 }

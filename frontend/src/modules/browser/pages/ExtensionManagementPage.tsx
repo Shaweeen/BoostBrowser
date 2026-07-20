@@ -1,15 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { MoreHorizontal, PackagePlus, Puzzle, Search, ShieldCheck, UploadCloud, X } from 'lucide-react'
+import { AlertTriangle, FileDown, KeyRound, MoreHorizontal, PackagePlus, Puzzle, Search, ShieldCheck, UploadCloud, Wallet, X } from 'lucide-react'
 import { Button, Card, FormItem, Input, Modal, Select, Textarea, toast } from '../../../shared/components'
+import { EventsOn } from '../../../wailsjs/runtime/runtime'
 import {
+  cancelRabbyWalletImport,
+  executeRabbyWalletImport,
+  exportRabbyWalletImportTemplate,
   fetchBrowserProfiles,
   fetchGlobalExtensions,
   importExtensionToBrowserProfiles,
   importGlobalExtension,
+  prepareRabbyWalletImport,
   removeExtensionFromBrowserProfiles,
   removeGlobalExtension,
 } from '../api'
-import type { BrowserProfile } from '../types'
+import type { BrowserProfile, RabbyWalletImportPreview, RabbyWalletImportProgress, RabbyWalletImportResult } from '../types'
 
 type ExtensionPlatform = 'google' | 'firefox'
 type DistributionMode = 'manual' | 'global'
@@ -83,6 +88,14 @@ export function ExtensionManagementPage() {
   const [keyword, setKeyword] = useState('')
   const [uploadOpen, setUploadOpen] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
+  const [rabbyOpen, setRabbyOpen] = useState(false)
+  const [rabbyPreparing, setRabbyPreparing] = useState(false)
+  const [rabbyExecuting, setRabbyExecuting] = useState(false)
+  const [rabbyPreview, setRabbyPreview] = useState<RabbyWalletImportPreview | null>(null)
+  const [rabbyPassword, setRabbyPassword] = useState('')
+  const [rabbyConfirmed, setRabbyConfirmed] = useState(false)
+  const [rabbyProgress, setRabbyProgress] = useState<RabbyWalletImportProgress | null>(null)
+  const [rabbyResult, setRabbyResult] = useState<RabbyWalletImportResult | null>(null)
   const [currentId, setCurrentId] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const initializedRef = useRef(false)
@@ -142,6 +155,10 @@ export function ExtensionManagementPage() {
   useEffect(() => {
     saveExtensions(extensions)
   }, [extensions])
+
+  useEffect(() => EventsOn('rabby-wallet-import:progress', (progress: RabbyWalletImportProgress) => {
+    setRabbyProgress(progress)
+  }), [])
 
   const filtered = useMemo(() => {
     const q = keyword.trim().toLowerCase()
@@ -316,6 +333,100 @@ export function ExtensionManagementPage() {
     }
   }
 
+  const openRabbyImport = () => {
+    setRabbyOpen(true)
+    setRabbyPassword('')
+    setRabbyConfirmed(false)
+    setRabbyProgress(null)
+    setRabbyResult(null)
+  }
+
+  const closeRabbyImport = () => {
+    if (rabbyExecuting) return
+    if (rabbyPreview?.sessionId && !rabbyResult) {
+      void cancelRabbyWalletImport(rabbyPreview.sessionId)
+    }
+    setRabbyOpen(false)
+    setRabbyPreview(null)
+    setRabbyPassword('')
+    setRabbyConfirmed(false)
+    setRabbyProgress(null)
+    setRabbyResult(null)
+  }
+
+  const selectRabbyImportFile = async () => {
+    setRabbyPreparing(true)
+    try {
+      if (rabbyPreview?.sessionId && !rabbyResult) {
+        await cancelRabbyWalletImport(rabbyPreview.sessionId)
+      }
+      const preview = await prepareRabbyWalletImport()
+      if (preview?.cancelled) return
+      setRabbyPreview(preview)
+      setRabbyPassword('')
+      setRabbyConfirmed(false)
+      setRabbyProgress(null)
+      setRabbyResult(null)
+      toast.success(preview.message || `已读取 ${preview.rows.length} 条映射`)
+    } catch (error: any) {
+      toast.error(error?.message || '读取 Rabby 导入文件失败')
+    } finally {
+      setRabbyPreparing(false)
+    }
+  }
+
+  const downloadRabbyTemplate = async () => {
+    try {
+      const response = await exportRabbyWalletImportTemplate()
+      if (!response?.cancelled) toast.success(response?.message || 'Rabby CSV 模板已生成')
+    } catch (error: any) {
+      toast.error(error?.message || '导出 Rabby 模板失败')
+    }
+  }
+
+  const startRabbyImport = async () => {
+    if (!rabbyPreview?.sessionId) {
+      toast.warning('请先选择 CSV 或 TXT 文件')
+      return
+    }
+    if (rabbyPreview.rows.some(row => row.running)) {
+      toast.warning('文件中包含运行中的环境，请先全部关闭')
+      return
+    }
+    if (rabbyPassword.length < 8) {
+      toast.warning('Rabby 本地解锁密码至少需要 8 个字符')
+      return
+    }
+    if (!rabbyConfirmed) {
+      toast.warning('请确认已备份文件并理解不可覆盖限制')
+      return
+    }
+
+    const password = rabbyPassword
+    setRabbyPassword('')
+    setRabbyExecuting(true)
+    setRabbyProgress({
+      completed: 0,
+      total: rabbyPreview.rows.length,
+      profileId: '',
+      profileName: '',
+      status: 'running',
+      message: '准备开始导入',
+    })
+    try {
+      const result = await executeRabbyWalletImport({ sessionId: rabbyPreview.sessionId, password })
+      setRabbyResult(result)
+      if (result.failed > 0) toast.warning(result.message)
+      else toast.success(result.message)
+    } catch (error: any) {
+      toast.error(error?.message || 'Rabby 批量导入失败')
+      setRabbyPreview(null)
+      setRabbyConfirmed(false)
+    } finally {
+      setRabbyExecuting(false)
+    }
+  }
+
   const modalTitle = currentId ? '配置扩展' : '上传扩展'
 
   return (
@@ -329,6 +440,7 @@ export function ExtensionManagementPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="secondary" onClick={openRabbyImport}><Wallet className="w-4 h-4" />Rabby 批量导入</Button>
           <Button onClick={openUpload}><UploadCloud className="w-4 h-4" />上传扩展</Button>
           <Button variant="secondary" onClick={() => toast.info('扩展中心入口已预留，可继续接入在线扩展市场')}><PackagePlus className="w-4 h-4" />扩展中心</Button>
         </div>
@@ -492,6 +604,115 @@ export function ExtensionManagementPage() {
               <button onClick={() => removeExtension(currentExtension)} className="inline-flex items-center gap-1 text-red-500 hover:text-red-600" disabled={submitting}>
                 <X className="w-3 h-3" />移除扩展
               </button>
+            </div>
+          )}
+        </div>
+      </Modal>
+
+      <Modal
+        open={rabbyOpen}
+        onClose={closeRabbyImport}
+        title="Rabby 钱包批量导入"
+        width="900px"
+        closable={!rabbyExecuting}
+        footer={rabbyResult ? (
+          <Button onClick={closeRabbyImport}>完成</Button>
+        ) : (
+          <>
+            <Button variant="secondary" onClick={closeRabbyImport} disabled={rabbyExecuting}>取消</Button>
+            <Button variant="secondary" onClick={selectRabbyImportFile} loading={rabbyPreparing} disabled={rabbyExecuting}>选择 CSV/TXT</Button>
+            <Button onClick={startRabbyImport} loading={rabbyExecuting} disabled={!rabbyPreview || rabbyPreview.rows.some(row => row.running)}>开始导入</Button>
+          </>
+        )}
+      >
+        <div className="space-y-4">
+          <div className="rounded-xl border border-amber-200 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-900 px-4 py-3 text-sm text-amber-800 dark:text-amber-300">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+              <div>
+                <div className="font-medium">仅导入到未初始化的 Rabby，绝不会覆盖已有钱包</div>
+                <div className="mt-1 text-xs leading-5">导入文件包含高敏感助记词。请仅在离线可信电脑操作，完成后立即安全删除文件；不要上传到网盘、聊天工具或 GitHub。</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-4 rounded-xl border border-[var(--color-border-default)] px-4 py-3">
+            <div>
+              <div className="text-sm font-medium text-[var(--color-text-primary)]">1. 准备环境映射文件</div>
+              <div className="text-xs text-[var(--color-text-muted)] mt-1">CSV：profile_id,profile_name,mnemonic；TXT：profile_id&lt;Tab&gt;助记词 或 profile_id|助记词</div>
+            </div>
+            <Button variant="secondary" size="sm" onClick={downloadRabbyTemplate} disabled={rabbyExecuting}><FileDown className="w-4 h-4" />下载 CSV 模板</Button>
+          </div>
+
+          {rabbyPreview ? (
+            <div className="rounded-xl border border-[var(--color-border-default)] overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-3 bg-[var(--color-bg-muted)] border-b border-[var(--color-border-muted)]">
+                <div>
+                  <div className="text-sm font-medium text-[var(--color-text-primary)]">{rabbyPreview.fileName}</div>
+                  <div className="text-xs text-[var(--color-text-muted)] mt-0.5">已校验 {rabbyPreview.rows.length} 条；助记词只保存在后端临时内存，15 分钟后自动失效</div>
+                </div>
+                <span className="text-xs text-[var(--color-text-muted)]">按 profile_id 精确映射</span>
+              </div>
+              <div className="max-h-52 overflow-auto">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-[var(--color-bg-surface)] text-xs text-[var(--color-text-muted)]">
+                    <tr><th className="px-4 py-2 text-left">行</th><th className="px-4 py-2 text-left">环境</th><th className="px-4 py-2 text-left">profile_id</th><th className="px-4 py-2 text-left">词数</th><th className="px-4 py-2 text-right">状态</th></tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--color-border-muted)]">
+                    {rabbyPreview.rows.map(row => (
+                      <tr key={`${row.rowNumber}-${row.profileId}`}>
+                        <td className="px-4 py-2 text-[var(--color-text-muted)]">{row.rowNumber}</td>
+                        <td className="px-4 py-2 text-[var(--color-text-primary)]">{row.profileName || row.profileId}</td>
+                        <td className="px-4 py-2 font-mono text-xs text-[var(--color-text-muted)]">{row.profileId}</td>
+                        <td className="px-4 py-2 text-[var(--color-text-secondary)]">{row.wordCount}</td>
+                        <td className={`px-4 py-2 text-right ${row.running ? 'text-red-600' : 'text-green-600'}`}>{row.running ? '请先关闭' : '可导入'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <button onClick={selectRabbyImportFile} disabled={rabbyPreparing} className="w-full rounded-xl border-2 border-dashed border-[var(--color-border-default)] px-4 py-10 text-sm text-[var(--color-text-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-50">
+              {rabbyPreparing ? '正在安全读取并校验…' : '点击选择已填写的 CSV 或 TXT 文件'}
+            </button>
+          )}
+
+          {rabbyPreview && !rabbyResult && (
+            <div className="space-y-3">
+              <FormItem label="2. 设置 Rabby 本地解锁密码" required hint="本批次所有 Rabby 使用同一个本地解锁密码；密码仅用于本次导入，不保存到数据库">
+                <div className="relative">
+                  <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--color-text-muted)]" />
+                  <Input type="password" autoComplete="new-password" value={rabbyPassword} onChange={event => setRabbyPassword(event.target.value)} placeholder="至少 8 个字符" className="pl-9" disabled={rabbyExecuting} />
+                </div>
+              </FormItem>
+              <label className="flex items-start gap-2 text-sm text-[var(--color-text-secondary)] cursor-pointer">
+                <input type="checkbox" className="mt-0.5 accent-[var(--color-accent)]" checked={rabbyConfirmed} onChange={event => setRabbyConfirmed(event.target.checked)} disabled={rabbyExecuting} />
+                <span>我确认：文件中的助记词已安全备份；目标环境均为未初始化 Rabby；导入过程将逐个启动并自动关闭环境。</span>
+              </label>
+            </div>
+          )}
+
+          {rabbyProgress && !rabbyResult && (
+            <div className="rounded-xl bg-[var(--color-bg-muted)] px-4 py-3">
+              <div className="flex items-center justify-between text-sm"><span className="text-[var(--color-text-primary)]">{rabbyProgress.profileName || '准备中'}</span><span className="text-[var(--color-text-muted)]">{rabbyProgress.completed}/{rabbyProgress.total}</span></div>
+              <div className="h-2 rounded-full bg-[var(--color-border-muted)] mt-2 overflow-hidden"><div className="h-full bg-[var(--color-accent)] transition-all" style={{ width: `${rabbyProgress.total ? Math.round(rabbyProgress.completed / rabbyProgress.total * 100) : 0}%` }} /></div>
+              <div className="text-xs text-[var(--color-text-muted)] mt-2">{rabbyProgress.message}</div>
+            </div>
+          )}
+
+          {rabbyResult && (
+            <div className="rounded-xl border border-[var(--color-border-default)] overflow-hidden">
+              <div className="px-4 py-3 bg-[var(--color-bg-muted)] text-sm font-medium text-[var(--color-text-primary)]">{rabbyResult.message}</div>
+              <div className="max-h-64 overflow-auto divide-y divide-[var(--color-border-muted)]">
+                {rabbyResult.rows.map(row => (
+                  <div key={`${row.rowNumber}-${row.profileId}`} className="grid grid-cols-[1fr_110px_2fr] gap-3 px-4 py-3 text-sm">
+                    <div><div className="text-[var(--color-text-primary)]">{row.profileName}</div><div className="font-mono text-xs text-[var(--color-text-muted)] mt-0.5">{row.profileId}</div></div>
+                    <div className={row.status === 'success' ? 'text-green-600' : 'text-red-600'}>{row.status === 'success' ? '成功' : '失败'}</div>
+                    <div className="min-w-0"><div className="font-mono text-xs text-[var(--color-text-secondary)] break-all">{row.address || '-'}</div><div className="text-xs text-[var(--color-text-muted)] mt-0.5">{row.message}</div></div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>

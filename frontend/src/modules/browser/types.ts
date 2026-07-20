@@ -41,6 +41,53 @@ export interface GlobalManagedExtension {
   installed: boolean
 }
 
+export interface RabbyWalletImportPreviewRow {
+  rowNumber: number
+  profileId: string
+  profileName: string
+  wordCount: number
+  running: boolean
+}
+
+export interface RabbyWalletImportPreview {
+  cancelled: boolean
+  sessionId: string
+  fileName: string
+  rows: RabbyWalletImportPreviewRow[]
+  message: string
+}
+
+export interface RabbyWalletBatchExecuteInput {
+  sessionId: string
+  password: string
+}
+
+export interface RabbyWalletImportResultRow {
+  rowNumber: number
+  profileId: string
+  profileName: string
+  status: 'running' | 'success' | 'failed'
+  address: string
+  message: string
+}
+
+export interface RabbyWalletImportResult {
+  total: number
+  succeeded: number
+  failed: number
+  rows: RabbyWalletImportResultRow[]
+  message: string
+}
+
+export interface RabbyWalletImportProgress {
+  completed: number
+  total: number
+  profileId: string
+  profileName: string
+  status: 'running' | 'success' | 'failed'
+  message: string
+}
+
 export interface BrowserProfileInput {
   profileName: string
   userDataDir: string

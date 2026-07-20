@@ -94,6 +94,14 @@ export function BrowserGlobalExtensionList():Promise<Array<backend.GlobalManaged
 
 export function BrowserGlobalExtensionRemove(arg1:string):Promise<backend.ExtensionImportResult>;
 
+export function RabbyWalletBatchPrepare():Promise<backend.RabbyWalletImportPreview>;
+
+export function RabbyWalletExportImportTemplate():Promise<Record<string, any>>;
+
+export function RabbyWalletBatchExecute(arg1:backend.RabbyWalletBatchExecuteInput):Promise<backend.RabbyWalletImportResult>;
+
+export function RabbyWalletBatchCancel(arg1:string):Promise<void>;
+
 export function BrowserProfileImportExtension(arg1:Array<string>,arg2:string):Promise<backend.ExtensionImportResult>;
 
 export function BrowserProfileImportMoreLoginXLSX():Promise<Record<string, any>>;

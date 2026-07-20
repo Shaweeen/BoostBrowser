@@ -1,4 +1,103 @@
 export namespace backend {
+	export class RabbyWalletImportPreviewRow {
+	    rowNumber: number;
+	    profileId: string;
+	    profileName: string;
+	    wordCount: number;
+	    running: boolean;
+
+	    static createFrom(source: any = {}) { return new RabbyWalletImportPreviewRow(source); }
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.rowNumber = source["rowNumber"];
+	        this.profileId = source["profileId"];
+	        this.profileName = source["profileName"];
+	        this.wordCount = source["wordCount"];
+	        this.running = source["running"];
+	    }
+	}
+	export class RabbyWalletImportPreview {
+	    cancelled: boolean;
+	    sessionId: string;
+	    fileName: string;
+	    rows: RabbyWalletImportPreviewRow[];
+	    message: string;
+
+	    static createFrom(source: any = {}) { return new RabbyWalletImportPreview(source); }
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.cancelled = source["cancelled"];
+	        this.sessionId = source["sessionId"];
+	        this.fileName = source["fileName"];
+	        this.rows = this.convertValues(source["rows"], RabbyWalletImportPreviewRow);
+	        this.message = source["message"];
+	    }
+	    convertValues(a: any, classs: any, asMap: boolean = false): any {
+	        if (!a) return a;
+	        if (a.slice && a.map) return (a as any[]).map(elem => this.convertValues(elem, classs));
+	        if ("object" === typeof a) {
+	            if (asMap) for (const key of Object.keys(a)) a[key] = new classs(a[key]);
+	            else return new classs(a);
+	        }
+	        return a;
+	    }
+	}
+	export class RabbyWalletBatchExecuteInput {
+	    sessionId: string;
+	    password: string;
+
+	    static createFrom(source: any = {}) { return new RabbyWalletBatchExecuteInput(source); }
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sessionId = source["sessionId"];
+	        this.password = source["password"];
+	    }
+	}
+	export class RabbyWalletImportResultRow {
+	    rowNumber: number;
+	    profileId: string;
+	    profileName: string;
+	    status: string;
+	    address: string;
+	    message: string;
+
+	    static createFrom(source: any = {}) { return new RabbyWalletImportResultRow(source); }
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.rowNumber = source["rowNumber"];
+	        this.profileId = source["profileId"];
+	        this.profileName = source["profileName"];
+	        this.status = source["status"];
+	        this.address = source["address"];
+	        this.message = source["message"];
+	    }
+	}
+	export class RabbyWalletImportResult {
+	    total: number;
+	    succeeded: number;
+	    failed: number;
+	    rows: RabbyWalletImportResultRow[];
+	    message: string;
+
+	    static createFrom(source: any = {}) { return new RabbyWalletImportResult(source); }
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.total = source["total"];
+	        this.succeeded = source["succeeded"];
+	        this.failed = source["failed"];
+	        this.rows = this.convertValues(source["rows"], RabbyWalletImportResultRow);
+	        this.message = source["message"];
+	    }
+	    convertValues(a: any, classs: any, asMap: boolean = false): any {
+	        if (!a) return a;
+	        if (a.slice && a.map) return (a as any[]).map(elem => this.convertValues(elem, classs));
+	        if ("object" === typeof a) {
+	            if (asMap) for (const key of Object.keys(a)) a[key] = new classs(a[key]);
+	            else return new classs(a);
+	        }
+	        return a;
+	    }
+	}
 	
 	export class CookieInfo {
 	    name: string;
