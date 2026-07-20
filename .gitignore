@@ -1,6 +1,7 @@
 ﻿# Build artifacts
 build/bin/
 build/release/
+build/release-v*/
 build/darwin/
 publish/output/
 publish/*.nsi

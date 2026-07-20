@@ -29,7 +29,7 @@ kernels, proxy routing, automation APIs, and precise multi-window input sync.
 ## Requirements
 
 - Windows 10 or Windows 11, x64
-- Go 1.22 or newer
+- Go 1.25 or newer (required by the patched `x/net` and `x/crypto` security releases)
 - Node.js 20 or newer
 - Wails CLI v2
 - NSIS with `makensis.exe`
@@ -245,6 +245,9 @@ build\release\BrowserStudio-Private-Setup-v<version>.exe
 
 The lightweight updater assets remain named `boost-browser.exe` and
 `boost-browser.exe.sha256` for compatibility with existing installations.
+Every generated executable also receives its own `.sha256` file, and
+`release-manifest.json` records the version, size, and digest of each release
+binary.
 
 Verify an installer:
 

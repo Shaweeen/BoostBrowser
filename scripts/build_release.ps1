@@ -4,7 +4,7 @@
 # 用法：
 #   1. 改 wails.json 里 productVersion，比如 1.1.0 → 1.1.1
 #   2. 在仓库根目录执行：powershell -ExecutionPolicy Bypass -File scripts\\build_release.ps1
-#   3. 脚本完成后，build\\release\\ 下会有 3 个文件：boost-browser.exe + boost-browser.exe.sha256 + updater.exe
+#   3. 脚本完成后，build\\release\\ 下会有可执行文件、逐文件 SHA256 和 release-manifest.json
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -43,16 +43,34 @@ if (-not (Test-Path "$ReleaseDir\activation-check.exe")) { throw "未找到 $Rel
 
 # 5. 编译 updater.exe
 Write-Host "==> 编译 updater.exe (go build) ..." -ForegroundColor Yellow
-& go build -o "$ReleaseDir\updater.exe" ".\backend\cmd\updater"
+& go build -trimpath -ldflags "-s -w" -o "$ReleaseDir\updater.exe" ".\backend\cmd\updater"
 if ($LASTEXITCODE -ne 0) { throw "updater.exe 构建失败" }
 if (-not (Test-Path "$ReleaseDir\updater.exe")) { throw "未找到 $ReleaseDir\updater.exe" }
 Write-Host "    -> $ReleaseDir\updater.exe ($([math]::Round((Get-Item "$ReleaseDir\updater.exe").Length/1MB, 2)) MB)" -ForegroundColor Green
 
 # 6. 计算 SHA256
 Write-Host "==> 计算 SHA256 ..." -ForegroundColor Yellow
-$hash = (Get-FileHash "$ReleaseDir\boost-browser.exe" -Algorithm SHA256).Hash.ToLower()
-$hash | Out-File "$ReleaseDir\boost-browser.exe.sha256" -Encoding ascii -NoNewline
-Write-Host "    -> boost-browser.exe SHA256: $hash" -ForegroundColor Green
+$releaseFiles = @('boost-browser.exe', 'updater.exe', 'activation-check.exe')
+$manifestFiles = @()
+foreach ($fileName in $releaseFiles) {
+    $filePath = Join-Path $ReleaseDir $fileName
+    $hash = (Get-FileHash $filePath -Algorithm SHA256).Hash.ToLower()
+    [IO.File]::WriteAllText("$filePath.sha256", $hash, (New-Object Text.UTF8Encoding($false)))
+    if ((Get-Item "$filePath.sha256").Length -ne 64) { throw "Invalid SHA256 file: $filePath.sha256" }
+    $manifestFiles += [ordered]@{
+        name = $fileName
+        size = (Get-Item $filePath).Length
+        sha256 = $hash
+    }
+    Write-Host "    -> $fileName SHA256: $hash" -ForegroundColor Green
+}
+$manifest = [ordered]@{
+    version = $Version
+    generatedAt = [DateTime]::UtcNow.ToString('o')
+    files = $manifestFiles
+}
+$manifestJSON = $manifest | ConvertTo-Json -Depth 4
+[IO.File]::WriteAllText((Join-Path $ReleaseDir 'release-manifest.json'), $manifestJSON + "`n", (New-Object Text.UTF8Encoding($false)))
 
 # 7. 总结
 Write-Host ""

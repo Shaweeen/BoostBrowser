@@ -53,16 +53,18 @@ type App struct {
 	version          string
 	activationStatus activation.Status
 
-	forceQuit         bool       // 强制退出标志，用于跳过 OnBeforeClose 的拦截
-	quitMode          quitMode   // 退出模式：全量退出 / 仅退出应用
-	maintenanceMu     sync.Mutex // 维护类操作（初始化/导入/导出）互斥锁
-	bridgeMu          sync.Mutex
-	xrayBridgeRefs    map[string]string
-	rabbyImportMu     sync.Mutex
-	rabbyImports      map[string]*rabbyWalletImportSession
-	rabbyImportActive map[string]bool
-	stopServicesOnce  sync.Once
-	finalizeOnce      sync.Once
+	forceQuit          bool       // 强制退出标志，用于跳过 OnBeforeClose 的拦截
+	quitMode           quitMode   // 退出模式：全量退出 / 仅退出应用
+	maintenanceMu      sync.Mutex // 维护类操作（初始化/导入/导出）互斥锁
+	bridgeMu           sync.Mutex
+	xrayBridgeRefs     map[string]string
+	rabbyImportMu      sync.Mutex
+	rabbyImports       map[string]*rabbyWalletImportSession
+	rabbyImportActive  map[string]bool
+	stopServicesOnce   sync.Once
+	finalizeOnce       sync.Once
+	updateMu           sync.Mutex
+	verifiedUpdatePath string
 }
 
 // NewApp 创建新的应用实例

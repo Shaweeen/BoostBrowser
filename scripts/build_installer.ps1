@@ -124,6 +124,7 @@ $HeaderBmp = "$RepoRoot\publish\boost_header.bmp"
 $PrerequisiteDir = "$RepoRoot\build\cache\prerequisites"
 $WebView2Bootstrapper = "$PrerequisiteDir\MicrosoftEdgeWebview2Setup.exe"
 $VCRedistX64 = "$PrerequisiteDir\VC_redist.x64.exe"
+$ScopedProcessCleanup = "$RepoRoot\scripts\close_browserstudio_processes.ps1"
 
 $AssetRoot = if ($env:BOOST_KERNEL_SRC) { $env:BOOST_KERNEL_SRC } else { $RepoRoot }
 $CloakKernelSrc = "$AssetRoot\chrome\cloak-146.0.7680.177"
@@ -142,6 +143,7 @@ if (-not $ManagerOnly) {
     Require-Path "$CloakKernelSrc\chrome.exe" "Missing CloakBrowser kernel: $CloakKernelSrc\chrome.exe"
 }
 Require-Path $Icon "Missing icon: $Icon"
+Require-Path $ScopedProcessCleanup "Missing scoped process cleanup helper: $ScopedProcessCleanup"
 New-Item -ItemType Directory -Force -Path $Publish | Out-Null
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 New-Item -ItemType Directory -Force -Path $PrerequisiteDir | Out-Null
@@ -243,6 +245,7 @@ Function .onInit
   File /oname=activation-check.exe "$ActivationCheckExe"
   File /oname=MicrosoftEdgeWebview2Setup.exe "$WebView2Bootstrapper"
   File /oname=VC_redist.x64.exe "$VCRedistX64"
+  File /oname=close-browserstudio-processes.ps1 "$ScopedProcessCleanup"
 FunctionEnd
 
 Function ActivationPage
@@ -277,12 +280,10 @@ FunctionEnd
 
 Function CloseBoostProcesses
   IfFileExists "`$INSTDIR" 0 done
-  ExecWait '"`$SYSDIR\taskkill.exe" /F /T /IM chrome.exe'
-  ExecWait '"`$SYSDIR\taskkill.exe" /F /T /IM xray.exe'
-  ExecWait '"`$SYSDIR\taskkill.exe" /F /T /IM sing-box.exe'
-  ExecWait '"`$SYSDIR\taskkill.exe" /F /T /IM updater.exe'
-  ExecWait '"`$SYSDIR\taskkill.exe" /F /T /IM `${PRODUCT_EXE}'
-  Sleep 800
+  ExecWait '"`$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "`$PLUGINSDIR\close-browserstudio-processes.ps1" -InstallRoot "`$INSTDIR"' `$0
+  IntCmp `$0 0 done
+  MessageBox MB_ICONSTOP|MB_OK "BrowserStudio processes are still running. Close BrowserStudio and its managed browser windows, then retry."
+  Abort
 done:
 FunctionEnd
 
@@ -363,12 +364,7 @@ Section "$ProductName" SecMain
 SectionEnd
 
 Section "Uninstall"
-  ExecWait '"`$SYSDIR\taskkill.exe" /F /T /IM chrome.exe'
-  ExecWait '"`$SYSDIR\taskkill.exe" /F /T /IM xray.exe'
-  ExecWait '"`$SYSDIR\taskkill.exe" /F /T /IM sing-box.exe'
-  ExecWait '"`$SYSDIR\taskkill.exe" /F /T /IM updater.exe'
-  ExecWait '"`$SYSDIR\taskkill.exe" /F /T /IM `${PRODUCT_EXE}'
-  Sleep 800
+  Call CloseBoostProcesses
   Delete "`$DESKTOP\`${PRODUCT_NAME}.lnk"
   Delete "`$SMPROGRAMS\`${PRODUCT_NAME}\`${PRODUCT_NAME}.lnk"
   Delete "`$SMPROGRAMS\`${PRODUCT_NAME}\Uninstall `${PRODUCT_NAME}.lnk"

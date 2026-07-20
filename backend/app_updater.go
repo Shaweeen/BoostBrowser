@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,6 +50,51 @@ const (
 	updaterExeName = "updater.exe"
 	successMarker  = ".update_success"
 )
+
+func normalizeUpdateSHA256(value string) (string, error) {
+	hash := strings.ToLower(strings.TrimSpace(value))
+	if len(hash) != sha256.Size*2 {
+		return "", fmt.Errorf("SHA256 格式无效")
+	}
+	if _, err := hex.DecodeString(hash); err != nil {
+		return "", fmt.Errorf("SHA256 格式无效")
+	}
+	return hash, nil
+}
+
+// validateUpdateAssetURL confines executable downloads to the stable public
+// release channel. The source repository is private, while existing clients
+// intentionally keep using Shaweeen/BoostBrowser for backward compatibility.
+func validateUpdateAssetURL(rawURL, assetName string) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), "github.com") {
+		return nil, fmt.Errorf("更新地址不是受信任的 GitHub Release HTTPS 地址")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, fmt.Errorf("更新地址包含不允许的认证或查询参数")
+	}
+	prefix := fmt.Sprintf("/%s/%s/releases/download/", githubOwner, githubRepo)
+	path := parsed.EscapedPath()
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/"+assetName) {
+		return nil, fmt.Errorf("更新地址不属于 BrowserStudio 稳定发行通道")
+	}
+	tag := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/"+assetName)
+	if tag == "" || strings.Contains(tag, "/") || tag == "." || tag == ".." {
+		return nil, fmt.Errorf("更新地址中的版本标签无效")
+	}
+	return parsed, nil
+}
+
+func isWindowsPEFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	header := []byte{0, 0}
+	_, err = io.ReadFull(f, header)
+	return err == nil && header[0] == 'M' && header[1] == 'Z'
+}
 
 // githubReleaseAPI 实时查询 GitHub Releases
 func githubReleaseAPI() string {
@@ -124,6 +170,9 @@ func (a *App) CheckUpdate() (*UpdateCheckResult, error) {
 	}
 	if sha256URL == "" {
 		return nil, fmt.Errorf("release %s 缺少 boost-browser.exe.sha256 asset", rel.TagName)
+	}
+	if _, err := validateUpdateAssetURL(exeURL, "boost-browser.exe"); err != nil {
+		return nil, err
 	}
 
 	// 拉 sha256 文件内容
@@ -250,8 +299,12 @@ func fetchLatestReleaseFromRedirect(client *http.Client, latestPageURL string) (
 }
 
 func fetchSHA256Asset(url string) (string, error) {
+	trustedURL, err := validateUpdateAssetURL(url, "boost-browser.exe.sha256")
+	if err != nil {
+		return "", err
+	}
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := client.Get(trustedURL.String())
 	if err != nil {
 		return "", err
 	}
@@ -269,17 +322,24 @@ func fetchSHA256Asset(url string) (string, error) {
 	if len(parts) == 0 {
 		return "", fmt.Errorf("sha256 文件为空")
 	}
-	hash := strings.ToLower(parts[0])
-	if len(hash) != 64 {
-		return "", fmt.Errorf("sha256 长度异常：%d", len(hash))
-	}
-	return hash, nil
+	return normalizeUpdateSHA256(parts[0])
 }
 
 // DownloadUpdate Wails binding：流式下载，进度通过 update:progress 事件推送给前端
 // 返回值是临时文件路径，传给 ApplyUpdate
 func (a *App) DownloadUpdate(url, expectedSHA256 string) (string, error) {
 	log := logger.New("Updater")
+	trustedURL, err := validateUpdateAssetURL(url, "boost-browser.exe")
+	if err != nil {
+		return "", err
+	}
+	expectedSHA256, err = normalizeUpdateSHA256(expectedSHA256)
+	if err != nil {
+		return "", err
+	}
+	a.updateMu.Lock()
+	a.verifiedUpdatePath = ""
+	a.updateMu.Unlock()
 
 	updateDir := a.resolveAppPath(filepath.Join("data", updateDirName))
 	if err := os.MkdirAll(updateDir, 0755); err != nil {
@@ -288,7 +348,7 @@ func (a *App) DownloadUpdate(url, expectedSHA256 string) (string, error) {
 	dst := filepath.Join(updateDir, "boost-browser.new.exe")
 	_ = os.Remove(dst)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", trustedURL.String(), nil)
 	if err != nil {
 		return "", err
 	}
@@ -357,6 +417,14 @@ func (a *App) DownloadUpdate(url, expectedSHA256 string) (string, error) {
 		_ = os.Remove(dst)
 		return "", fmt.Errorf("SHA256 校验失败，文件已损坏或被篡改\n期望: %s\n实际: %s", expectedSHA256, gotHash)
 	}
+	if !isWindowsPEFile(dst) {
+		_ = os.Remove(dst)
+		return "", fmt.Errorf("更新文件不是有效的 Windows PE 可执行文件")
+	}
+
+	a.updateMu.Lock()
+	a.verifiedUpdatePath = filepath.Clean(dst)
+	a.updateMu.Unlock()
 
 	emitProgress(true)
 	log.Info("更新包下载完成",
@@ -382,6 +450,21 @@ func applyUpdateDebugLog(currentExe, msg string) {
 // ApplyUpdate Wails binding：启动 updater.exe，主程序退出
 func (a *App) ApplyUpdate(newExePath string) error {
 	log := logger.New("Updater")
+	expectedPath := filepath.Clean(a.resolveAppPath(filepath.Join("data", updateDirName, "boost-browser.new.exe")))
+	requestedPath := filepath.Clean(strings.TrimSpace(newExePath))
+	a.updateMu.Lock()
+	verifiedPath := filepath.Clean(a.verifiedUpdatePath)
+	if verifiedPath != "" && strings.EqualFold(verifiedPath, requestedPath) {
+		a.verifiedUpdatePath = ""
+	}
+	a.updateMu.Unlock()
+	if requestedPath == "." || !strings.EqualFold(requestedPath, expectedPath) || !strings.EqualFold(verifiedPath, requestedPath) {
+		return fmt.Errorf("更新文件未通过本次下载会话的完整性验证")
+	}
+	newExePath = requestedPath
+	if !isWindowsPEFile(newExePath) {
+		return fmt.Errorf("更新文件不是有效的 Windows PE 可执行文件")
+	}
 
 	currentExe, err := os.Executable()
 	if err != nil {

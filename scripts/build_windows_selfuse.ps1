@@ -41,6 +41,14 @@ function Require-Command([string]$Name, [string]$InstallHint) {
     if (-not $cmd) { throw "Missing required command '$Name'. $InstallHint" }
 }
 
+function Require-MinimumVersion([string]$Label, [string]$Value, [version]$Minimum) {
+    $match = [regex]::Match($Value, '(\d+)\.(\d+)(?:\.(\d+))?')
+    if (-not $match.Success) { throw "Unable to parse $Label version: $Value" }
+    $patch = if ($match.Groups[3].Success) { $match.Groups[3].Value } else { '0' }
+    $actual = [version]("{0}.{1}.{2}" -f $match.Groups[1].Value, $match.Groups[2].Value, $patch)
+    if ($actual -lt $Minimum) { throw "$Label $Minimum or newer is required; found $actual" }
+}
+
 function Run-Step([string]$Title, [scriptblock]$Block) {
     Write-Host ""
     Write-Host "================================================================" -ForegroundColor Cyan
@@ -60,6 +68,8 @@ Run-Step "Checking toolchain" {
         $makensis = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     }
     if (-not $makensis) { throw "Missing makensis. Install NSIS from https://nsis.sourceforge.io/Download" }
+    Require-MinimumVersion "Node.js" (node -v) ([version]'20.0.0')
+    Require-MinimumVersion "Go" (go version) ([version]'1.25.0')
     Write-Host "node:     $((node -v))" -ForegroundColor Green
     Write-Host "npm:      $((npm -v))" -ForegroundColor Green
     Write-Host "go:       $((go version))" -ForegroundColor Green

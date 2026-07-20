@@ -1,3 +1,5 @@
+//go:build windows
+
 // updater.exe —— 独立的小工具，专门负责替换主程序 exe 后重启。
 //
 // 调用方式（由主程序 ApplyUpdate 启动）：

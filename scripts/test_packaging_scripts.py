@@ -64,6 +64,28 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("Call EnsureVCRuntime", installer)
         self.assertIn("Call EnsureWebView2Runtime", installer)
 
+    def test_installer_only_stops_browserstudio_owned_processes(self):
+        installer = self.read("scripts/build_installer.ps1")
+        cleanup = self.read("scripts/close_browserstudio_processes.ps1")
+        self.assertIn("close-browserstudio-processes.ps1", installer)
+        self.assertNotIn('/IM chrome.exe', installer)
+        self.assertNotIn('/IM xray.exe', installer)
+        self.assertNotIn('/IM sing-box.exe', installer)
+        self.assertIn("ExecutablePath", cleanup)
+        self.assertIn("$rootPrefix + 'chrome\\'", cleanup)
+        self.assertIn("$rootPrefix + 'bin\\'", cleanup)
+
+    def test_release_versions_are_consistent(self):
+        import json
+
+        wails = json.loads(self.read("wails.json"))
+        package = json.loads(self.read("frontend/package.json"))
+        lock = json.loads(self.read("frontend/package-lock.json"))
+        version = wails["info"]["productVersion"]
+        self.assertEqual(package["version"], version)
+        self.assertEqual(lock["version"], version)
+        self.assertEqual(lock["packages"][""]["version"], version)
+
     def test_go_mod_does_not_replace_modules_with_missing_local_third_party_dirs(self):
         text = self.read("go.mod")
         self.assertNotRegex(text, r"replace\s+github\.com/energye/systray\s+=>\s+\./third_party/systray")
@@ -116,6 +138,15 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("[switch]$NoInstall", text)
         self.assertIn('Run-Step "Starting Setup installer"', text)
         self.assertIn("Start-Process -FilePath $setupPath -Wait -PassThru", text)
+        self.assertIn('Require-MinimumVersion "Go"', text)
+        self.assertIn("1.25.0", text)
+
+    def test_release_build_emits_hashes_and_manifest(self):
+        text = self.read("scripts/build_release.ps1")
+        self.assertIn("@('boost-browser.exe', 'updater.exe', 'activation-check.exe')", text)
+        self.assertIn('"$filePath.sha256"', text)
+        self.assertIn("release-manifest.json", text)
+        self.assertIn("ConvertTo-Json", text)
 
     def test_new_windows_private_setup_installs_and_builds_private_edition(self):
         text = self.read("scripts/setup_new_windows_private.ps1")
