@@ -55,6 +55,7 @@ export function SmartAssignProxyModal({
   useEffect(() => {
     if (!open) return
     setProgress(null)
+    setProxyScope(selectedProxyIds.size > 0 ? 'selected' : 'all')
     void (async () => {
       setLoading(true)
       try {
@@ -65,7 +66,7 @@ export function SmartAssignProxyModal({
         setLoading(false)
       }
     })()
-  }, [open])
+  }, [open, selectedProxyIds])
 
   // 候选代理（按当前选择的范围决定，并按是否包含内置代理过滤）
   const candidateProxies = useMemo<BrowserProxy[]>(() => {

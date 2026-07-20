@@ -14,6 +14,7 @@ const PROXY_IP_HEALTH_CACHE_KEY = 'browser:proxyPool:ipHealthMap:v1'
 const PROXY_SOURCE_IGNORED_NAMES_KEY = 'browser:proxyPool:sourceIgnoredProxyNames:v1'
 const PROXY_GLOBAL_AUTO_REFRESH_KEY = 'browser:proxyPool:globalAutoRefreshEnabled:v1'
 const PROXY_GLOBAL_REFRESH_INTERVAL_KEY = 'browser:proxyPool:globalRefreshIntervalM:v1'
+const PROXY_SUBSCRIPTION_META_KEY = 'browser:proxyPool:subscriptionMeta:v1'
 const PROXY_LATENCY_CACHE_TTL_MS = 12 * 60 * 60 * 1000
 const PROXY_IP_HEALTH_CACHE_TTL_MS = 12 * 60 * 60 * 1000
 
@@ -85,7 +86,27 @@ interface ProxyDisplayInfo {
   server: string
   port: number
   latencyMs?: number
+  lastLatencyMs?: number
+  lastTestOk?: boolean
+  lastTestedAt?: string
 }
+
+interface ProxySubscriptionInfo {
+  sourceId: string
+  sourceUrl: string
+  profileTitle: string
+  nodeCount: number
+  uploadBytes: number
+  downloadBytes: number
+  totalBytes: number
+  usedBytes: number
+  remainingBytes: number
+  expireAt: string
+  updateInterval: string
+  updatedAt: string
+}
+
+type PendingSubscriptionInfo = Omit<ProxySubscriptionInfo, 'sourceId' | 'sourceUrl' | 'updatedAt'>
 
 interface URLImportSourceMeta {
   sourceId: string
@@ -133,6 +154,9 @@ function toDisplayList(proxies: BrowserProxy[]): ProxyDisplayInfo[] {
       sourceAutoRefresh: !!p.sourceAutoRefresh,
       sourceRefreshIntervalM: Math.max(0, Number(p.sourceRefreshIntervalM || 0)),
       sourceLastRefreshAt: p.sourceLastRefreshAt || '',
+      lastLatencyMs: p.lastLatencyMs,
+      lastTestOk: p.lastTestOk,
+      lastTestedAt: p.lastTestedAt,
       ...info,
     }
   })
@@ -325,6 +349,19 @@ function normalizeDirectProxyLine(raw: string): string {
   if (!line || line.startsWith('#')) return ''
   line = normalizeDirectProxyConfig(line)
   if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(line)) {
+    // 常见代理商文本格式：host:port:username:password。密码允许继续包含冒号。
+    // IPv6 地址必须使用标准 URL（例如 http://user:pass@[::1]:8080），避免歧义。
+    const parts = line.split(':')
+    if (parts.length >= 4 && parts[0] && /^\d+$/.test(parts[1])) {
+      const [host, port, username, ...passwordParts] = parts
+      if (!host.includes('[') && !host.includes(']') && username) {
+        const password = passwordParts.join(':')
+        const auth = `${encodeURIComponent(username)}${password ? `:${encodeURIComponent(password)}` : ''}@`
+        line = `http://${auth}${host}:${port}`
+      }
+    }
+  }
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(line)) {
     line = `http://${line}`
   }
   return line
@@ -402,6 +439,67 @@ function buildImportPreview(candidates: ImportCandidate[], groupName: string): P
   })
 }
 
+function emptyPendingSubscriptionInfo(): PendingSubscriptionInfo {
+  return {
+    profileTitle: '', nodeCount: 0, uploadBytes: 0, downloadBytes: 0,
+    totalBytes: 0, usedBytes: 0, remainingBytes: 0, expireAt: '', updateInterval: '',
+  }
+}
+
+function normalizePendingSubscriptionInfo(result: any): PendingSubscriptionInfo {
+  const info = result?.subscriptionInfo || {}
+  return {
+    profileTitle: String(result?.profileTitle || '').trim(),
+    nodeCount: Math.max(0, Number(result?.proxyCount || 0)),
+    uploadBytes: Math.max(0, Number(info.uploadBytes || 0)),
+    downloadBytes: Math.max(0, Number(info.downloadBytes || 0)),
+    totalBytes: Math.max(0, Number(info.totalBytes || 0)),
+    usedBytes: Math.max(0, Number(info.usedBytes || 0)),
+    remainingBytes: Math.max(0, Number(info.remainingBytes || 0)),
+    expireAt: String(info.expireAt || '').trim(),
+    updateInterval: String(result?.profileUpdateInterval || '').trim(),
+  }
+}
+
+function readSubscriptionMeta(): Record<string, ProxySubscriptionInfo> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PROXY_SUBSCRIPTION_META_KEY) || '{}')
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeSubscriptionMeta(data: Record<string, ProxySubscriptionInfo>) {
+  try {
+    localStorage.setItem(PROXY_SUBSCRIPTION_META_KEY, JSON.stringify(data))
+  } catch {
+    // ignore storage quota/private mode failures
+  }
+}
+
+function formatByteSize(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '-'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let size = value
+  let unit = 0
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024
+    unit += 1
+  }
+  return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`
+}
+
+function expiryStatus(expireAt: string): { label: string; tone: 'normal' | 'warning' | 'expired'; days: number | null } {
+  const timestamp = parseTimestampMs(expireAt)
+  if (!timestamp) return { label: '未提供到期时间', tone: 'normal', days: null }
+  const days = Math.ceil((timestamp - Date.now()) / (24 * 60 * 60 * 1000))
+  const dateLabel = new Date(timestamp).toLocaleString('zh-CN')
+  if (days < 0) return { label: `已于 ${dateLabel} 到期`, tone: 'expired', days }
+  if (days <= 7) return { label: `${dateLabel} 到期（剩余 ${days} 天）`, tone: 'warning', days }
+  return { label: `${dateLabel} 到期`, tone: 'normal', days }
+}
+
 function parseTimestampMs(value: string): number {
   const v = (value || '').trim()
   if (!v) return 0
@@ -477,7 +575,7 @@ function collectURLImportSources(list: BrowserProxy[]): URLImportSourceMeta[] {
     if (!last) {
       sourceMap.set(sourceId, {
         sourceId,
-        sourceUrl,
+        sourceUrl: sourceHostLabel(sourceUrl),
         sourceNamePrefix: (item.sourceNamePrefix || '').trim(),
         sourceGroupName: (item.groupName || '').trim(),
         sourceDnsServers: (item.dnsServers || '').trim(),
@@ -773,6 +871,7 @@ export function ProxyPoolPage() {
   const [importMode, setImportMode] = useState<ProxyImportMode>('clash')
   const [importUrl, setImportUrl] = useState('')
   const [importResolvedUrl, setImportResolvedUrl] = useState('')
+  const [importSubscriptionInfo, setImportSubscriptionInfo] = useState<PendingSubscriptionInfo>(() => emptyPendingSubscriptionInfo())
   const [importText, setImportText] = useState('')
   const [importDnsServers, setImportDnsServers] = useState('')
   const [importNamePrefix, setImportNamePrefix] = useState('')
@@ -789,6 +888,7 @@ export function ProxyPoolPage() {
   const [refreshingSourceIds, setRefreshingSourceIds] = useState<Set<string>>(new Set())
   const [globalAutoRefreshEnabled, setGlobalAutoRefreshEnabled] = useState(false)
   const [globalRefreshIntervalM, setGlobalRefreshIntervalM] = useState('60')
+  const [subscriptionMeta, setSubscriptionMeta] = useState<Record<string, ProxySubscriptionInfo>>(() => readSubscriptionMeta())
 
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [editingProxy, setEditingProxy] = useState<BrowserProxy | null>(null)
@@ -823,6 +923,10 @@ export function ProxyPoolPage() {
   useEffect(() => {
     writeIPHealthCache(ipHealthMap)
   }, [ipHealthMap])
+
+  useEffect(() => {
+    writeSubscriptionMeta(subscriptionMeta)
+  }, [subscriptionMeta])
 
   useEffect(() => {
     writeGlobalRefreshConfig(globalAutoRefreshEnabled, globalRefreshInterval)
@@ -865,6 +969,20 @@ export function ProxyPoolPage() {
       return changed ? next : prev
     })
   }, [proxies])
+
+  useEffect(() => {
+    if (loading) return
+    const activeSourceIds = new Set(proxies.map(item => (item.sourceId || '').trim()).filter(Boolean))
+    setSubscriptionMeta(prev => {
+      const next: Record<string, ProxySubscriptionInfo> = {}
+      let changed = false
+      Object.entries(prev).forEach(([sourceId, info]) => {
+        if (activeSourceIds.has(sourceId)) next[sourceId] = info
+        else changed = true
+      })
+      return changed ? next : prev
+    })
+  }, [loading, proxies])
 
   const loadProxies = async () => {
     setLoading(true)
@@ -914,6 +1032,35 @@ export function ProxyPoolPage() {
 
   const sourceMetas = useMemo(() => collectURLImportSources(proxies), [proxies])
   const hasURLImportSources = sourceMetas.length > 0
+  const expiringSubscriptions = useMemo(() => Object.values(subscriptionMeta)
+    .map(meta => ({ meta, status: expiryStatus(meta.expireAt) }))
+    .filter(item => item.status.tone === 'warning' || item.status.tone === 'expired')
+    .sort((a, b) => parseTimestampMs(a.meta.expireAt) - parseTimestampMs(b.meta.expireAt)), [subscriptionMeta])
+
+  const updateSubscriptionMetadata = useCallback((sourceId: string, sourceUrl: string, result: any) => {
+    const pending = normalizePendingSubscriptionInfo(result)
+    setSubscriptionMeta(prev => {
+      const old = prev[sourceId]
+      const hasTraffic = pending.totalBytes > 0 || pending.usedBytes > 0
+      return {
+        ...prev,
+        [sourceId]: {
+        sourceId,
+        sourceUrl,
+        ...pending,
+        profileTitle: pending.profileTitle || old?.profileTitle || '',
+        expireAt: pending.expireAt || old?.expireAt || '',
+        uploadBytes: hasTraffic ? pending.uploadBytes : old?.uploadBytes || 0,
+        downloadBytes: hasTraffic ? pending.downloadBytes : old?.downloadBytes || 0,
+        totalBytes: hasTraffic ? pending.totalBytes : old?.totalBytes || 0,
+        usedBytes: hasTraffic ? pending.usedBytes : old?.usedBytes || 0,
+        remainingBytes: hasTraffic ? pending.remainingBytes : old?.remainingBytes || 0,
+        updateInterval: pending.updateInterval || old?.updateInterval || '',
+        updatedAt: new Date().toISOString(),
+      },
+      }
+    })
+  }, [])
 
   const refreshSingleSource = useCallback(async (sourceId: string, silent: boolean) => {
     const currentList = proxiesRef.current
@@ -953,6 +1100,7 @@ export function ProxyPoolPage() {
         .concat(refreshedSourceProxies)
 
       await saveProxies(merged)
+      updateSubscriptionMetadata(sourceId, meta.sourceUrl, result)
       if (!silent) {
         toast.success(`订阅刷新成功：${meta.sourceUrl}（${refreshedSourceProxies.length} 条）`)
       }
@@ -969,7 +1117,7 @@ export function ProxyPoolPage() {
         return next
       })
     }
-  }, [globalAutoRefreshEnabled, globalRefreshInterval, saveProxies])
+  }, [globalAutoRefreshEnabled, globalRefreshInterval, saveProxies, updateSubscriptionMetadata])
 
   const handleRefreshAllSources = useCallback(async (silent = false) => {
     const metas = collectURLImportSources(proxiesRef.current)
@@ -1124,6 +1272,11 @@ export function ProxyPoolPage() {
       next.has(proxyId) ? next.delete(proxyId) : next.add(proxyId)
       return next
     })
+  }
+
+  const handleAssignSpecificProxy = (proxyId: string) => {
+    setSelectedIds(new Set([proxyId]))
+    setSmartAssignOpen(true)
   }
 
   const handleBatchDeleteConfirm = async () => {
@@ -1301,6 +1454,28 @@ export function ProxyPoolPage() {
     )
   }
 
+  const renderProxyStatus = (record: ProxyDisplayInfo) => {
+    if (record.proxyConfig === 'direct://') return <span className="text-xs text-green-500">直连</span>
+    const sourceInfo = record.sourceId ? subscriptionMeta[record.sourceId] : undefined
+    if (sourceInfo && expiryStatus(sourceInfo.expireAt).tone === 'expired') {
+      return <span className="text-xs font-medium text-red-500">订阅已到期</span>
+    }
+    const health = ipHealthMap[record.proxyId]
+    if (health?.ok && (health.fraudScore >= 70 || health.isBroadcast)) {
+      return <span className="text-xs font-medium text-amber-500" title={`欺诈评分 ${health.fraudScore}`}>高风险 IP</span>
+    }
+    const latency = latencyMap[record.proxyId]
+    if (latency === -1) return <span className="text-xs text-blue-500 animate-pulse">验证中</span>
+    if (latency === -3) return <span className="text-xs text-[var(--color-text-muted)]">协议需桥接</span>
+    if (latency === -2 || record.lastTestOk === false && !!record.lastTestedAt) {
+      return <span className="text-xs font-medium text-red-500" title={record.lastTestedAt ? `上次验证：${new Date(record.lastTestedAt).toLocaleString('zh-CN')}` : ''}>不可用</span>
+    }
+    if (typeof latency === 'number' && latency >= 0) {
+      return <span className="text-xs font-medium text-green-500" title={record.lastTestedAt ? `上次验证：${new Date(record.lastTestedAt).toLocaleString('zh-CN')}` : ''}>可用</span>
+    }
+    return <span className="text-xs text-[var(--color-text-muted)]">未验证</span>
+  }
+
   const columns: TableColumn<ProxyDisplayInfo>[] = [
     {
       key: 'checkbox',
@@ -1326,12 +1501,16 @@ export function ProxyPoolPage() {
       render: (_, record) => {
         if (!record.sourceUrl) return '-'
         const host = sourceHostLabel(record.sourceUrl)
+        const sourceInfo = record.sourceId ? subscriptionMeta[record.sourceId] : undefined
+        const expiration = sourceInfo ? expiryStatus(sourceInfo.expireAt) : null
         return (
           <div className="text-xs leading-5">
-            <div className="text-[var(--color-text-primary)] truncate" title={record.sourceUrl}>{host}</div>
+            <div className="text-[var(--color-text-primary)] truncate" title={record.sourceUrl}>{sourceInfo?.profileTitle || host}</div>
             <div className="text-[var(--color-text-muted)]">
               {globalAutoRefreshEnabled ? `自动刷新 ${globalRefreshInterval} 分钟（全局）` : '手动刷新'}
             </div>
+            {(sourceInfo?.totalBytes || 0) > 0 && <div className="text-[var(--color-text-muted)]">流量 {formatByteSize(sourceInfo?.usedBytes || 0)} / {formatByteSize(sourceInfo?.totalBytes || 0)}</div>}
+            {expiration && expiration.days !== null && <div className={expiration.tone === 'normal' ? 'text-[var(--color-text-muted)]' : expiration.tone === 'warning' ? 'text-amber-500' : 'text-red-500'}>{expiration.label}</div>}
           </div>
         )
       },
@@ -1347,6 +1526,12 @@ export function ProxyPoolPage() {
       render: (_, record) => renderLatency(record),
     },
     {
+      key: 'status',
+      title: '状态',
+      width: '90px',
+      render: (_, record) => renderProxyStatus(record),
+    },
+    {
       key: 'ipHealth',
       title: 'IP健康',
       width: '280px',
@@ -1355,7 +1540,7 @@ export function ProxyPoolPage() {
     {
       key: 'actions',
       title: '操作',
-      width: '320px',
+      width: '420px',
       render: (_, record) => {
         const isBuiltin = BUILTIN_PROXY_IDS.has(record.proxyId)
         const hasSource = !!record.sourceId && !!record.sourceUrl
@@ -1383,6 +1568,11 @@ export function ProxyPoolPage() {
               loading={checkingIPHealthIds.has(record.proxyId)}
               disabled={record.proxyConfig === 'direct://'}
             >IP健康</Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={(e) => { e.stopPropagation(); handleAssignSpecificProxy(record.proxyId) }}
+            >指定环境</Button>
             <Button
               size="sm" variant="ghost"
               disabled={isBuiltin}
@@ -1481,6 +1671,7 @@ export function ProxyPoolPage() {
     setImportResolvedUrl('')
     setDirectImportUrl('')
     setDirectImportBatchText('')
+    setImportSubscriptionInfo(emptyPendingSubscriptionInfo())
     if (nextMode !== 'clash') {
       setImportUrl('')
       setImportDnsServers('')
@@ -1507,6 +1698,7 @@ export function ProxyPoolPage() {
 
       setImportResolvedUrl((result?.url || targetURL).trim())
       setImportText(content)
+      setImportSubscriptionInfo(normalizePendingSubscriptionInfo(result))
 
       if (!importDnsServers.trim() && typeof result?.dnsServers === 'string' && result.dnsServers.trim()) {
         setImportDnsServers(result.dnsServers.trim())
@@ -1518,6 +1710,7 @@ export function ProxyPoolPage() {
       toast.success(`URL 获取成功，检测到 ${Math.max(0, Number(result?.proxyCount || 0))} 个代理`)
     } catch (error: any) {
       setImportResolvedUrl('')
+      setImportSubscriptionInfo(emptyPendingSubscriptionInfo())
       toast.error(error?.message || 'URL 获取失败')
     } finally {
       setFetchingImportUrl(false)
@@ -1565,23 +1758,49 @@ export function ProxyPoolPage() {
         : []
       const pickExistingID = createExistingProxyIDPicker(oldSourceProxies)
 
-      const newProxies: BrowserProxy[] = previewList.map((p) => ({
-        proxyId: pickExistingID(p.proxyName, p.proxyConfig) || nextProxyID(),
-        proxyName: p.proxyName,
-        proxyConfig: p.proxyConfig,
-        dnsServers: importMode === 'clash' ? importDnsServers.trim() || undefined : undefined,
-        groupName: importGroupName.trim() || undefined,
-        sourceId: sourceID || undefined,
-        sourceUrl: sourceURL || undefined,
-        sourceNamePrefix: sourceNamePrefix || undefined,
-        sourceAutoRefresh,
-        sourceRefreshIntervalM,
-        sourceLastRefreshAt: sourceLastRefreshAt || undefined,
-      }))
-      const allProxies = isURLImport
-        ? proxies.filter(item => (item.sourceId || '').trim() !== sourceID).concat(newProxies)
-        : [...proxies, ...newProxies]
+      const baseProxies = isURLImport
+        ? proxies.filter(item => (item.sourceId || '').trim() !== sourceID)
+        : proxies
+      const seenConfigs = new Set(baseProxies.map(item => item.proxyConfig.trim().toLowerCase()))
+      const newProxies: BrowserProxy[] = []
+      let duplicateCount = 0
+      previewList.forEach(p => {
+        const configKey = p.proxyConfig.trim().toLowerCase()
+        if (!configKey || seenConfigs.has(configKey)) {
+          duplicateCount += 1
+          return
+        }
+        seenConfigs.add(configKey)
+        newProxies.push({
+          proxyId: pickExistingID(p.proxyName, p.proxyConfig) || nextProxyID(),
+          proxyName: p.proxyName,
+          proxyConfig: p.proxyConfig,
+          dnsServers: importMode === 'clash' ? importDnsServers.trim() || undefined : undefined,
+          groupName: importGroupName.trim() || undefined,
+          sourceId: sourceID || undefined,
+          sourceUrl: sourceURL || undefined,
+          sourceNamePrefix: sourceNamePrefix || undefined,
+          sourceAutoRefresh,
+          sourceRefreshIntervalM,
+          sourceLastRefreshAt: sourceLastRefreshAt || undefined,
+        })
+      })
+      if (newProxies.length === 0) {
+        throw new Error(duplicateCount > 0 ? '这些代理已存在于代理池中，无需重复导入' : '没有可导入的代理')
+      }
+      const allProxies = baseProxies.concat(newProxies)
       await saveProxies(allProxies)
+      if (isURLImport) {
+        setSubscriptionMeta(prev => ({
+          ...prev,
+          [sourceID]: {
+            sourceId: sourceID,
+            sourceUrl: sourceHostLabel(sourceURL),
+            ...importSubscriptionInfo,
+            updatedAt: new Date().toISOString(),
+          },
+        }))
+      }
       if (isURLImport && removedPreviewProxyNames.length > 0) {
         appendSourceIgnoredProxyNames(sourceID, removedPreviewProxyNames)
       }
@@ -1595,9 +1814,27 @@ export function ProxyPoolPage() {
       setDirectImportForm({ ...INITIAL_DIRECT_IMPORT_FORM })
       setDirectImportUrl('')
       setDirectImportBatchText('')
+      setImportSubscriptionInfo(emptyPendingSubscriptionInfo())
       setPreviewList([])
       setRemovedPreviewProxyNames([])
-      toast.success(`成功导入 ${newProxies.length} 个代理`)
+      toast.success(`成功导入 ${newProxies.length} 个代理${duplicateCount > 0 ? `，跳过 ${duplicateCount} 个重复项` : ''}，正在自动验证延迟`)
+      const importedIds = newProxies.map(item => item.proxyId)
+      setLatencyMap(prev => ({ ...prev, ...Object.fromEntries(importedIds.map(id => [id, -1])) }))
+      void browserProxyBatchTestSpeed(importedIds, 4).then(results => {
+        setLatencyMap(prev => {
+          const next = { ...prev }
+          results.forEach(result => { next[result.proxyId] = toLatencyValue(result.ok, result.latencyMs, result.error) })
+          return next
+        })
+        const available = results.filter(item => item.ok).length
+        toast.info(`导入验证完成：可用 ${available}/${results.length}`)
+      }).catch(() => {
+        setLatencyMap(prev => {
+          const next = { ...prev }
+          importedIds.forEach(id => { next[id] = -2 })
+          return next
+        })
+      })
     } catch (error: any) {
       toast.error(error?.message || '导入失败')
     } finally {
@@ -1633,6 +1870,18 @@ export function ProxyPoolPage() {
           <Button size="sm" onClick={() => setImportModalOpen(true)}>导入代理</Button>
         </div>
       </div>
+
+      {expiringSubscriptions.length > 0 && (
+        <div className="space-y-2">
+          {expiringSubscriptions.map(({ meta, status }) => (
+            <div key={meta.sourceId} className={`rounded-lg border px-4 py-3 text-sm ${status.tone === 'expired' ? 'border-red-300 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-900/20 dark:text-red-300' : 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-900/20 dark:text-amber-300'}`}>
+              <span className="font-semibold">订阅{status.tone === 'expired' ? '已到期' : '即将到期'}：</span>
+              {meta.profileTitle || sourceHostLabel(meta.sourceUrl)} · {status.label}
+              {meta.totalBytes > 0 && ` · 剩余 ${formatByteSize(meta.remainingBytes)}`}
+            </div>
+          ))}
+        </div>
+      )}
 
       <Card>
         <div className="flex items-center gap-3 mb-4">
@@ -1766,9 +2015,17 @@ export function ProxyPoolPage() {
                   </Button>
                 </div>
                 {importResolvedUrl.trim() && (
-                  <p className="text-xs text-[var(--color-success)] mt-1 break-all">
-                    已绑定订阅：{importResolvedUrl}
-                  </p>
+                  <div className="mt-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-3 py-2 text-xs space-y-1">
+                    <div className="font-medium text-[var(--color-text-primary)]">订阅识别成功：{importSubscriptionInfo.profileTitle || sourceHostLabel(importResolvedUrl)}</div>
+                    <div className="text-[var(--color-text-muted)] break-all">地址：{importResolvedUrl}</div>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[var(--color-text-secondary)]">
+                      <span>节点数量：{importSubscriptionInfo.nodeCount}</span>
+                      <span>更新间隔：{importSubscriptionInfo.updateInterval ? `${importSubscriptionInfo.updateInterval} 小时` : '未提供'}</span>
+                      <span>已用流量：{formatByteSize(importSubscriptionInfo.usedBytes)}</span>
+                      <span>剩余流量：{formatByteSize(importSubscriptionInfo.remainingBytes)}</span>
+                      <span className="col-span-2">到期：{expiryStatus(importSubscriptionInfo.expireAt).label}</span>
+                    </div>
+                  </div>
                 )}
                 <p className="text-xs text-[var(--color-text-muted)] mt-1">获取成功后会自动回填 YAML 文本，并尝试自动填充 DNS 与建议分组；自动刷新时间请在列表顶部统一配置</p>
               </FormItem>
@@ -1787,10 +2044,10 @@ export function ProxyPoolPage() {
                   value={directImportBatchText}
                   onChange={e => setDirectImportBatchText(e.target.value)}
                   rows={7}
-                  placeholder={`一行一个代理，例如：\nsocks5://user:pass@116.212.124.13:28513\nhttp://user:pass@1.2.3.4:8080\nhttps://5.6.7.8:8443\n127.0.0.1:7890`}
+                  placeholder={`一行一个代理，例如：\n127.0.0.1:443:username:password\nsocks5://user:pass@116.212.124.13:28513\nhttp://user:pass@1.2.3.4:8080\n127.0.0.1:7890`}
                 />
                 <p className="text-xs text-[var(--color-text-muted)] mt-1">
-                  支持 http://、https://、socks5://、socks://、socket://；未写协议时默认按 HTTP 导入。填写批量内容后，下方单条表单会被忽略。
+                  支持 IP:端口:账号:密码、IP:端口、http://、https://、socks5://、socks://、socket://；未写协议时默认按 HTTP 导入。填写批量内容后，下方单条表单会被忽略。
                 </p>
               </FormItem>
               <FormItem label="粘贴单条代理链接（自动识别）">
@@ -1820,7 +2077,7 @@ export function ProxyPoolPage() {
                       // Not a valid URL, let user fill fields manually
                     }
                   }}
-                  placeholder="例如：socks5://user:pass@116.212.124.13:28513 或 http://127.0.0.1:7890"
+                  placeholder="例如：127.0.0.1:443:username:password"
                 />
                 <p className="text-xs text-[var(--color-text-muted)] mt-1">粘贴完整代理链接后自动填写下方字段；也可手动逐项填写</p>
               </FormItem>

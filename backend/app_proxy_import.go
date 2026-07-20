@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,14 +69,60 @@ func (a *App) BrowserProxyFetchClashByURL(rawURL string) (map[string]interface{}
 
 	dnsYAML := extractClashDNSYAML(payload)
 	suggestedGroup := suggestClashGroupName(payload, parsedURL.Hostname())
+	subscriptionInfo := parseSubscriptionUserInfo(resp.Header.Get("Subscription-Userinfo"))
 
 	return map[string]interface{}{
-		"url":            parsedURL.String(),
-		"content":        content,
-		"proxyCount":     proxyCount,
-		"dnsServers":     dnsYAML,
-		"suggestedGroup": suggestedGroup,
+		"url":                   parsedURL.String(),
+		"content":               content,
+		"proxyCount":            proxyCount,
+		"dnsServers":            dnsYAML,
+		"suggestedGroup":        suggestedGroup,
+		"subscriptionInfo":      subscriptionInfo,
+		"profileTitle":          strings.TrimSpace(resp.Header.Get("Profile-Title")),
+		"profileUpdateInterval": strings.TrimSpace(resp.Header.Get("Profile-Update-Interval")),
 	}, nil
+}
+
+func parseSubscriptionUserInfo(raw string) map[string]interface{} {
+	result := map[string]interface{}{
+		"uploadBytes":    int64(0),
+		"downloadBytes":  int64(0),
+		"totalBytes":     int64(0),
+		"usedBytes":      int64(0),
+		"remainingBytes": int64(0),
+		"expireAt":       "",
+	}
+	for _, item := range strings.Split(raw, ";") {
+		parts := strings.SplitN(strings.TrimSpace(item), "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		value, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		if err != nil || value < 0 {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(parts[0])) {
+		case "upload":
+			result["uploadBytes"] = value
+		case "download":
+			result["downloadBytes"] = value
+		case "total":
+			result["totalBytes"] = value
+		case "expire":
+			if value > 0 {
+				result["expireAt"] = time.Unix(value, 0).UTC().Format(time.RFC3339)
+			}
+		}
+	}
+	upload, _ := result["uploadBytes"].(int64)
+	download, _ := result["downloadBytes"].(int64)
+	total, _ := result["totalBytes"].(int64)
+	used := upload + download
+	result["usedBytes"] = used
+	if total > used {
+		result["remainingBytes"] = total - used
+	}
+	return result
 }
 
 func normalizeClashSubscriptionContent(body []byte) (string, interface{}, error) {

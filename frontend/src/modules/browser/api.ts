@@ -484,6 +484,16 @@ export interface ClashImportURLResult {
   proxyCount: number
   dnsServers?: string
   suggestedGroup?: string
+  profileTitle?: string
+  profileUpdateInterval?: string
+  subscriptionInfo?: {
+    uploadBytes?: number
+    downloadBytes?: number
+    totalBytes?: number
+    usedBytes?: number
+    remainingBytes?: number
+    expireAt?: string
+  }
 }
 
 export async function fetchClashImportFromURL(targetURL: string): Promise<ClashImportURLResult> {
