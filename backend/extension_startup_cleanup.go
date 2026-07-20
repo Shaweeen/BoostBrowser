@@ -139,6 +139,32 @@ func patchChromePreferencesFile(path string) error {
 		changed = true
 	}
 
+	// Keep every isolated environment local-only by default. Windows enterprise
+	// policy is authoritative for Chrome, while these preferences cover Chromium
+	// variants that do not implement every Google policy hook.
+	signinPrefs := ensureJSONMap(prefs, "signin")
+	if signinPrefs["allowed"] != false {
+		signinPrefs["allowed"] = false
+		changed = true
+	}
+	if signinPrefs["allowed_on_next_startup"] != false {
+		signinPrefs["allowed_on_next_startup"] = false
+		changed = true
+	}
+	if signinPrefs["signin_interception_enabled"] != false {
+		signinPrefs["signin_interception_enabled"] = false
+		changed = true
+	}
+	syncPrefs := ensureJSONMap(prefs, "sync")
+	if syncPrefs["requested"] != false {
+		syncPrefs["requested"] = false
+		changed = true
+	}
+	if syncPrefs["suppress_start"] != true {
+		syncPrefs["suppress_start"] = true
+		changed = true
+	}
+
 	// 默认搜索引擎由 seedDefaultSearchEngine（chrome_search_engine_seed.go）处理，
 	// 那条路径会同时写 Web Data + Preferences 的 mirrored_template_url_data，
 	// 与 cloak 内核 UI 操作产生的字段名一致。这里不再重复写。
@@ -177,11 +203,11 @@ func ensureJSONMap(parent map[string]any, key string) map[string]any {
 	return created
 }
 
-// closeExtensionStartupPages suppresses extension UI created automatically during
-// Chrome startup. Some wallets open onboarding/unlock pages a moment after the
-// debug port becomes ready; a single immediate pass misses them. Keep this window
-// short and synchronous before navigating to user pages so manually-clicked wallet
-// popups later are not closed.
+// closeExtensionStartupPages suppresses extension UI and Chrome welcome/sign-in
+// UI created automatically during startup. Some wallets open onboarding/unlock
+// pages a moment after the debug port becomes ready; a single immediate pass
+// misses them. Keep this window short and synchronous before navigating to user
+// pages so later user actions are not closed.
 func closeExtensionStartupPages(debugPort int, profileId string) {
 	deadline := time.Now().Add(4 * time.Second)
 	closed := 0
@@ -194,7 +220,7 @@ func closeExtensionStartupPages(debugPort int, profileId string) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	if closed > 0 {
-		logger.New("Browser").Info("已关闭启动时自动弹出的扩展页面/窗口", logger.F("profile_id", profileId), logger.F("count", closed))
+		logger.New("Browser").Info("已关闭启动时自动弹出的扩展/登录欢迎页面", logger.F("profile_id", profileId), logger.F("count", closed))
 	}
 }
 
@@ -281,14 +307,36 @@ func isExtensionStartupURL(rawURL string) bool {
 	return strings.HasPrefix(u, "chrome-extension://") || strings.HasPrefix(u, "chrome://extensions")
 }
 
+func isSuppressedBrowserStartupURL(rawURL string) bool {
+	u := strings.TrimSpace(strings.ToLower(rawURL))
+	if isExtensionStartupURL(u) {
+		return true
+	}
+	for _, prefix := range []string{
+		"chrome://welcome",
+		"chrome://intro",
+		"chrome://profile-picker",
+		"chrome://chrome-signin",
+		"chrome://sync-confirmation",
+		"chrome://signin-email-confirmation",
+		"chrome://enterprise-profile-welcome",
+		"chrome://profile-customization",
+	} {
+		if strings.HasPrefix(u, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func isAutoExtensionStartupTarget(target cdpTarget) bool {
 	typeName := strings.TrimSpace(strings.ToLower(target.Type))
-	// During the bounded startup suppression window, close both main extension tabs
-	// (type=page) and automatically-created popup/window targets (often type=other).
+	// During the bounded startup suppression window, close both main extension or
+	// sign-in tabs (type=page) and automatically-created targets (often type=other).
 	// The caller only runs this before normal navigation/interaction, so later user
 	// clicks on wallet extensions are unaffected.
 	if typeName != "page" && typeName != "other" {
 		return false
 	}
-	return isExtensionStartupURL(target.URL)
+	return isSuppressedBrowserStartupURL(target.URL)
 }

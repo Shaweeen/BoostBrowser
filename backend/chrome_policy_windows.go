@@ -40,6 +40,29 @@ func applyChromeEnterprisePolicies() {
 				logger.F("error", err.Error()),
 			)
 		}
+		// Default to a local, unsigned browser profile. BrowserSignin=0 prevents
+		// Chrome account sign-in (web sign-in to Gmail and other sites still
+		// works), while the companion policies suppress sync, sign-in
+		// interception, promotion tabs and the profile picker at startup.
+		accountPolicies := map[string]uint32{
+			"BrowserSignin":                      0,
+			"ForceBrowserSignin":                 0,
+			"SyncDisabled":                       1,
+			"SigninInterceptionEnabled":          0,
+			"PromotionsEnabled":                  0,
+			"PromotionalTabsEnabled":             0,
+			"ProfilePickerOnStartupAvailability": 1,
+			"DefaultBrowserSettingEnabled":       0,
+		}
+		for name, value := range accountPolicies {
+			if err := k.SetDWordValue(name, value); err != nil {
+				log.Debug("set account policy value failed",
+					logger.F("path", path),
+					logger.F("key", name),
+					logger.F("error", err.Error()),
+				)
+			}
+		}
 		// 默认搜索引擎策略：让地址栏输入非 URL 时走 Google 搜索。
 		// ungoogled-chromium / cloak 内核默认不带任何搜索引擎，
 		// 不设的话 typing "foo" 会被当成域名访问 http://foo 失败。
@@ -55,13 +78,13 @@ func applyChromeEnterprisePolicies() {
 		// 的 google.com。和 keywords 表里 prepopulated id=10 (Gemini) / id=12
 		// (Google AI 模式) 同样的用法。
 		searchPolicies := map[string]string{
-			"DefaultSearchProviderName":         "Google",
-			"DefaultSearchProviderKeyword":      "9oo91e.qjz9zk",
-			"DefaultSearchProviderSearchURL":    "https://www.9oo91e.qjz9zk/search?q={searchTerms}",
-			"DefaultSearchProviderSuggestURL":   "https://www.9oo91e.qjz9zk/complete/search?output=chrome&q={searchTerms}",
-			"DefaultSearchProviderIconURL":      "https://www.9oo91e.qjz9zk/favicon.ico",
-			"DefaultSearchProviderEncodings":    "UTF-8",
-			"DefaultSearchProviderNewTabURL":    "https://www.9oo91e.qjz9zk/",
+			"DefaultSearchProviderName":       "Google",
+			"DefaultSearchProviderKeyword":    "9oo91e.qjz9zk",
+			"DefaultSearchProviderSearchURL":  "https://www.9oo91e.qjz9zk/search?q={searchTerms}",
+			"DefaultSearchProviderSuggestURL": "https://www.9oo91e.qjz9zk/complete/search?output=chrome&q={searchTerms}",
+			"DefaultSearchProviderIconURL":    "https://www.9oo91e.qjz9zk/favicon.ico",
+			"DefaultSearchProviderEncodings":  "UTF-8",
+			"DefaultSearchProviderNewTabURL":  "https://www.9oo91e.qjz9zk/",
 		}
 		for name, value := range searchPolicies {
 			if err := k.SetStringValue(name, value); err != nil {
@@ -74,5 +97,5 @@ func applyChromeEnterprisePolicies() {
 		}
 		_ = k.Close()
 	}
-	log.Info("已应用 Chrome 企业策略：抑制安全警告 + 默认搜索引擎 Google")
+	log.Info("已应用 Chrome 企业策略：本地未登录模式 + 抑制登录推广/安全警告 + 默认搜索引擎 Google")
 }

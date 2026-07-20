@@ -47,6 +47,14 @@ func TestPatchChromePreferencesFileDisablesSessionRestore(t *testing.T) {
 	if profile["exited_cleanly"] != true || profile["exit_type"] != "Normal" {
 		t.Fatalf("profile clean exit flags not patched: %#v", profile)
 	}
+	signin := out["signin"].(map[string]any)
+	if signin["allowed"] != false || signin["allowed_on_next_startup"] != false || signin["signin_interception_enabled"] != false {
+		t.Fatalf("browser sign-in preferences not disabled: %#v", signin)
+	}
+	syncPrefs := out["sync"].(map[string]any)
+	if syncPrefs["requested"] != false || syncPrefs["suppress_start"] != true {
+		t.Fatalf("browser sync startup preferences not suppressed: %#v", syncPrefs)
+	}
 	// 默认搜索引擎现在由 seedDefaultSearchEngine 接管（需要 Web Data 文件），
 	// patchChromePreferencesFile 不再负责 search provider 字段。
 }
@@ -116,6 +124,27 @@ func TestIsExtensionStartupURL(t *testing.T) {
 	for _, tc := range cases {
 		if got := isExtensionStartupURL(tc.url); got != tc.want {
 			t.Fatalf("isExtensionStartupURL(%q)=%v, want %v", tc.url, got, tc.want)
+		}
+	}
+}
+
+func TestIsSuppressedBrowserStartupURL(t *testing.T) {
+	cases := []struct {
+		url  string
+		want bool
+	}{
+		{"chrome://welcome/", true},
+		{"chrome://profile-picker/", true},
+		{"chrome://chrome-signin/", true},
+		{"chrome://sync-confirmation/", true},
+		{"chrome-extension://abcdef/options.html", true},
+		{"https://accounts.google.com/", false},
+		{"https://mail.google.com/", false},
+		{"about:blank", false},
+	}
+	for _, tc := range cases {
+		if got := isSuppressedBrowserStartupURL(tc.url); got != tc.want {
+			t.Fatalf("isSuppressedBrowserStartupURL(%q)=%v, want %v", tc.url, got, tc.want)
 		}
 	}
 }
