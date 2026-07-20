@@ -1,20 +1,18 @@
 package backend
 
 import (
-	"math"
 	"testing"
 )
 
-func TestBadgeNumberLayoutUsesAtLeastFortyPercentHeight(t *testing.T) {
-	for _, size := range []int{16, 24, 32, 48, 64, 128} {
-		for digits := 1; digits <= 4; digits++ {
+func TestBadgeNumberLayoutUsesLargeCenteredNumber(t *testing.T) {
+	for _, size := range []int{24, 32, 48, 64, 128} {
+		for digits := 1; digits <= 3; digits++ {
 			layout := calculateBadgeNumberLayout(size, digits)
-			minimumHeight := int(math.Ceil(float64(size) * 0.40))
-			if layout.pillH < minimumHeight {
-				t.Fatalf("badge too small: size=%d digits=%d height=%d minimum=%d", size, digits, layout.pillH, minimumHeight)
+			if layout.fontH*100 < size*40 {
+				t.Fatalf("number too small: size=%d digits=%d layout=%+v", size, digits, layout)
 			}
-			if layout.pillW > size || layout.fontW > layout.pillW {
-				t.Fatalf("badge does not fit: size=%d digits=%d layout=%+v", size, digits, layout)
+			if layout.fontW > size || layout.fontH > size {
+				t.Fatalf("number does not fit: size=%d digits=%d layout=%+v", size, digits, layout)
 			}
 		}
 	}

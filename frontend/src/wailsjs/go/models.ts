@@ -44,12 +44,14 @@ export namespace backend {
 	}
 	export class RabbyWalletBatchExecuteInput {
 	    sessionId: string;
+	    walletType: string;
 	    password: string;
 
 	    static createFrom(source: any = {}) { return new RabbyWalletBatchExecuteInput(source); }
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.sessionId = source["sessionId"];
+	        this.walletType = source["walletType"];
 	        this.password = source["password"];
 	    }
 	}

@@ -98,6 +98,53 @@ func TestParseRabbyWalletImportRejectsUnsupportedWordCount(t *testing.T) {
 	}
 }
 
+func TestParseJupiterWalletImportOnlyAccepts12Or24Words(t *testing.T) {
+	invalidPath := writeRabbyImportFixture(t, "jupiter-invalid.txt", "profile-1|"+rabbyTestMnemonic("jupiter", 15)+"\n")
+	_, _, err := parseWalletImportFile(invalidPath, rabbyTestProfiles(), walletImportSpecs["jupiter"])
+	if err == nil || !strings.Contains(err.Error(), "Jupiter 仅支持 12/24 词") {
+		t.Fatalf("expected Jupiter word-count error, got %v", err)
+	}
+
+	validPath := writeRabbyImportFixture(t, "jupiter-valid.txt", "profile-1|"+rabbyTestMnemonic("jupiter", 24)+"\n")
+	rows, preview, err := parseWalletImportFile(validPath, rabbyTestProfiles(), walletImportSpecs["jupiter"])
+	if err != nil || len(rows) != 1 || len(preview) != 1 || preview[0].WordCount != 24 {
+		t.Fatalf("expected valid 24-word Jupiter row, rows=%#v preview=%#v err=%v", rows, preview, err)
+	}
+}
+
+func TestOfficialWalletExtensionRejectsArbitraryDownloadOrigin(t *testing.T) {
+	app := NewApp(t.TempDir())
+	spec := walletImportSpecs["metamask"]
+	if err := os.MkdirAll(app.globalExtensionDir(spec.ExtensionID), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(app.globalExtensionDir(spec.ExtensionID), "manifest.json"), []byte(`{"manifest_version":3,"name":"MetaMask","version":"1.0"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	evil := globalExtensionRegistry{Extensions: []globalExtensionRegistryEntry{{
+		ExtensionID:     spec.ExtensionID,
+		DownloadAddress: "https://example.invalid/" + spec.ExtensionID + "/wallet.crx",
+	}}}
+	if err := app.saveGlobalExtensionRegistry(evil); err != nil {
+		t.Fatal(err)
+	}
+	if app.officialWalletExtensionInstalled(spec) {
+		t.Fatal("arbitrary download origin was trusted as official MetaMask")
+	}
+
+	official := globalExtensionRegistry{Extensions: []globalExtensionRegistryEntry{{
+		ExtensionID:     spec.ExtensionID,
+		DownloadAddress: "https://chromewebstore.google.com/detail/metamask/" + spec.ExtensionID,
+	}}}
+	if err := app.saveGlobalExtensionRegistry(official); err != nil {
+		t.Fatal(err)
+	}
+	if !app.officialWalletExtensionInstalled(spec) {
+		t.Fatal("official Chrome Web Store MetaMask was rejected")
+	}
+}
+
 func TestClearRabbySecretRows(t *testing.T) {
 	rows := []rabbyWalletImportSecretRow{{Mnemonic: rabbyTestMnemonic("erase", 12)}}
 	clearRabbySecretRows(rows)
@@ -128,7 +175,7 @@ func TestBrowserStartBlockedDuringRabbyImport(t *testing.T) {
 	app := NewApp("")
 	app.rabbyImportActive["profile-1"] = true
 	_, err := app.BrowserInstanceStart("profile-1")
-	if err == nil || !strings.Contains(err.Error(), "正在执行 Rabby 钱包导入") {
+	if err == nil || !strings.Contains(err.Error(), "正在执行钱包批量导入") {
 		t.Fatalf("expected Rabby import lock error, got %v", err)
 	}
 }

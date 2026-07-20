@@ -3,18 +3,18 @@ import { AlertTriangle, FileDown, KeyRound, MoreHorizontal, PackagePlus, Puzzle,
 import { Button, Card, FormItem, Input, Modal, Select, Textarea, toast } from '../../../shared/components'
 import { EventsOn } from '../../../wailsjs/runtime/runtime'
 import {
-  cancelRabbyWalletImport,
-  executeRabbyWalletImport,
-  exportRabbyWalletImportTemplate,
+  cancelWalletImport,
+  executeWalletImport,
+  exportWalletImportTemplate,
   fetchBrowserProfiles,
   fetchGlobalExtensions,
   importExtensionToBrowserProfiles,
   importGlobalExtension,
-  prepareRabbyWalletImport,
+  prepareWalletImport,
   removeExtensionFromBrowserProfiles,
   removeGlobalExtension,
 } from '../api'
-import type { BrowserProfile, RabbyWalletImportPreview, RabbyWalletImportProgress, RabbyWalletImportResult } from '../types'
+import type { BrowserProfile, WalletImportPreview, WalletImportProgress, WalletImportResult, WalletImportType } from '../types'
 
 type ExtensionPlatform = 'google' | 'firefox'
 type DistributionMode = 'manual' | 'global'
@@ -44,6 +44,12 @@ const modeLabel: Record<DistributionMode, string> = {
 }
 
 const defaultExtensions: ManagedExtension[] = []
+
+const walletLabels: Record<WalletImportType, string> = {
+  rabby: 'Rabby',
+  jupiter: 'Jupiter',
+  metamask: 'MetaMask',
+}
 
 function loadExtensions(): ManagedExtension[] {
   try {
@@ -89,13 +95,14 @@ export function ExtensionManagementPage() {
   const [uploadOpen, setUploadOpen] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
   const [rabbyOpen, setRabbyOpen] = useState(false)
+  const [walletType, setWalletType] = useState<WalletImportType>('rabby')
   const [rabbyPreparing, setRabbyPreparing] = useState(false)
   const [rabbyExecuting, setRabbyExecuting] = useState(false)
-  const [rabbyPreview, setRabbyPreview] = useState<RabbyWalletImportPreview | null>(null)
+  const [rabbyPreview, setRabbyPreview] = useState<WalletImportPreview | null>(null)
   const [rabbyPassword, setRabbyPassword] = useState('')
   const [rabbyConfirmed, setRabbyConfirmed] = useState(false)
-  const [rabbyProgress, setRabbyProgress] = useState<RabbyWalletImportProgress | null>(null)
-  const [rabbyResult, setRabbyResult] = useState<RabbyWalletImportResult | null>(null)
+  const [rabbyProgress, setRabbyProgress] = useState<WalletImportProgress | null>(null)
+  const [rabbyResult, setRabbyResult] = useState<WalletImportResult | null>(null)
   const [currentId, setCurrentId] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const initializedRef = useRef(false)
@@ -156,9 +163,9 @@ export function ExtensionManagementPage() {
     saveExtensions(extensions)
   }, [extensions])
 
-  useEffect(() => EventsOn('rabby-wallet-import:progress', (progress: RabbyWalletImportProgress) => {
-    setRabbyProgress(progress)
-  }), [])
+  useEffect(() => EventsOn('wallet-import:progress', (progress: WalletImportProgress) => {
+    setRabbyProgress(current => progress.walletType === walletType ? progress : current)
+  }), [walletType])
 
   const filtered = useMemo(() => {
     const q = keyword.trim().toLowerCase()
@@ -344,9 +351,20 @@ export function ExtensionManagementPage() {
   const closeRabbyImport = () => {
     if (rabbyExecuting) return
     if (rabbyPreview?.sessionId && !rabbyResult) {
-      void cancelRabbyWalletImport(rabbyPreview.sessionId)
+      void cancelWalletImport(rabbyPreview.sessionId)
     }
     setRabbyOpen(false)
+    setRabbyPreview(null)
+    setRabbyPassword('')
+    setRabbyConfirmed(false)
+    setRabbyProgress(null)
+    setRabbyResult(null)
+  }
+
+  const changeWalletType = async (nextType: WalletImportType) => {
+    if (nextType === walletType || rabbyExecuting) return
+    if (rabbyPreview?.sessionId && !rabbyResult) await cancelWalletImport(rabbyPreview.sessionId)
+    setWalletType(nextType)
     setRabbyPreview(null)
     setRabbyPassword('')
     setRabbyConfirmed(false)
@@ -358,9 +376,9 @@ export function ExtensionManagementPage() {
     setRabbyPreparing(true)
     try {
       if (rabbyPreview?.sessionId && !rabbyResult) {
-        await cancelRabbyWalletImport(rabbyPreview.sessionId)
+        await cancelWalletImport(rabbyPreview.sessionId)
       }
-      const preview = await prepareRabbyWalletImport()
+      const preview = await prepareWalletImport(walletType)
       if (preview?.cancelled) return
       setRabbyPreview(preview)
       setRabbyPassword('')
@@ -369,7 +387,7 @@ export function ExtensionManagementPage() {
       setRabbyResult(null)
       toast.success(preview.message || `已读取 ${preview.rows.length} 条映射`)
     } catch (error: any) {
-      toast.error(error?.message || '读取 Rabby 导入文件失败')
+      toast.error(error?.message || `读取 ${walletLabels[walletType]} 导入文件失败`)
     } finally {
       setRabbyPreparing(false)
     }
@@ -377,10 +395,10 @@ export function ExtensionManagementPage() {
 
   const downloadRabbyTemplate = async () => {
     try {
-      const response = await exportRabbyWalletImportTemplate()
-      if (!response?.cancelled) toast.success(response?.message || 'Rabby CSV 模板已生成')
+      const response = await exportWalletImportTemplate(walletType)
+      if (!response?.cancelled) toast.success(response?.message || `${walletLabels[walletType]} CSV 模板已生成`)
     } catch (error: any) {
-      toast.error(error?.message || '导出 Rabby 模板失败')
+      toast.error(error?.message || `导出 ${walletLabels[walletType]} 模板失败`)
     }
   }
 
@@ -394,7 +412,7 @@ export function ExtensionManagementPage() {
       return
     }
     if (rabbyPassword.length < 8) {
-      toast.warning('Rabby 本地解锁密码至少需要 8 个字符')
+      toast.warning(`${walletLabels[walletType]} 本地解锁密码至少需要 8 个字符`)
       return
     }
     if (!rabbyConfirmed) {
@@ -414,12 +432,12 @@ export function ExtensionManagementPage() {
       message: '准备开始导入',
     })
     try {
-      const result = await executeRabbyWalletImport({ sessionId: rabbyPreview.sessionId, password })
+      const result = await executeWalletImport({ sessionId: rabbyPreview.sessionId, walletType, password })
       setRabbyResult(result)
       if (result.failed > 0) toast.warning(result.message)
       else toast.success(result.message)
     } catch (error: any) {
-      toast.error(error?.message || 'Rabby 批量导入失败')
+      toast.error(error?.message || `${walletLabels[walletType]} 批量导入失败`)
       setRabbyPreview(null)
       setRabbyConfirmed(false)
     } finally {
@@ -440,7 +458,7 @@ export function ExtensionManagementPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="secondary" onClick={openRabbyImport}><Wallet className="w-4 h-4" />Rabby 批量导入</Button>
+          <Button variant="secondary" onClick={openRabbyImport}><Wallet className="w-4 h-4" />钱包批量导入</Button>
           <Button onClick={openUpload}><UploadCloud className="w-4 h-4" />上传扩展</Button>
           <Button variant="secondary" onClick={() => toast.info('扩展中心入口已预留，可继续接入在线扩展市场')}><PackagePlus className="w-4 h-4" />扩展中心</Button>
         </div>
@@ -612,7 +630,7 @@ export function ExtensionManagementPage() {
       <Modal
         open={rabbyOpen}
         onClose={closeRabbyImport}
-        title="Rabby 钱包批量导入"
+        title="钱包批量导入"
         width="900px"
         closable={!rabbyExecuting}
         footer={rabbyResult ? (
@@ -626,12 +644,26 @@ export function ExtensionManagementPage() {
         )}
       >
         <div className="space-y-4">
+          <div className="grid grid-cols-3 gap-2">
+            {(Object.keys(walletLabels) as WalletImportType[]).map(type => (
+              <button
+                key={type}
+                type="button"
+                onClick={() => void changeWalletType(type)}
+                disabled={rabbyExecuting}
+                className={`rounded-xl border px-4 py-3 text-sm font-semibold transition-colors disabled:opacity-50 ${walletType === type ? 'border-[var(--color-accent)] bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300' : 'border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]'}`}
+              >
+                {walletLabels[type]}
+              </button>
+            ))}
+          </div>
+
           <div className="rounded-xl border border-amber-200 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-900 px-4 py-3 text-sm text-amber-800 dark:text-amber-300">
             <div className="flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
               <div>
-                <div className="font-medium">仅导入到未初始化的 Rabby，绝不会覆盖已有钱包</div>
-                <div className="mt-1 text-xs leading-5">导入文件包含高敏感助记词。请仅在离线可信电脑操作，完成后立即安全删除文件；不要上传到网盘、聊天工具或 GitHub。</div>
+                <div className="font-medium">仅导入到未初始化的 {walletLabels[walletType]}，检测到已有钱包会立即拒绝覆盖</div>
+                <div className="mt-1 text-xs leading-5">BrowserStudio 只提供导入，不提供助记词或私钥导出接口；文件和密码不写入数据库或日志。钱包扩展仍会按自身机制保存加密密钥，其中 Jupiter 为闭源第三方扩展，无法由 BrowserStudio 审计或保证其内部行为。请只安装官方扩展，并在可信电脑操作。</div>
               </div>
             </div>
           </div>
@@ -680,7 +712,7 @@ export function ExtensionManagementPage() {
 
           {rabbyPreview && !rabbyResult && (
             <div className="space-y-3">
-              <FormItem label="2. 设置 Rabby 本地解锁密码" required hint="本批次所有 Rabby 使用同一个本地解锁密码；密码仅用于本次导入，不保存到数据库">
+              <FormItem label={`2. 设置 ${walletLabels[walletType]} 本地解锁密码`} required hint={`本批次所有 ${walletLabels[walletType]} 使用同一个本地解锁密码；密码仅用于本次导入，不保存到数据库或日志`}>
                 <div className="relative">
                   <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--color-text-muted)]" />
                   <Input type="password" autoComplete="new-password" value={rabbyPassword} onChange={event => setRabbyPassword(event.target.value)} placeholder="至少 8 个字符" className="pl-9" disabled={rabbyExecuting} />
@@ -688,7 +720,7 @@ export function ExtensionManagementPage() {
               </FormItem>
               <label className="flex items-start gap-2 text-sm text-[var(--color-text-secondary)] cursor-pointer">
                 <input type="checkbox" className="mt-0.5 accent-[var(--color-accent)]" checked={rabbyConfirmed} onChange={event => setRabbyConfirmed(event.target.checked)} disabled={rabbyExecuting} />
-                <span>我确认：文件中的助记词已安全备份；目标环境均为未初始化 Rabby；导入过程将逐个启动并自动关闭环境。</span>
+                <span>我确认：文件中的助记词已安全备份；目标环境均为未初始化 {walletLabels[walletType]}；导入过程将逐个启动并自动关闭环境。</span>
               </label>
             </div>
           )}

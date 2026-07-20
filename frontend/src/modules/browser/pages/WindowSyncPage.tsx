@@ -212,7 +212,6 @@ export function WindowSyncPage() {
   const masterProfile = displayProfiles.find(item => item.profileId === (syncStatus?.masterId || masterId)) || null
   const followerProfiles = displayProfiles.filter(item => (syncStatus?.followerIds || []).includes(item.profileId))
   const statusLayoutLabel = tileLayout === 'vertical' ? '堆叠' : tileLayout === 'horizontal' ? '横排' : '平铺'
-  const syncPausedOutsideMaster = isSyncing && syncStatus?.pointerInsideMaster === false
   const compactRunningMode = isSyncing && !syncPanelMode
   const compactSyncStatusMode = syncPanelMode && isSyncing && panelPresentation === 'compact'
   const compactFunctionPanelMode = syncPanelMode && !isSyncing && panelPresentation === 'compact'
@@ -746,8 +745,8 @@ export function WindowSyncPage() {
               <Monitor className="h-4 w-4" />
             </div>
             <div className="min-w-0 flex-1">
-              <div className={`whitespace-normal break-words text-[15px] font-semibold leading-5 ${syncPausedOutsideMaster ? 'text-amber-300' : 'text-white'}`}>
-                {syncPausedOutsideMaster ? '已暂停：鼠标已离开主控' : `${activeSyncCount} 个环境同步中`}
+              <div className="whitespace-normal break-words text-[15px] font-semibold leading-5 text-white">
+                {activeSyncCount} 个环境同步中
               </div>
               <div className="mt-0.5 text-[11px] text-white/72">主控 {masterProfile?.profileName || masterProfile?.profileId || '-'} · 跟随 {followerCount} · {statusLayoutLabel}</div>
             </div>
@@ -840,8 +839,8 @@ export function WindowSyncPage() {
           <div className="flex flex-wrap items-center gap-2.5">
             <div className="min-w-[160px] pr-2">
               <div className="text-[11px] uppercase tracking-[0.16em] text-white/50">窗口同步中</div>
-              <div className={`mt-1 text-base font-semibold ${syncPausedOutsideMaster ? 'text-amber-300' : 'text-green-400'}`}>
-                {syncPausedOutsideMaster ? '已暂停：鼠标已离开主控' : `${activeSyncCount} 个环境同步中`}
+              <div className="mt-1 text-base font-semibold text-green-400">
+                {activeSyncCount} 个环境同步中
               </div>
               <div className="mt-1 truncate text-xs text-white/70">
                 主控 {masterProfile?.profileName || masterProfile?.profileId || '-'} · 跟随 {followerCount} · {statusLayoutLabel}

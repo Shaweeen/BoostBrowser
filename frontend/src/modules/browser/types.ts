@@ -59,8 +59,15 @@ export interface RabbyWalletImportPreview {
 
 export interface RabbyWalletBatchExecuteInput {
   sessionId: string
+  walletType?: WalletImportType
   password: string
 }
+
+export type WalletImportType = 'rabby' | 'jupiter' | 'metamask'
+export type WalletImportPreview = RabbyWalletImportPreview
+export type WalletImportProgress = RabbyWalletImportProgress
+export type WalletImportResult = RabbyWalletImportResult
+export type WalletBatchExecuteInput = RabbyWalletBatchExecuteInput
 
 export interface RabbyWalletImportResultRow {
   rowNumber: number
@@ -80,6 +87,7 @@ export interface RabbyWalletImportResult {
 }
 
 export interface RabbyWalletImportProgress {
+  walletType?: WalletImportType
   completed: number
   total: number
   profileId: string

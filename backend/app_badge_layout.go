@@ -1,7 +1,5 @@
 package backend
 
-import "math"
-
 type badgeNumberLayout struct {
 	scale int
 	gap   int
@@ -11,37 +9,28 @@ type badgeNumberLayout struct {
 	pillH int
 }
 
-// calculateBadgeNumberLayout keeps the red marker at least about 40% of the
-// native icon height. Three-digit labels such as 100 must remain at the same
-// readable stroke scale as one- and two-digit labels whenever they fit.
+// calculateBadgeNumberLayout centers a bold white number over the full blue
+// icon. The digit height targets roughly 60% of the native taskbar icon while
+// retaining a readable two-pixel stroke for 100+ at common Windows sizes.
 func calculateBadgeNumberLayout(size, digits int) badgeNumberLayout {
 	if digits < 1 {
 		digits = 1
 	}
-	scale := max(1, (size+8)/16)
+	scale := max(1, (size*3/5)/5)
 	var layout badgeNumberLayout
 	for {
-		gap := max(1, scale/2)
+		gap := max(1, scale/3)
 		fontW := digits*3*scale + (digits-1)*gap
 		fontH := 5 * scale
-		padX := max(2, scale)
-		padY := max(2, scale/2)
-		pillW := fontW + 2*padX
-		pillH := fontH + 2*padY
-		targetPillH := max(7, int(math.Ceil(float64(size)*0.44)))
-		pillH = min(size, max(pillH, targetPillH))
-		if digits == 1 && pillW < pillH {
-			pillW = pillH
-		}
 		layout = badgeNumberLayout{
 			scale: scale,
 			gap:   gap,
 			fontW: fontW,
 			fontH: fontH,
-			pillW: min(size, pillW),
-			pillH: pillH,
+			pillW: size,
+			pillH: size,
 		}
-		if pillW <= size || scale == 1 {
+		if fontW <= size-2 || scale == 1 {
 			return layout
 		}
 		scale--

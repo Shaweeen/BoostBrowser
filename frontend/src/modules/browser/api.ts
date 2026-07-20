@@ -1,4 +1,4 @@
-import type { BrowserProfile, BrowserProfileInput, BrowserTab, BrowserSettings, BrowserCore, BrowserCoreInput, BrowserCoreValidateResult, BrowserProxy, BrowserCoreExtended, CookieInfo, SnapshotInfo, BrowserBookmark, BrowserGroup, BrowserGroupInput, BrowserGroupWithCount, ProxyIPHealthResult, ExtensionImportResult, GlobalManagedExtension, RabbyWalletBatchExecuteInput, RabbyWalletImportPreview, RabbyWalletImportResult } from './types'
+import type { BrowserProfile, BrowserProfileInput, BrowserTab, BrowserSettings, BrowserCore, BrowserCoreInput, BrowserCoreValidateResult, BrowserProxy, BrowserCoreExtended, CookieInfo, SnapshotInfo, BrowserBookmark, BrowserGroup, BrowserGroupInput, BrowserGroupWithCount, ProxyIPHealthResult, ExtensionImportResult, GlobalManagedExtension, RabbyWalletBatchExecuteInput, RabbyWalletImportPreview, RabbyWalletImportResult, WalletBatchExecuteInput, WalletImportPreview, WalletImportResult, WalletImportType } from './types'
 
 const getBindings = async () => {
   try {
@@ -1001,6 +1001,36 @@ export async function moveInstancesToGroup(profileIds: string[], groupId: string
 // ============================================================================
 // Rabby wallet batch import
 // ============================================================================
+
+export async function prepareWalletImport(walletType: WalletImportType): Promise<WalletImportPreview> {
+  const bindings: any = await getBindings()
+  if (!bindings?.WalletBatchPrepare) {
+    throw new Error('当前客户端不支持钱包批量导入，请更新后重试')
+  }
+  return await bindings.WalletBatchPrepare(walletType)
+}
+
+export async function exportWalletImportTemplate(walletType: WalletImportType): Promise<Record<string, any>> {
+  const bindings: any = await getBindings()
+  if (!bindings?.WalletExportImportTemplate) {
+    throw new Error('当前客户端不支持钱包导入模板，请更新后重试')
+  }
+  return await bindings.WalletExportImportTemplate(walletType)
+}
+
+export async function executeWalletImport(input: WalletBatchExecuteInput): Promise<WalletImportResult> {
+  const bindings: any = await getBindings()
+  if (!bindings?.WalletBatchExecute) {
+    throw new Error('当前客户端不支持钱包批量导入，请更新后重试')
+  }
+  return await bindings.WalletBatchExecute(input)
+}
+
+export async function cancelWalletImport(sessionId: string): Promise<void> {
+  if (!sessionId) return
+  const bindings: any = await getBindings()
+  if (bindings?.WalletBatchCancel) await bindings.WalletBatchCancel(sessionId)
+}
 
 export async function prepareRabbyWalletImport(): Promise<RabbyWalletImportPreview> {
   const bindings: any = await getBindings()

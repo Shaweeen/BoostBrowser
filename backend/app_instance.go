@@ -131,7 +131,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		blocked := a.rabbyImportActive[profileId]
 		a.rabbyImportMu.Unlock()
 		if blocked {
-			return nil, fmt.Errorf("该环境正在执行 Rabby 钱包导入，请等待完成")
+			return nil, fmt.Errorf("该环境正在执行钱包批量导入，请等待完成")
 		}
 	}
 	a.browserMgr.Mutex.Lock()

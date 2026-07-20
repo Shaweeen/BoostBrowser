@@ -194,6 +194,22 @@ export function RabbyWalletBatchCancel(arg1) {
   return window['go']['main']['App']['RabbyWalletBatchCancel'](arg1);
 }
 
+export function WalletBatchPrepare(arg1) {
+  return window['go']['main']['App']['WalletBatchPrepare'](arg1);
+}
+
+export function WalletExportImportTemplate(arg1) {
+  return window['go']['main']['App']['WalletExportImportTemplate'](arg1);
+}
+
+export function WalletBatchExecute(arg1) {
+  return window['go']['main']['App']['WalletBatchExecute'](arg1);
+}
+
+export function WalletBatchCancel(arg1) {
+  return window['go']['main']['App']['WalletBatchCancel'](arg1);
+}
+
 export function BrowserProfileImportExtension(arg1, arg2) {
   return window['go']['main']['App']['BrowserProfileImportExtension'](arg1, arg2);
 }

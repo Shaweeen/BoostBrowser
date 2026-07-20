@@ -33,7 +33,7 @@ const (
 	diNormal               = 3
 	DIB_RGB_COLORS         = 0
 	BI_RGB                 = 0
-	badgeIconDesignVersion = 7
+	badgeIconDesignVersion = 8
 )
 
 // badgeIconFileCache 缓存已生成的 badge 图标文件路径（key 为显示序号，value 为 .ico 文件路径）
@@ -211,29 +211,13 @@ func drawCircle(img *image.NRGBA, cx, cy, r int, col color.NRGBA) {
 	}
 }
 
-// generateFallbackIcon 生成固定的旧版 Boost Browser 任务栏底图：蓝色 Chrome-like 圆环。
-// 不读取 chrome.exe 自带图标，避免切到 Google Chrome 后变成官方四色 Chrome 图标。
+// generateFallbackIcon generates the stable monochrome-blue BrowserStudio
+// taskbar base. It deliberately does not reuse chrome.exe's multicolour icon.
 func generateFallbackIcon(size int) *image.NRGBA {
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
 	cx, cy := float64(size)/2, float64(size)/2
-	outerR := float64(size) * 0.421875
-	innerR := float64(size) * 0.203125
-	centerR := float64(size) * 0.1328125
-
-	blend := func(dst, src color.NRGBA, alpha float64) color.NRGBA {
-		if alpha < 0 {
-			alpha = 0
-		}
-		if alpha > 1 {
-			alpha = 1
-		}
-		return color.NRGBA{
-			R: uint8(float64(src.R)*alpha + float64(dst.R)*(1-alpha)),
-			G: uint8(float64(src.G)*alpha + float64(dst.G)*(1-alpha)),
-			B: uint8(float64(src.B)*alpha + float64(dst.B)*(1-alpha)),
-			A: uint8(float64(src.A)*alpha + float64(dst.A)*(1-alpha)),
-		}
-	}
+	outerR := float64(size) * 0.46
+	blue := color.NRGBA{R: 37, G: 99, B: 235, A: 255}
 
 	for y := 0; y < size; y++ {
 		for x := 0; x < size; x++ {
@@ -243,41 +227,11 @@ func generateFallbackIcon(size int) *image.NRGBA {
 			if dist > outerR+1 {
 				continue
 			}
-			alpha := 1.0
+			alpha := uint8(255)
 			if dist > outerR {
-				alpha = 1 - (dist - outerR)
+				alpha = uint8(max(0, int((1-(dist-outerR))*255)))
 			}
-
-			angle := math.Atan2(dy, dx)
-			if angle < 0 {
-				angle += 2 * math.Pi
-			}
-			// 三段蓝色圆环，模拟旧版“蓝色浏览器”视觉，而不是单一云状圆点。
-			base := color.NRGBA{R: 37, G: 99, B: 235, A: 255}
-			switch {
-			case angle < 2*math.Pi/3:
-				base = color.NRGBA{R: 30, G: 105, B: 230, A: 255}
-			case angle < 4*math.Pi/3:
-				base = color.NRGBA{R: 23, G: 78, B: 180, A: 255}
-			default:
-				base = color.NRGBA{R: 74, G: 144, B: 245, A: 255}
-			}
-			// 从左上到右下的轻微高光，让任务栏小尺寸更接近原来的立体图标。
-			highlight := (float64(size-x) + float64(size-y)) / float64(size*2)
-			base.R = uint8(math.Min(255, float64(base.R)+28*highlight))
-			base.G = uint8(math.Min(255, float64(base.G)+32*highlight))
-			base.B = uint8(math.Min(255, float64(base.B)+36*highlight))
-
-			if dist < innerR {
-				// 内圈白色分隔环
-				base = color.NRGBA{R: 245, G: 249, B: 255, A: 255}
-			}
-			if dist < centerR {
-				// 中心蓝点
-				t := dist / centerR
-				base = color.NRGBA{R: uint8(82 - 22*t), G: uint8(164 - 34*t), B: 255, A: 255}
-			}
-			img.SetNRGBA(x, y, blend(img.NRGBAAt(x, y), base, alpha))
+			img.SetNRGBA(x, y, color.NRGBA{R: blue.R, G: blue.G, B: blue.B, A: alpha})
 		}
 	}
 	return img
@@ -310,16 +264,8 @@ func overlayBadgeNumberNative(img *image.NRGBA, number int) {
 	gap := layout.gap
 	fontW := layout.fontW
 	fontH := layout.fontH
-	pillW := layout.pillW
-	pillH := layout.pillH
-	pillX := max(0, size-pillW)
-	pillY := 0
-	keyline := max(1, size/64)
-	drawRoundedPill(img, max(0, pillX-keyline), pillY, min(size-pillX+keyline, pillW+keyline), min(size, pillH+keyline), max(2, pillH/3), color.NRGBA{R: 255, G: 255, B: 255, A: 255})
-	drawRoundedPill(img, pillX, pillY+keyline, pillW, pillH-keyline, max(2, pillH/3), color.NRGBA{R: 220, G: 24, B: 44, A: 255})
-
-	x := pillX + (pillW-fontW)/2
-	y := pillY + keyline + (pillH-keyline-fontH)/2
+	x := (size - fontW) / 2
+	y := (size - fontH) / 2
 	for _, ch := range []byte(numStr) {
 		rows, ok := badgeDigitPixels[ch]
 		if !ok {

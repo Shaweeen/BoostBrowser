@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -24,10 +25,34 @@ import (
 
 const (
 	rabbyExtensionID       = "acmacodkjbdgmoleebolmdjonilkdbch"
+	jupiterExtensionID     = "iledlaeogohbilgbfhmbgkgmpplbfboh"
+	metamaskExtensionID    = "nkbihfbeogaeaoehlefnkodbefgpgknn"
 	rabbyImportSessionTTL  = 15 * time.Minute
 	rabbyImportMaxFileSize = 4 * 1024 * 1024
 	rabbyImportMaxRows     = 500
 )
+
+type walletImportSpec struct {
+	Type              string
+	Name              string
+	ExtensionID       string
+	AllowedWordCounts map[int]bool
+}
+
+var walletImportSpecs = map[string]walletImportSpec{
+	"rabby": {
+		Type: "rabby", Name: "Rabby", ExtensionID: rabbyExtensionID,
+		AllowedWordCounts: map[int]bool{12: true, 15: true, 18: true, 21: true, 24: true},
+	},
+	"jupiter": {
+		Type: "jupiter", Name: "Jupiter", ExtensionID: jupiterExtensionID,
+		AllowedWordCounts: map[int]bool{12: true, 24: true},
+	},
+	"metamask": {
+		Type: "metamask", Name: "MetaMask", ExtensionID: metamaskExtensionID,
+		AllowedWordCounts: map[int]bool{12: true, 15: true, 18: true, 21: true, 24: true},
+	},
+}
 
 var rabbyAddressPattern = regexp.MustCompile(`(?i)0x[0-9a-f]{40}`)
 
@@ -38,10 +63,11 @@ type rabbyWalletImportSecretRow struct {
 }
 
 type rabbyWalletImportSession struct {
-	CreatedAt time.Time
-	FileName  string
-	Rows      []rabbyWalletImportSecretRow
-	Timer     *time.Timer
+	CreatedAt  time.Time
+	FileName   string
+	WalletType string
+	Rows       []rabbyWalletImportSecretRow
+	Timer      *time.Timer
 }
 
 type RabbyWalletImportPreviewRow struct {
@@ -61,8 +87,9 @@ type RabbyWalletImportPreview struct {
 }
 
 type RabbyWalletBatchExecuteInput struct {
-	SessionID string `json:"sessionId"`
-	Password  string `json:"password"`
+	SessionID  string `json:"sessionId"`
+	WalletType string `json:"walletType"`
+	Password   string `json:"password"`
 }
 
 type RabbyWalletImportResultRow struct {
@@ -83,6 +110,7 @@ type RabbyWalletImportResult struct {
 }
 
 type RabbyWalletImportProgress struct {
+	WalletType  string `json:"walletType"`
 	Completed   int    `json:"completed"`
 	Total       int    `json:"total"`
 	ProfileID   string `json:"profileId"`
@@ -95,14 +123,25 @@ type RabbyWalletImportProgress struct {
 // never cross the Wails boundary and are kept only in a short-lived memory
 // session until execute/cancel.
 func (a *App) RabbyWalletBatchPrepare() (*RabbyWalletImportPreview, error) {
+	return a.WalletBatchPrepare("rabby")
+}
+
+// WalletBatchPrepare selects and validates a CSV/TXT mapping for one official
+// wallet extension. Secret phrases remain in a one-use in-memory session and
+// are never returned through the Wails bridge.
+func (a *App) WalletBatchPrepare(walletType string) (*RabbyWalletImportPreview, error) {
 	if a == nil || a.ctx == nil || a.browserMgr == nil {
 		return nil, fmt.Errorf("应用尚未初始化")
 	}
-	if !extensionManifestExists(a.globalExtensionDir(rabbyExtensionID)) {
-		return nil, fmt.Errorf("未检测到全局 Rabby Wallet 扩展，请先在扩展管理中安装并设为全局使用")
+	spec, err := resolveWalletImportSpec(walletType)
+	if err != nil {
+		return nil, err
+	}
+	if !a.officialWalletExtensionInstalled(spec) {
+		return nil, fmt.Errorf("未检测到官方 %s Wallet 扩展，请先在扩展管理中安装并设为全局使用", spec.Name)
 	}
 	filePath, err := wailsruntime.OpenFileDialog(a.ctx, wailsruntime.OpenDialogOptions{
-		Title: "选择 Rabby 钱包映射文件",
+		Title: "选择 " + spec.Name + " 钱包映射文件",
 		Filters: []wailsruntime.FileFilter{
 			{DisplayName: "钱包映射文件 (*.csv;*.txt)", Pattern: "*.csv;*.txt"},
 			{DisplayName: "CSV 文件 (*.csv)", Pattern: "*.csv"},
@@ -117,7 +156,7 @@ func (a *App) RabbyWalletBatchPrepare() (*RabbyWalletImportPreview, error) {
 	}
 
 	profiles := a.rabbyProfileSnapshot()
-	rows, previewRows, err := parseRabbyWalletImportFile(filePath, profiles)
+	rows, previewRows, err := parseWalletImportFile(filePath, profiles, spec)
 	if err != nil {
 		return nil, err
 	}
@@ -133,9 +172,10 @@ func (a *App) RabbyWalletBatchPrepare() (*RabbyWalletImportPreview, error) {
 		a.rabbyImports = make(map[string]*rabbyWalletImportSession)
 	}
 	session := &rabbyWalletImportSession{
-		CreatedAt: time.Now(),
-		FileName:  filepath.Base(filePath),
-		Rows:      rows,
+		CreatedAt:  time.Now(),
+		FileName:   filepath.Base(filePath),
+		WalletType: spec.Type,
+		Rows:       rows,
 	}
 	a.rabbyImports[sessionID] = session
 	session.Timer = time.AfterFunc(rabbyImportSessionTTL, func() {
@@ -151,19 +191,27 @@ func (a *App) RabbyWalletBatchPrepare() (*RabbyWalletImportPreview, error) {
 		SessionID: sessionID,
 		FileName:  filepath.Base(filePath),
 		Rows:      previewRows,
-		Message:   fmt.Sprintf("已安全读取 %d 条环境映射；助记词未发送到前端", len(rows)),
+		Message:   fmt.Sprintf("已安全读取 %d 条 %s 环境映射；助记词未发送到前端", len(rows), spec.Name),
 	}, nil
 }
 
 // RabbyWalletExportImportTemplate exports environment IDs without secrets so
 // the user can fill the mnemonic column offline.
 func (a *App) RabbyWalletExportImportTemplate() (map[string]any, error) {
+	return a.WalletExportImportTemplate("rabby")
+}
+
+func (a *App) WalletExportImportTemplate(walletType string) (map[string]any, error) {
 	if a == nil || a.ctx == nil || a.browserMgr == nil {
 		return nil, fmt.Errorf("应用尚未初始化")
 	}
+	spec, err := resolveWalletImportSpec(walletType)
+	if err != nil {
+		return nil, err
+	}
 	path, err := wailsruntime.SaveFileDialog(a.ctx, wailsruntime.SaveDialogOptions{
-		Title:           "保存 Rabby 批量导入模板",
-		DefaultFilename: "rabby-wallet-import-template.csv",
+		Title:           "保存 " + spec.Name + " 批量导入模板",
+		DefaultFilename: spec.Type + "-wallet-import-template.csv",
 		Filters: []wailsruntime.FileFilter{
 			{DisplayName: "CSV 文件 (*.csv)", Pattern: "*.csv"},
 		},
@@ -202,6 +250,10 @@ func (a *App) RabbyWalletExportImportTemplate() (map[string]any, error) {
 }
 
 func (a *App) RabbyWalletBatchCancel(sessionID string) {
+	a.WalletBatchCancel(sessionID)
+}
+
+func (a *App) WalletBatchCancel(sessionID string) {
 	if a == nil {
 		return
 	}
@@ -211,15 +263,21 @@ func (a *App) RabbyWalletBatchCancel(sessionID string) {
 }
 
 func (a *App) RabbyWalletBatchExecute(input RabbyWalletBatchExecuteInput) (*RabbyWalletImportResult, error) {
+	input.WalletType = "rabby"
+	return a.WalletBatchExecute(input)
+}
+
+func (a *App) WalletBatchExecute(input RabbyWalletBatchExecuteInput) (*RabbyWalletImportResult, error) {
 	if a == nil || a.browserMgr == nil {
 		return nil, fmt.Errorf("浏览器管理器未初始化")
 	}
 	input.SessionID = strings.TrimSpace(input.SessionID)
+	input.WalletType = strings.ToLower(strings.TrimSpace(input.WalletType))
 	if input.SessionID == "" {
 		return nil, fmt.Errorf("导入会话无效，请重新选择文件")
 	}
 	if len(input.Password) < 8 {
-		return nil, fmt.Errorf("Rabby 本地解锁密码至少需要 8 个字符")
+		return nil, fmt.Errorf("钱包本地解锁密码至少需要 8 个字符")
 	}
 
 	a.rabbyImportMu.Lock()
@@ -235,6 +293,15 @@ func (a *App) RabbyWalletBatchExecute(input RabbyWalletBatchExecuteInput) (*Rabb
 	a.rabbyImportMu.Unlock()
 	if session == nil {
 		return nil, fmt.Errorf("导入会话已过期，请重新选择文件")
+	}
+	spec, err := resolveWalletImportSpec(session.WalletType)
+	if err != nil {
+		clearRabbySecretRows(session.Rows)
+		return nil, err
+	}
+	if input.WalletType != "" && input.WalletType != spec.Type {
+		clearRabbySecretRows(session.Rows)
+		return nil, fmt.Errorf("钱包类型与导入会话不匹配，请重新选择文件")
 	}
 	defer clearRabbySecretRows(session.Rows)
 	defer func() { input.Password = "" }()
@@ -257,8 +324,8 @@ func (a *App) RabbyWalletBatchExecute(input RabbyWalletBatchExecuteInput) (*Rabb
 		a.rabbyImportMu.Unlock()
 	}()
 
-	if !extensionManifestExists(a.globalExtensionDir(rabbyExtensionID)) {
-		return nil, fmt.Errorf("Rabby Wallet 扩展不存在或已损坏，请重新安装全局扩展")
+	if !a.officialWalletExtensionInstalled(spec) {
+		return nil, fmt.Errorf("%s Wallet 扩展不存在或已损坏，请重新安装官方全局扩展", spec.Name)
 	}
 	profiles := a.rabbyProfileSnapshot()
 	for _, row := range session.Rows {
@@ -275,7 +342,7 @@ func (a *App) RabbyWalletBatchExecute(input RabbyWalletBatchExecuteInput) (*Rabb
 		Total: len(session.Rows),
 		Rows:  make([]RabbyWalletImportResultRow, 0, len(session.Rows)),
 	}
-	log := logger.New("RabbyImport")
+	log := logger.New("WalletImport")
 	for index, row := range session.Rows {
 		profileSnapshot := profiles[row.ProfileID]
 		resultRow := RabbyWalletImportResultRow{
@@ -283,28 +350,33 @@ func (a *App) RabbyWalletBatchExecute(input RabbyWalletBatchExecuteInput) (*Rabb
 			ProfileID:   row.ProfileID,
 			ProfileName: profileSnapshot.ProfileName,
 			Status:      "running",
-			Message:     "正在启动环境并导入 Rabby",
+			Message:     "正在启动环境并导入 " + spec.Name,
 		}
-		a.emitRabbyImportProgress(index, len(session.Rows), resultRow)
+		a.emitWalletImportProgress(spec.Type, index, len(session.Rows), resultRow)
 
-		started, startErr := a.browserInstanceStartInternal(row.ProfileID, nil, nil, false, false, true)
+		// During secret entry, load only the selected official wallet extension
+		// and suppress ordinary startup pages. This prevents other installed
+		// extensions and websites from observing the automated import session.
+		extensionDir := a.globalExtensionDir(spec.ExtensionID)
+		importLaunchArgs := []string{"--disable-extensions-except=" + extensionDir}
+		started, startErr := a.browserInstanceStartInternal(row.ProfileID, importLaunchArgs, nil, true, false, true)
 		if startErr != nil || started == nil || started.DebugPort <= 0 {
 			resultRow.Status = "failed"
 			resultRow.Message = safeRabbyImportError("环境启动失败", startErr)
 			result.Failed++
 			result.Rows = append(result.Rows, resultRow)
-			a.emitRabbyImportProgress(index+1, len(session.Rows), resultRow)
+			a.emitWalletImportProgress(spec.Type, index+1, len(session.Rows), resultRow)
 			continue
 		}
 
-		address, importErr := importMnemonicIntoFreshRabby(started.DebugPort, row.Mnemonic, input.Password)
+		address, importErr := importMnemonicIntoFreshWallet(spec.Type, started.DebugPort, row.Mnemonic, input.Password)
 		_, stopErr := a.BrowserInstanceStop(row.ProfileID)
 		if stopErr != nil {
 			log.Warn("导入后关闭环境失败", logger.F("profile_id", row.ProfileID), logger.F("error", stopErr.Error()))
 		}
 		if importErr != nil {
 			resultRow.Status = "failed"
-			resultRow.Message = safeRabbyImportError("Rabby 导入失败", importErr)
+			resultRow.Message = safeRabbyImportError(spec.Name+" 导入失败", importErr)
 			if stopErr != nil {
 				resultRow.Message += "；环境自动关闭失败，请手动关闭"
 			}
@@ -312,32 +384,42 @@ func (a *App) RabbyWalletBatchExecute(input RabbyWalletBatchExecuteInput) (*Rabb
 		} else {
 			resultRow.Status = "success"
 			resultRow.Address = address
-			resultRow.Message = "Rabby 钱包导入成功"
+			resultRow.Message = spec.Name + " 钱包导入成功"
 			if stopErr != nil {
 				resultRow.Message += "，但环境自动关闭失败，请手动关闭"
 			}
 			result.Succeeded++
 		}
 		result.Rows = append(result.Rows, resultRow)
-		a.emitRabbyImportProgress(index+1, len(session.Rows), resultRow)
-		log.Info("Rabby 批量导入单项完成", logger.F("profile_id", row.ProfileID), logger.F("status", resultRow.Status))
+		a.emitWalletImportProgress(spec.Type, index+1, len(session.Rows), resultRow)
+		log.Info("钱包批量导入单项完成", logger.F("wallet_type", spec.Type), logger.F("profile_id", row.ProfileID), logger.F("status", resultRow.Status))
 	}
-	result.Message = fmt.Sprintf("Rabby 批量导入完成：成功 %d，失败 %d", result.Succeeded, result.Failed)
+	result.Message = fmt.Sprintf("%s 批量导入完成：成功 %d，失败 %d", spec.Name, result.Succeeded, result.Failed)
 	return result, nil
 }
 
 func (a *App) emitRabbyImportProgress(completed, total int, row RabbyWalletImportResultRow) {
+	a.emitWalletImportProgress("rabby", completed, total, row)
+}
+
+func (a *App) emitWalletImportProgress(walletType string, completed, total int, row RabbyWalletImportResultRow) {
 	if a.ctx == nil {
 		return
 	}
-	wailsruntime.EventsEmit(a.ctx, "rabby-wallet-import:progress", RabbyWalletImportProgress{
+	progress := RabbyWalletImportProgress{
+		WalletType:  walletType,
 		Completed:   completed,
 		Total:       total,
 		ProfileID:   row.ProfileID,
 		ProfileName: row.ProfileName,
 		Status:      row.Status,
 		Message:     row.Message,
-	})
+	}
+	wailsruntime.EventsEmit(a.ctx, "wallet-import:progress", progress)
+	// Retain the legacy event for clients that still expose only Rabby import.
+	if walletType == "rabby" {
+		wailsruntime.EventsEmit(a.ctx, "rabby-wallet-import:progress", progress)
+	}
 }
 
 func (a *App) rabbyProfileSnapshot() map[string]RabbyWalletImportPreviewRow {
@@ -391,7 +473,51 @@ func newRabbyImportSessionID() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
+func resolveWalletImportSpec(walletType string) (walletImportSpec, error) {
+	key := strings.ToLower(strings.TrimSpace(walletType))
+	spec, ok := walletImportSpecs[key]
+	if !ok {
+		return walletImportSpec{}, fmt.Errorf("不支持的钱包类型：%s", walletType)
+	}
+	return spec, nil
+}
+
+// officialWalletExtensionInstalled prevents a package downloaded from an
+// arbitrary URL containing a 32-character ID from being trusted as a wallet.
+// Wallet batch import accepts only a registry entry installed from the exact
+// Chrome Web Store origin (or an exact extension ID, which resolves there).
+func (a *App) officialWalletExtensionInstalled(spec walletImportSpec) bool {
+	if a == nil || !extensionManifestExists(a.globalExtensionDir(spec.ExtensionID)) {
+		return false
+	}
+	registry, err := a.loadGlobalExtensionRegistry()
+	if err != nil {
+		return false
+	}
+	for _, entry := range registry.Extensions {
+		if !strings.EqualFold(strings.TrimSpace(entry.ExtensionID), spec.ExtensionID) {
+			continue
+		}
+		raw := strings.TrimSpace(entry.DownloadAddress)
+		if strings.EqualFold(raw, spec.ExtensionID) {
+			return true
+		}
+		parsed, err := url.Parse(raw)
+		if err != nil || !strings.EqualFold(parsed.Hostname(), "chromewebstore.google.com") {
+			continue
+		}
+		if strings.EqualFold(extractExtensionID(raw), spec.ExtensionID) {
+			return true
+		}
+	}
+	return false
+}
+
 func parseRabbyWalletImportFile(path string, profiles map[string]RabbyWalletImportPreviewRow) ([]rabbyWalletImportSecretRow, []RabbyWalletImportPreviewRow, error) {
+	return parseWalletImportFile(path, profiles, walletImportSpecs["rabby"])
+}
+
+func parseWalletImportFile(path string, profiles map[string]RabbyWalletImportPreviewRow, spec walletImportSpec) ([]rabbyWalletImportSecretRow, []RabbyWalletImportPreviewRow, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("读取钱包映射文件失败：%w", err)
@@ -452,9 +578,15 @@ func parseRabbyWalletImportFile(path string, profiles map[string]RabbyWalletImpo
 		}
 		seenProfiles[row.ProfileID] = row.RowNumber
 		wordCount := len(strings.Fields(row.Mnemonic))
-		if !validRabbyMnemonicWordCount(wordCount) {
+		if !spec.AllowedWordCounts[wordCount] {
 			clearRabbySecretRows(parsed)
-			return nil, nil, fmt.Errorf("第 %d 行助记词词数为 %d，仅支持 12/15/18/21/24 词", row.RowNumber, wordCount)
+			allowed := make([]string, 0, len(spec.AllowedWordCounts))
+			for _, count := range []int{12, 15, 18, 21, 24} {
+				if spec.AllowedWordCounts[count] {
+					allowed = append(allowed, fmt.Sprintf("%d", count))
+				}
+			}
+			return nil, nil, fmt.Errorf("第 %d 行助记词词数为 %d，%s 仅支持 %s 词", row.RowNumber, wordCount, spec.Name, strings.Join(allowed, "/"))
 		}
 		hash := sha256Bytes(row.Mnemonic)
 		if previous, exists := seenMnemonics[hash]; exists {

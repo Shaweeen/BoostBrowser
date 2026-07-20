@@ -102,6 +102,14 @@ export function RabbyWalletBatchExecute(arg1:backend.RabbyWalletBatchExecuteInpu
 
 export function RabbyWalletBatchCancel(arg1:string):Promise<void>;
 
+export function WalletBatchPrepare(arg1:string):Promise<backend.RabbyWalletImportPreview>;
+
+export function WalletExportImportTemplate(arg1:string):Promise<Record<string, any>>;
+
+export function WalletBatchExecute(arg1:backend.RabbyWalletBatchExecuteInput):Promise<backend.RabbyWalletImportResult>;
+
+export function WalletBatchCancel(arg1:string):Promise<void>;
+
 export function BrowserProfileImportExtension(arg1:Array<string>,arg2:string):Promise<backend.ExtensionImportResult>;
 
 export function BrowserProfileImportMoreLoginXLSX():Promise<Record<string, any>>;
