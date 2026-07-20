@@ -1094,20 +1094,24 @@ export function ProxyPoolPage() {
     })
   }, [displayList, filterProtocol, filterKeyword, filterGroup, sortColumn, sortOrder, latencyMap])
 
-  const allFilteredSelected = filteredList.length > 0 && filteredList.every(p => selectedIds.has(p.proxyId))
-  const someFilteredSelected = filteredList.some(p => selectedIds.has(p.proxyId))
+  const selectableFilteredList = useMemo(
+    () => filteredList.filter(p => !BUILTIN_PROXY_IDS.has(p.proxyId)),
+    [filteredList],
+  )
+  const allFilteredSelected = selectableFilteredList.length > 0 && selectableFilteredList.every(p => selectedIds.has(p.proxyId))
+  const someFilteredSelected = selectableFilteredList.some(p => selectedIds.has(p.proxyId))
 
   const handleToggleAll = () => {
     if (allFilteredSelected) {
       setSelectedIds(prev => {
         const next = new Set(prev)
-        filteredList.forEach(p => next.delete(p.proxyId))
+        selectableFilteredList.forEach(p => next.delete(p.proxyId))
         return next
       })
     } else {
       setSelectedIds(prev => {
         const next = new Set(prev)
-        filteredList.filter(p => !BUILTIN_PROXY_IDS.has(p.proxyId)).forEach(p => next.add(p.proxyId))
+        selectableFilteredList.forEach(p => next.add(p.proxyId))
         return next
       })
     }
@@ -1676,7 +1680,7 @@ export function ProxyPoolPage() {
             <span className="text-xs text-[var(--color-text-muted)]">分钟</span>
           </div>
           <div className="flex-1" />
-          {filteredList.length > 0 && (
+          {selectableFilteredList.length > 0 && (
             <label className="flex items-center gap-1.5 text-sm text-[var(--color-text-muted)] cursor-pointer select-none">
               <input
                 type="checkbox"
