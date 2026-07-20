@@ -14,6 +14,27 @@ function Require-Path([string]$Path, [string]$Message) {
     if (-not (Test-Path -LiteralPath $Path)) { throw $Message }
 }
 
+function Get-MicrosoftPrerequisite([string]$Url, [string]$Path, [string]$Label) {
+    $valid = $false
+    if (Test-Path -LiteralPath $Path) {
+        $signature = Get-AuthenticodeSignature -LiteralPath $Path
+        $valid = $signature.Status -eq 'Valid' -and $signature.SignerCertificate.Subject -like '*Microsoft Corporation*'
+    }
+    if ($valid) {
+        Write-Host "   $Label already cached and signed" -ForegroundColor Green
+        return
+    }
+
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    Write-Host "   Downloading $Label ..." -ForegroundColor Cyan
+    Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Microsoft Corporation*') {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        throw "$Label did not have a valid Microsoft Authenticode signature"
+    }
+}
+
 function Copy-Dir([string]$Source, [string]$Destination) {
     if (Test-Path -LiteralPath $Destination) {
         Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
@@ -100,10 +121,14 @@ $OutExe = if ($ManagerOnly) { "$ReleaseDir\BrowserStudio-Manager-Setup-v$Version
 $Icon = "$RepoRoot\build\windows\icon.ico"
 $SidebarBmp = "$RepoRoot\publish\boost_sidebar.bmp"
 $HeaderBmp = "$RepoRoot\publish\boost_header.bmp"
+$PrerequisiteDir = "$RepoRoot\build\cache\prerequisites"
+$WebView2Bootstrapper = "$PrerequisiteDir\MicrosoftEdgeWebview2Setup.exe"
+$VCRedistX64 = "$PrerequisiteDir\VC_redist.x64.exe"
 
 $AssetRoot = if ($env:BOOST_KERNEL_SRC) { $env:BOOST_KERNEL_SRC } else { $RepoRoot }
 $CloakKernelSrc = "$AssetRoot\chrome\cloak-146.0.7680.177"
 $GoogleKernelSrc = "$AssetRoot\chrome\google-148.0.7778.167"
+$GoogleKernelCompatMarker = "$GoogleKernelSrc\chrome-for-testing.marker"
 $BinSrc = "$AssetRoot\bin"
 # Optional helper extension is intentionally not staged for the self-use clean
 # build. Users requested no default/search helper extension in packaged installs.
@@ -119,9 +144,14 @@ if (-not $ManagerOnly) {
 Require-Path $Icon "Missing icon: $Icon"
 New-Item -ItemType Directory -Force -Path $Publish | Out-Null
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
+New-Item -ItemType Directory -Force -Path $PrerequisiteDir | Out-Null
+
+Write-Host "==> [1/7] Preparing signed Microsoft runtime installers" -ForegroundColor Yellow
+Get-MicrosoftPrerequisite 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' $WebView2Bootstrapper 'Microsoft Edge WebView2 Runtime bootstrapper'
+Get-MicrosoftPrerequisite 'https://aka.ms/vs/17/release/vc_redist.x64.exe' $VCRedistX64 'Microsoft Visual C++ x64 runtime'
 
 Write-Host "==> Asset root: $AssetRoot" -ForegroundColor Cyan
-Write-Host "==> [1/6] Staging files to $Stage" -ForegroundColor Yellow
+Write-Host "==> [2/7] Staging files to $Stage" -ForegroundColor Yellow
 Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 
@@ -136,10 +166,10 @@ if (-not $ManagerOnly -and (Test-Path -LiteralPath $BinSrc)) { Copy-Dir $BinSrc 
 if (-not $ManagerOnly) {
     New-Item -ItemType Directory -Force -Path "$Stage\chrome" | Out-Null
     Copy-Dir $CloakKernelSrc "$Stage\chrome\cloak-146.0.7680.177"
-    if (Test-Path -LiteralPath $GoogleKernelSrc) {
+    if ((Test-Path -LiteralPath "$GoogleKernelSrc\chrome.exe") -and (Test-Path -LiteralPath $GoogleKernelCompatMarker)) {
         Copy-Dir $GoogleKernelSrc "$Stage\chrome\google-148.0.7778.167"
     } else {
-        Write-Host "Optional Google fallback missing; skipped: $GoogleKernelSrc" -ForegroundColor Yellow
+        Write-Host "Optional extension-compatible Chrome fallback missing; skipped: $GoogleKernelSrc" -ForegroundColor Yellow
     }
 }
 New-Item -ItemType Directory -Force -Path "$Stage\data" | Out-Null
@@ -152,17 +182,17 @@ $stageBytes = (Get-ChildItem $Stage -Recurse -File -Force | Measure-Object -Prop
 $stageFiles = (Get-ChildItem $Stage -Recurse -File -Force | Measure-Object).Count
 Write-Host ("   Stage: {0:N0} files, {1:N1} MB" -f $stageFiles, ($stageBytes / 1MB)) -ForegroundColor Green
 
-Write-Host '==> [2/6] Generating NSIS bitmaps' -ForegroundColor Yellow
+Write-Host '==> [3/7] Generating NSIS bitmaps' -ForegroundColor Yellow
 New-BrandBitmap $SidebarBmp 164 314 $false $Version
 New-BrandBitmap $HeaderBmp 150 57 $true $Version
 
-Write-Host '==> [3/6] Generating NSIS file manifest' -ForegroundColor Yellow
+Write-Host '==> [4/7] Generating NSIS file manifest' -ForegroundColor Yellow
 $out = New-Object System.Collections.Generic.List[string]
 Add-NsisDir $Stage '' $out
 Set-Content -Path $NshPath -Value $out -Encoding Unicode
 Write-Host ("   Wrote {0:N0} NSIS lines" -f $out.Count) -ForegroundColor Green
 
-Write-Host '==> [4/6] Generating NSIS script' -ForegroundColor Yellow
+Write-Host '==> [5/7] Generating NSIS script' -ForegroundColor Yellow
 $nsi = @"
 Unicode True
 !define PRODUCT_NAME "$ProductName"
@@ -211,6 +241,8 @@ Function .onInit
   InitPluginsDir
   SetOutPath `$PLUGINSDIR
   File /oname=activation-check.exe "$ActivationCheckExe"
+  File /oname=MicrosoftEdgeWebview2Setup.exe "$WebView2Bootstrapper"
+  File /oname=VC_redist.x64.exe "$VCRedistX64"
 FunctionEnd
 
 Function ActivationPage
@@ -254,9 +286,63 @@ Function CloseBoostProcesses
 done:
 FunctionEnd
 
+Function EnsureVCRuntime
+  SetRegView 64
+  ClearErrors
+  ReadRegDWORD `$0 HKLM "SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" "Installed"
+  IfErrors vc_try_32
+  IntCmp `$0 1 vc_try_32 vc_done vc_done
+vc_try_32:
+  SetRegView 32
+  ClearErrors
+  ReadRegDWORD `$0 HKLM "SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" "Installed"
+  IfErrors vc_install
+  IntCmp `$0 1 vc_install vc_done vc_done
+vc_install:
+  DetailPrint "Installing Microsoft Visual C++ x64 Runtime ..."
+  ExecWait '"`$PLUGINSDIR\VC_redist.x64.exe" /install /quiet /norestart' `$1
+  IntCmp `$1 0 vc_done
+  IntCmp `$1 3010 vc_done
+  IntCmp `$1 1638 vc_done
+  MessageBox MB_ICONSTOP|MB_OK "Microsoft Visual C++ x64 Runtime installation failed (exit `$1)."
+  Abort
+vc_done:
+  SetRegView 32
+FunctionEnd
+
+Function EnsureWebView2Runtime
+  StrCpy `$0 ""
+  SetRegView 64
+  ReadRegStr `$0 HKLM "SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+  StrCmp `$0 "" webview_try_hklm_32 webview_done
+webview_try_hklm_32:
+  SetRegView 32
+  ReadRegStr `$0 HKLM "SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+  StrCmp `$0 "" webview_try_hkcu_64 webview_done
+webview_try_hkcu_64:
+  SetRegView 64
+  ReadRegStr `$0 HKCU "SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+  StrCmp `$0 "" webview_try_hkcu_32 webview_done
+webview_try_hkcu_32:
+  SetRegView 32
+  ReadRegStr `$0 HKCU "SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
+  StrCmp `$0 "" webview_install webview_done
+webview_install:
+  DetailPrint "Installing Microsoft Edge WebView2 Runtime ..."
+  ExecWait '"`$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe" /silent /install' `$1
+  IntCmp `$1 0 webview_done
+  MessageBox MB_ICONSTOP|MB_OK "Microsoft Edge WebView2 Runtime installation failed (exit `$1)."
+  Abort
+webview_done:
+  SetRegView 32
+FunctionEnd
+
 Section "$ProductName" SecMain
   SectionIn RO
   Call CloseBoostProcesses
+  Call EnsureVCRuntime
+  Call EnsureWebView2Runtime
+  RMDir /r "`$INSTDIR\chrome\google-148.0.7778.167"
   SetOutPath "`$INSTDIR"
   !include "$NshPath"
   CopyFiles /SILENT "`$PLUGINSDIR\activation.marker" "`$INSTDIR\.browserstudio-activation.json"
@@ -293,7 +379,7 @@ SectionEnd
 "@
 Set-Content -Path $NsiPath -Value $nsi -Encoding Unicode
 
-Write-Host '==> [5/6] Running makensis' -ForegroundColor Yellow
+Write-Host '==> [6/7] Running makensis' -ForegroundColor Yellow
 $makensisCandidates = @(
     'C:\Program Files (x86)\NSIS\makensis.exe',
     'C:\Program Files\NSIS\makensis.exe'
@@ -311,7 +397,7 @@ if ($LASTEXITCODE -ne 0) { throw "makensis failed: exit $LASTEXITCODE" }
 Require-Path $OutExe "Installer was not generated: $OutExe"
 Unblock-File $OutExe -ErrorAction SilentlyContinue
 
-Write-Host '==> [6/6] Done' -ForegroundColor Green
+Write-Host '==> [7/7] Done' -ForegroundColor Green
 $hash = (Get-FileHash $OutExe -Algorithm SHA256).Hash.ToLower()
 $hashPath = "$OutExe.sha256"
 [IO.File]::WriteAllText($hashPath, $hash, (New-Object Text.UTF8Encoding($false)))

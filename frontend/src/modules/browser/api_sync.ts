@@ -29,6 +29,7 @@ export interface SyncStatus {
   followerIds: string[]
   mouseEnabled: boolean
   keyEnabled: boolean
+  pointerInsideMaster: boolean
   randomDelayEnabled: boolean
   randomDelayMinMs: number
   randomDelayMaxMs: number

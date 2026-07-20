@@ -66,13 +66,17 @@ public GitHub Release.
 
 ### Components required to run BrowserStudio
 
-Install the Microsoft Edge WebView2 Runtime and the Microsoft Visual C++ x64
-runtime before launching BrowserStudio. Open PowerShell or Windows Terminal and
-run:
+The full Manager and Private Setup packages contain Microsoft-signed installers
+for the Edge WebView2 Runtime and Microsoft Visual C++ x64 runtime. Setup checks
+the standard machine and user registry locations, skips components that are
+already present, and silently installs only missing components. Installation is
+stopped with an actionable error if a required component cannot be installed.
+
+For manual recovery, open PowerShell or Windows Terminal and run:
 
 ```powershell
-winget install --id Microsoft.EdgeWebView2Runtime --exact --accept-package-agreements --accept-source-agreements
-winget install --id Microsoft.VCRedist.2015+.x64 --exact --accept-package-agreements --accept-source-agreements
+winget install --id Microsoft.EdgeWebView2Runtime --exact --source winget --accept-package-agreements --accept-source-agreements
+winget install --id Microsoft.VCRedist.2015+.x64 --exact --source winget --accept-package-agreements --accept-source-agreements
 ```
 
 Restart Windows after installing or updating the Visual C++ runtime. WebView2
@@ -88,10 +92,10 @@ Redistributable directly from Microsoft.
 Install Git, Go, Node.js LTS, and NSIS:
 
 ```powershell
-winget install --id Git.Git --exact --accept-package-agreements --accept-source-agreements
-winget install --id GoLang.Go --exact --accept-package-agreements --accept-source-agreements
-winget install --id OpenJS.NodeJS.LTS --exact --accept-package-agreements --accept-source-agreements
-winget install --id NSIS.NSIS --exact --accept-package-agreements --accept-source-agreements
+winget install --id Git.Git --exact --source winget --accept-package-agreements --accept-source-agreements
+winget install --id GoLang.Go --exact --source winget --accept-package-agreements --accept-source-agreements
+winget install --id OpenJS.NodeJS.LTS --exact --source winget --accept-package-agreements --accept-source-agreements
+winget install --id NSIS.NSIS --exact --source winget --accept-package-agreements --accept-source-agreements
 ```
 
 Close and reopen PowerShell so the updated `PATH` is loaded. Then install the
@@ -185,7 +189,10 @@ Build the public redistributable Manager edition:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_windows_public.ps1
 ```
 
-Build the private full edition from the repository root:
+Build the private full edition from the repository root. The optional
+`google-148.0.7778.167` slot is populated with Google's Chrome for Testing
+build, because official branded Chrome 137+ ignores `--load-extension` and
+cannot auto-load extensions bound to a BrowserStudio profile:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_windows_selfuse.ps1 -SkipKernelInstall
@@ -197,7 +204,7 @@ To install or refresh the CloakBrowser kernel during the build:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_windows_selfuse.ps1
 ```
 
-To omit the optional local Google Chrome fallback:
+To omit the optional extension-compatible Chrome fallback:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_windows_selfuse.ps1 -SkipKernelInstall -SkipGoogleFallback

@@ -31,7 +31,9 @@ function Install-WingetPackage([string]$Id, [string]$CommandName) {
     }
 
     Write-Host "Installing $Id ..." -ForegroundColor Cyan
-    & winget install --id $Id --exact --silent --disable-interactivity --accept-package-agreements --accept-source-agreements
+    # Pin the community winget source. A disconnected Microsoft Store source
+    # must not block installing ordinary desktop build/runtime packages.
+    & winget install --id $Id --exact --source winget --silent --disable-interactivity --accept-package-agreements --accept-source-agreements
     $wingetExitCode = $LASTEXITCODE
     # 0x8A15002B means that the package is already installed and no applicable
     # upgrade exists. Windows PowerShell exposes that HRESULT as -1978335189.
@@ -76,7 +78,12 @@ if (($userPath -split ';') -notcontains $goBin) {
 }
 Refresh-Path
 
-$buildArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $RepoRoot "scripts\build_windows_selfuse.ps1"))
+$buildArgs = @(
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", (Join-Path $RepoRoot "scripts\build_windows_selfuse.ps1"),
+    "-NoInstall"
+)
 if ($SkipGoogleFallback) { $buildArgs += "-SkipGoogleFallback" }
 if ($RunGoTests) { $buildArgs += "-RunGoTests" }
 

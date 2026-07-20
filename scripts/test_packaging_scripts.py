@@ -35,6 +35,35 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertNotIn("CloakKernelSrc  = 'Z:", text)
         self.assertNotIn("GoogleKernelSrc = 'Z:", text)
 
+    def test_google_148_fallback_uses_extension_compatible_chrome_for_testing(self):
+        installer = self.read("scripts/build_installer.ps1")
+        wrapper = self.read("scripts/build_windows_selfuse.ps1")
+        downloader = self.read("scripts/install_chrome_for_testing_kernel.ps1")
+        stage_assets = self.read("scripts/stage_assets.ps1")
+
+        self.assertIn("chrome-for-testing.marker", installer)
+        self.assertIn('RMDir /r "`$INSTDIR\\chrome\\google-148.0.7778.167"', installer)
+        self.assertIn("chrome-for-testing.marker", wrapper)
+        self.assertIn("install_chrome_for_testing_kernel.ps1", wrapper)
+        self.assertNotIn("C:\\Program Files\\Google\\Chrome\\Application", wrapper)
+        self.assertIn("chrome-for-testing-public/$Version/win64/chrome-win64.zip", downloader)
+        self.assertIn('Version = "148.0.7778.167"', downloader)
+        self.assertIn("chrome-for-testing.marker", stage_assets)
+
+    def test_installer_bundles_and_conditionally_installs_windows_runtimes(self):
+        installer = self.read("scripts/build_installer.ps1")
+        self.assertIn("Get-MicrosoftPrerequisite", installer)
+        self.assertIn("Get-AuthenticodeSignature", installer)
+        self.assertIn("Microsoft Corporation", installer)
+        self.assertIn("MicrosoftEdgeWebview2Setup.exe", installer)
+        self.assertIn("VC_redist.x64.exe", installer)
+        self.assertIn("Function EnsureWebView2Runtime", installer)
+        self.assertIn("Function EnsureVCRuntime", installer)
+        self.assertIn("F3017226-FE2A-4295-8BDF-00C3A9A7E4C5", installer)
+        self.assertIn("VC\\Runtimes\\x64", installer)
+        self.assertIn("Call EnsureVCRuntime", installer)
+        self.assertIn("Call EnsureWebView2Runtime", installer)
+
     def test_go_mod_does_not_replace_modules_with_missing_local_third_party_dirs(self):
         text = self.read("go.mod")
         self.assertNotRegex(text, r"replace\s+github\.com/energye/systray\s+=>\s+\./third_party/systray")
@@ -105,6 +134,8 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("Get-FileHash", text)
         self.assertIn("-1978335189", text)
         self.assertIn("already installed and current", text)
+        self.assertIn("--source winget", text)
+        self.assertIn('"-NoInstall"', text)
 
     def test_public_manager_build_never_bundles_third_party_runtimes(self):
         wrapper = self.read("scripts/build_windows_public.ps1")

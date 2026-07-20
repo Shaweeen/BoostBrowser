@@ -4,6 +4,7 @@ package backend
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -145,7 +146,12 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 		a.reconcileSyncRuntimeStateAsync()
 	}
 
-	// 查找主控实例
+	masterProfileId = strings.TrimSpace(masterProfileId)
+	if masterProfileId == "" {
+		return fmt.Errorf("必须且只能指定一个主控实例")
+	}
+
+	// 查找唯一主控实例
 	a.browserMgr.Mutex.Lock()
 	masterProfile, ok := a.browserMgr.Profiles[masterProfileId]
 	if !ok {
@@ -164,14 +170,29 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 		profile BrowserProfile
 	}
 	followers := make([]followerCandidate, 0, len(followerProfileIds))
-	for _, fid := range followerProfileIds {
-		if fid == masterProfileId {
-			continue // 主控不能同时是跟随
+	seenFollowerIDs := make(map[string]struct{}, len(followerProfileIds))
+	seenFollowerPIDs := map[int]struct{}{masterSnapshot.Pid: {}}
+	for _, rawFollowerID := range followerProfileIds {
+		fid := strings.TrimSpace(rawFollowerID)
+		if fid == "" {
+			continue
 		}
+		if fid == masterProfileId {
+			a.browserMgr.Mutex.Unlock()
+			return fmt.Errorf("主控实例不能同时出现在跟随列表：%s", fid)
+		}
+		if _, duplicate := seenFollowerIDs[fid]; duplicate {
+			continue
+		}
+		seenFollowerIDs[fid] = struct{}{}
 		fp, ok := a.browserMgr.Profiles[fid]
 		if !ok || !fp.Running || fp.Pid <= 0 {
 			continue
 		}
+		if _, duplicateProcess := seenFollowerPIDs[fp.Pid]; duplicateProcess {
+			continue
+		}
+		seenFollowerPIDs[fp.Pid] = struct{}{}
 		followers = append(followers, followerCandidate{id: fid, profile: *fp})
 	}
 	a.browserMgr.Mutex.Unlock()
@@ -197,10 +218,15 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	var followerHwnds []windows.HWND
 	var followerDebugPorts []int
 	validFollowerIds := make([]string, 0, len(followers))
+	seenFollowerWindows := map[windows.HWND]struct{}{masterHwnd: {}}
 	for i, item := range resolved {
 		if item.hwnd == 0 {
 			continue
 		}
+		if _, duplicateWindow := seenFollowerWindows[item.hwnd]; duplicateWindow {
+			continue
+		}
+		seenFollowerWindows[item.hwnd] = struct{}{}
 		followerHwnds = append(followerHwnds, item.hwnd)
 		followerDebugPorts = append(followerDebugPorts, item.debugPort)
 		validFollowerIds = append(validFollowerIds, followers[i].id)
@@ -289,8 +315,10 @@ func (a *App) getSyncStatusLocal() map[string]interface{} {
 	defer syncState.mu.Unlock()
 
 	config := SyncConfig{MouseEnabled: true, KeyEnabled: true}
+	pointerInsideMaster := false
 	if syncState.syncer != nil {
 		config = syncState.syncer.GetConfig()
+		pointerInsideMaster = syncState.syncer.PointerInsideMaster()
 	}
 
 	return map[string]interface{}{
@@ -299,6 +327,7 @@ func (a *App) getSyncStatusLocal() map[string]interface{} {
 		"followerIds":         append([]string(nil), syncState.followerIds...),
 		"mouseEnabled":        config.MouseEnabled,
 		"keyEnabled":          config.KeyEnabled,
+		"pointerInsideMaster": pointerInsideMaster,
 		"randomDelayEnabled":  config.RandomDelayEnabled,
 		"randomDelayMinMs":    config.RandomDelayMinMs,
 		"randomDelayMaxMs":    config.RandomDelayMaxMs,
@@ -363,8 +392,10 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	// can transfer its top-level frame to a sibling process, so resolving again
 	// from a stored PID is less reliable than the running session snapshot.
 	activeWindows := make(map[string]windows.HWND)
+	activeMasterID := ""
 	syncState.mu.Lock()
 	if syncState.active && syncState.masterHwnd != 0 {
+		activeMasterID = syncState.masterId
 		activeWindows[syncState.masterId] = syncState.masterHwnd
 		if syncState.syncer != nil {
 			followerWindows := syncState.syncer.getFollowerSnapshot()
@@ -383,8 +414,22 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 		profileId string
 	}
 	var wins []winInfo
-	for _, pid := range profileIds {
+	seenProfileIDs := make(map[string]struct{}, len(profileIds))
+	seenWindows := make(map[windows.HWND]struct{}, len(profileIds))
+	for _, rawProfileID := range profileIds {
+		pid := strings.TrimSpace(rawProfileID)
+		if pid == "" {
+			continue
+		}
+		if _, duplicate := seenProfileIDs[pid]; duplicate {
+			continue
+		}
+		seenProfileIDs[pid] = struct{}{}
 		if hwnd := activeWindows[pid]; hwnd != 0 && isWindow(hwnd) {
+			if _, duplicate := seenWindows[hwnd]; duplicate {
+				continue
+			}
+			seenWindows[hwnd] = struct{}{}
 			wins = append(wins, winInfo{hwnd: hwnd, profileId: pid})
 			continue
 		}
@@ -396,6 +441,10 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 		if err != nil {
 			continue
 		}
+		if _, duplicate := seenWindows[hwnd]; duplicate {
+			continue
+		}
+		seenWindows[hwnd] = struct{}{}
 		wins = append(wins, winInfo{hwnd: hwnd, profileId: pid})
 	}
 
@@ -404,8 +453,13 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	}
 
 	// 确定主控ID：优先用参数传入的，否则从同步状态取
-	effectiveMaster := masterProfileId
-	if effectiveMaster == "" {
+	effectiveMaster := strings.TrimSpace(masterProfileId)
+	if activeMasterID != "" {
+		if effectiveMaster != "" && effectiveMaster != activeMasterID {
+			return nil, fmt.Errorf("同步期间主控唯一且不可由排列操作改写：当前主控=%s", activeMasterID)
+		}
+		effectiveMaster = activeMasterID
+	} else if effectiveMaster == "" {
 		syncState.mu.Lock()
 		effectiveMaster = syncState.masterId
 		syncState.mu.Unlock()

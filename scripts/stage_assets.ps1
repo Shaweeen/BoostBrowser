@@ -4,7 +4,7 @@
 #
 # Standard local layout:
 #   <BOOST_KERNEL_SRC or repo root>\chrome\cloak-146.0.7680.177\chrome.exe   REQUIRED
-#   <BOOST_KERNEL_SRC or repo root>\chrome\google-148.0.7778.167\chrome.exe  OPTIONAL fallback
+#   <BOOST_KERNEL_SRC or repo root>\chrome\google-148.0.7778.167\chrome.exe  OPTIONAL Chrome for Testing
 #   <BOOST_KERNEL_SRC or repo root>\bin\                                      OPTIONAL proxy tools
 #   <BOOST_KERNEL_SRC or repo root>\extensions\chromium-web-store\            OPTIONAL helper extension
 #
@@ -56,7 +56,12 @@ foreach ($k in $RequiredKernels) {
 foreach ($k in $OptionalKernels) {
     $src = "$AssetRoot\chrome\$k"
     $dst = "$StageRoot\chrome\$k"
-    Copy-Tree $src $dst "chrome\$k (optional)" $false | Out-Null
+    $compatMarker = Join-Path $src "chrome-for-testing.marker"
+    if ((Test-Path (Join-Path $src "chrome.exe")) -and (Test-Path $compatMarker)) {
+        Copy-Tree $src $dst "chrome\$k (optional Chrome for Testing)" $false | Out-Null
+    } elseif (Test-Path $src) {
+        Write-Host "    skip incompatible official Chrome kernel: $src" -ForegroundColor Yellow
+    }
 }
 
 Copy-Tree "$AssetRoot\bin" "$StageRoot\bin" "bin\ proxy tools (optional)" $false | Out-Null

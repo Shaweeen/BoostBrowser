@@ -76,17 +76,66 @@ func TestMainProcessCannotOwnInputSyncHooks(t *testing.T) {
 }
 
 func TestWindowEnumerationCallbacksAreProcessReusable(t *testing.T) {
-	if processWindowEnumCallback == 0 || chromeRenderChildEnumCallback == 0 || browserWindowRestoreEnumCallback == 0 || processMouseHookCallback == 0 || processKeyHookCallback == 0 {
+	if processWindowEnumCallback == 0 || chromeRenderChildEnumCallback == 0 || syncInputSurfaceEnumCallback == 0 || browserWindowRestoreEnumCallback == 0 || processMouseHookCallback == 0 || processKeyHookCallback == 0 {
 		t.Fatal("expected reusable Win32 enumeration callbacks")
 	}
 	processCallback := processWindowEnumCallback
 	renderCallback := chromeRenderChildEnumCallback
+	surfaceCallback := syncInputSurfaceEnumCallback
 	restoreCallback := browserWindowRestoreEnumCallback
 	mouseCallback := processMouseHookCallback
 	keyCallback := processKeyHookCallback
 	for i := 0; i < 10000; i++ {
-		if processWindowEnumCallback != processCallback || chromeRenderChildEnumCallback != renderCallback || browserWindowRestoreEnumCallback != restoreCallback || processMouseHookCallback != mouseCallback || processKeyHookCallback != keyCallback {
+		if processWindowEnumCallback != processCallback || chromeRenderChildEnumCallback != renderCallback || syncInputSurfaceEnumCallback != surfaceCallback || browserWindowRestoreEnumCallback != restoreCallback || processMouseHookCallback != mouseCallback || processKeyHookCallback != keyCallback {
 			t.Fatal("Win32 callback address changed; repeated lookup would exhaust the callback table")
+		}
+	}
+}
+
+func TestPopupSurfaceMatchScorePrefersSameSizedSameOffsetMenu(t *testing.T) {
+	master := syncInputSurfaceCandidate{left: 700, top: 80, width: 320, height: 680}
+	exact := syncInputSurfaceCandidate{left: 1700, top: 80, width: 320, height: 680}
+	wrongSize := syncInputSurfaceCandidate{left: 1700, top: 80, width: 180, height: 60}
+
+	exactScore := popupSurfaceMatchScore(master, exact, 1700, 80)
+	wrongScore := popupSurfaceMatchScore(master, wrongSize, 1700, 80)
+	if exactScore >= wrongScore {
+		t.Fatalf("same menu geometry should win: exact=%d wrong=%d", exactScore, wrongScore)
+	}
+}
+
+func TestExpectedPopupSurfaceLeftPreservesNearestWindowEdge(t *testing.T) {
+	if got := expectedPopupSurfaceLeft(700, 990, 0, 1000, 1000, 1800); got != 1500 {
+		t.Fatalf("right-anchored menu mismatch: got=%d want=1500", got)
+	}
+	if got := expectedPopupSurfaceLeft(20, 320, 0, 1000, 1000, 1800); got != 1020 {
+		t.Fatalf("left-anchored menu mismatch: got=%d want=1020", got)
+	}
+}
+
+func TestCDPRuntimeValueSupportsProtocolAndLegacyShapes(t *testing.T) {
+	value, ok := cdpRuntimeValue(map[string]any{"result": map[string]any{"type": "string", "value": "chrome://extensions"}})
+	if !ok || value != "chrome://extensions" {
+		t.Fatalf("nested CDP value mismatch: value=%v ok=%v", value, ok)
+	}
+	value, ok = cdpRuntimeValue(map[string]any{"value": "legacy"})
+	if !ok || value != "legacy" {
+		t.Fatalf("flat CDP value mismatch: value=%v ok=%v", value, ok)
+	}
+}
+
+func TestPageMouseButtonUpMessagePreservesButton(t *testing.T) {
+	tests := []struct {
+		down uint32
+		up   uint32
+	}{
+		{WM_LBUTTONDOWN, WM_LBUTTONUP},
+		{WM_RBUTTONDOWN, WM_RBUTTONUP},
+		{WM_MBUTTONDOWN, WM_MBUTTONUP},
+	}
+	for _, test := range tests {
+		if got := pageMouseButtonUpMessage(test.down); got != test.up {
+			t.Fatalf("button release mismatch: down=%#x got=%#x want=%#x", test.down, got, test.up)
 		}
 	}
 }

@@ -1,7 +1,7 @@
 # build_windows_selfuse.ps1
 # One-click Windows self-use build:
 #   1. Ensure CloakBrowser free v146 kernel is installed
-#   2. Optionally copy installed Google Chrome as fallback kernel
+#   2. Optionally install extension-compatible Chrome for Testing 148
 #   3. Build frontend
 #   4. Build lightweight release files
 #   5. Build full NSIS installer with bundled kernels
@@ -10,7 +10,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\build_windows_selfuse.ps1
 # Options:
 #   -SkipKernelInstall        Do not download/install CloakBrowser kernel
-#   -SkipGoogleFallback      Do not copy local Google Chrome fallback
+#   -SkipGoogleFallback      Do not install Chrome for Testing fallback
 #   -RunGoTests              Run go test ./... before packaging
 #   -SourceZip <path>        Use an already downloaded cloakbrowser-windows-x64.zip
 #   -AssetRoot <path>        Asset root containing chrome\..., defaults to repo root
@@ -86,26 +86,23 @@ Run-Step "Preparing CloakBrowser kernel" {
     Write-Host "CloakBrowser kernel OK: $cloakChrome" -ForegroundColor Green
 }
 
-Run-Step "Preparing optional Google Chrome fallback" {
+Run-Step "Preparing optional extension-compatible Chrome fallback" {
     if ($ManagerOnly) {
-        Write-Host "Manager-only edition: Google Chrome redistribution is disabled" -ForegroundColor Green
+        Write-Host "Manager-only edition: Chrome fallback redistribution is disabled" -ForegroundColor Green
         return
     }
     $googleDst = Join-Path $AssetRoot 'chrome\google-148.0.7778.167'
     $googleExe = Join-Path $googleDst 'chrome.exe'
+    $compatMarker = Join-Path $googleDst 'chrome-for-testing.marker'
     if ($SkipGoogleFallback) {
         Write-Host "Skipping Google fallback by request" -ForegroundColor Yellow
-    } elseif (Test-Path $googleExe) {
-        Write-Host "Google fallback already exists: $googleExe" -ForegroundColor Green
+    } elseif ((Test-Path $googleExe) -and (Test-Path $compatMarker)) {
+        Write-Host "Extension-compatible Chrome fallback already exists: $googleExe" -ForegroundColor Green
     } else {
-        $googleSrc = 'C:\Program Files\Google\Chrome\Application'
-        if (Test-Path (Join-Path $googleSrc 'chrome.exe')) {
-            New-Item -ItemType Directory -Force -Path $googleDst | Out-Null
-            robocopy $googleSrc $googleDst /E /NFL /NDL /NJH /NJS /NP | Out-Null
-            if ($LASTEXITCODE -ge 8) { throw "robocopy Google Chrome fallback failed: exit $LASTEXITCODE" }
-            Write-Host "Google fallback copied: $googleExe" -ForegroundColor Green
-        } else {
-            Write-Host "Google Chrome not found at $googleSrc; fallback skipped" -ForegroundColor Yellow
+        & powershell -ExecutionPolicy Bypass -File "$RepoRoot\scripts\install_chrome_for_testing_kernel.ps1" -InstallRoot $AssetRoot -Version '148.0.7778.167'
+        if ($LASTEXITCODE -ne 0) { throw "install_chrome_for_testing_kernel.ps1 failed" }
+        if (-not (Test-Path $googleExe) -or -not (Test-Path $compatMarker)) {
+            throw "Extension-compatible Chrome fallback is incomplete: $googleDst"
         }
     }
 }
