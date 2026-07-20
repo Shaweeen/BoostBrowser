@@ -33,7 +33,7 @@ const (
 	diNormal               = 3
 	DIB_RGB_COLORS         = 0
 	BI_RGB                 = 0
-	badgeIconDesignVersion = 6
+	badgeIconDesignVersion = 7
 )
 
 // badgeIconFileCache 缓存已生成的 badge 图标文件路径（key 为显示序号，value 为 .ico 文件路径）
@@ -305,38 +305,18 @@ func overlayBadgeNumberNative(img *image.NRGBA, number int) {
 		numStr = numStr[len(numStr)-4:]
 	}
 
-	// 24px 是 Windows 常见的小任务栏尺寸，向上取整可让一、两位数字仍使用
-	// 2px 笔画；旧版整除会退成 1px，实际显示偏细。
-	scale := max(1, (size+8)/16)
-	if len(numStr) >= 3 {
-		scale = max(1, size/24)
-	}
-	gap := max(1, scale/2)
-	fontW := len(numStr)*3*scale + (len(numStr)-1)*gap
-	fontH := 5 * scale
-	padX := max(2, scale)
-	padY := max(2, scale/2)
-	pillW := fontW + 2*padX
-	pillH := fontH + 2*padY
-	if len(numStr) == 1 && pillW < pillH {
-		// 单数字使用等宽醒目标记，避免视觉上退化成右上角小红点。
-		pillW = pillH
-	}
-	maxW := size - 1
-	if pillW > maxW {
-		// 四位编号在小尺寸中优先保证完整，而不是让两端数字被裁掉。
-		scale = 1
-		gap = 1
-		fontW = len(numStr)*3 + len(numStr) - 1
-		fontH = 5
-		padX, padY = 2, 2
-		pillW, pillH = min(size, fontW+4), fontH+4
-	}
+	layout := calculateBadgeNumberLayout(size, len(numStr))
+	scale := layout.scale
+	gap := layout.gap
+	fontW := layout.fontW
+	fontH := layout.fontH
+	pillW := layout.pillW
+	pillH := layout.pillH
 	pillX := max(0, size-pillW)
 	pillY := 0
-	keyline := 1
+	keyline := max(1, size/64)
 	drawRoundedPill(img, max(0, pillX-keyline), pillY, min(size-pillX+keyline, pillW+keyline), min(size, pillH+keyline), max(2, pillH/3), color.NRGBA{R: 255, G: 255, B: 255, A: 255})
-	drawRoundedPill(img, pillX, pillY+keyline, pillW, pillH-keyline, max(2, pillH/3), color.NRGBA{R: 214, G: 20, B: 38, A: 255})
+	drawRoundedPill(img, pillX, pillY+keyline, pillW, pillH-keyline, max(2, pillH/3), color.NRGBA{R: 220, G: 24, B: 44, A: 255})
 
 	x := pillX + (pillW-fontW)/2
 	y := pillY + keyline + (pillH-keyline-fontH)/2
