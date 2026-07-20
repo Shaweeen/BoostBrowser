@@ -44,6 +44,24 @@ export namespace backend {
 	        this.message = source["message"];
 	    }
 	}
+	export class GlobalManagedExtension {
+	    downloadAddress: string;
+	    extensionId: string;
+	    extensionDir: string;
+	    installed: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new GlobalManagedExtension(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.downloadAddress = source["downloadAddress"];
+	        this.extensionId = source["extensionId"];
+	        this.extensionDir = source["extensionDir"];
+	        this.installed = source["installed"];
+	    }
+	}
 	export class LicenseStatus {
 	    maxLimit: number;
 	    usedCount: number;
@@ -780,4 +798,3 @@ export namespace main {
 	}
 
 }
-

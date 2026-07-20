@@ -25,6 +25,30 @@ type ExtensionImportResult struct {
 	Message         string   `json:"message"`
 }
 
+// GlobalManagedExtension is the backend-authoritative global extension policy.
+// Extension directories are resolved from ExtensionID at runtime so an installed
+// application can be moved without leaving stale absolute paths in the registry.
+type GlobalManagedExtension struct {
+	DownloadAddress string `json:"downloadAddress"`
+	ExtensionID     string `json:"extensionId"`
+	ExtensionDir    string `json:"extensionDir"`
+	Installed       bool   `json:"installed"`
+}
+
+type globalExtensionRegistry struct {
+	Extensions []globalExtensionRegistryEntry `json:"extensions"`
+}
+
+type globalExtensionRegistryEntry struct {
+	DownloadAddress string `json:"downloadAddress"`
+	ExtensionID     string `json:"extensionId"`
+}
+
+const (
+	globalExtensionRegistryFilename = "global-extensions.json"
+	managedExtensionChromeVersion   = "148.0.7778.167"
+)
+
 var chromeWebStoreIDPattern = regexp.MustCompile(`[a-p]{32}`)
 
 // BrowserProfileRemoveExtension 解除扩展与实例启动参数的绑定，并清理 profile 内残留的扩展记录。
@@ -110,25 +134,7 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 		return nil, fmt.Errorf("浏览器管理器未初始化")
 	}
 
-	extID := extractExtensionID(downloadAddress)
-	downloadURL := resolveExtensionDownloadURL(downloadAddress, extID)
-	if err := validateExtensionDownloadURL(downloadURL); err != nil {
-		return nil, err
-	}
-	payload, err := downloadExtensionPayload(downloadURL)
-	if err != nil {
-		return nil, err
-	}
-	zipPayload, err := extractZipPayloadFromCRX(payload)
-	if err != nil {
-		return nil, err
-	}
-
-	if extID == "" {
-		sum := sha256.Sum256(payload)
-		extID = "external-" + hex.EncodeToString(sum[:])[:16]
-	}
-	extDir, err := installUnpackedExtension(a.appRoot, extID, zipPayload)
+	extID, extDir, err := a.downloadAndInstallExtension(downloadAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -143,6 +149,165 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 		UpdatedProfiles: updated,
 		Message:         fmt.Sprintf("扩展已导入并绑定到 %d 个实例，重启实例后生效", len(updated)),
 	}, nil
+}
+
+// BrowserGlobalExtensionImport installs an extension as a real global policy.
+// It binds all existing profiles immediately and is also injected at every
+// future profile launch, including profiles created after this call.
+func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionImportResult, error) {
+	downloadAddress = strings.TrimSpace(downloadAddress)
+	if downloadAddress == "" {
+		return nil, fmt.Errorf("请输入扩展程序下载地址")
+	}
+	if a == nil || a.browserMgr == nil {
+		return nil, fmt.Errorf("浏览器管理器未初始化")
+	}
+
+	a.maintenanceMu.Lock()
+	defer a.maintenanceMu.Unlock()
+
+	extID, extDir, err := a.downloadAndInstallExtension(downloadAddress)
+	if err != nil {
+		return nil, err
+	}
+	registry, err := a.loadGlobalExtensionRegistry()
+	if err != nil {
+		return nil, err
+	}
+	registry.Extensions = upsertGlobalExtensionRegistryEntry(registry.Extensions, globalExtensionRegistryEntry{
+		DownloadAddress: downloadAddress,
+		ExtensionID:     extID,
+	})
+	if err := a.saveGlobalExtensionRegistry(registry); err != nil {
+		return nil, err
+	}
+
+	updated, err := a.bindExtensionDirToAllProfiles(extDir)
+	if err != nil {
+		return nil, err
+	}
+	return &ExtensionImportResult{
+		ExtensionDir:    extDir,
+		ExtensionID:     extID,
+		UpdatedProfiles: updated,
+		Message:         fmt.Sprintf("扩展已设为全局使用并同步到 %d 个实例，运行中的实例重启后生效", len(updated)),
+	}, nil
+}
+
+// BrowserGlobalExtensionRemove removes a global policy and unbinds the
+// extension from every existing profile.
+func (a *App) BrowserGlobalExtensionRemove(downloadAddress string) (*ExtensionImportResult, error) {
+	downloadAddress = strings.TrimSpace(downloadAddress)
+	if downloadAddress == "" {
+		return nil, fmt.Errorf("缺少扩展标识")
+	}
+	if a == nil || a.browserMgr == nil {
+		return nil, fmt.Errorf("浏览器管理器未初始化")
+	}
+
+	a.maintenanceMu.Lock()
+	defer a.maintenanceMu.Unlock()
+
+	registry, err := a.loadGlobalExtensionRegistry()
+	if err != nil {
+		return nil, err
+	}
+	wantedID := extractExtensionID(downloadAddress)
+	removedIDs := make([]string, 0, 1)
+	kept := make([]globalExtensionRegistryEntry, 0, len(registry.Extensions))
+	for _, entry := range registry.Extensions {
+		addressMatches := strings.EqualFold(strings.TrimSpace(entry.DownloadAddress), downloadAddress)
+		idMatches := wantedID != "" && strings.EqualFold(strings.TrimSpace(entry.ExtensionID), wantedID)
+		if addressMatches || idMatches {
+			removedIDs = appendUniqueString(removedIDs, strings.TrimSpace(entry.ExtensionID))
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	if len(removedIDs) == 0 && wantedID != "" {
+		removedIDs = append(removedIDs, wantedID)
+	}
+	registry.Extensions = kept
+	if err := a.saveGlobalExtensionRegistry(registry); err != nil {
+		return nil, err
+	}
+
+	updatedSet := map[string]bool{}
+	lastDir := ""
+	for _, extID := range removedIDs {
+		if extID == "" {
+			continue
+		}
+		extDir := a.globalExtensionDir(extID)
+		lastDir = extDir
+		updated, removeErr := a.removeExtensionDirFromAllProfiles(extDir, extID)
+		if removeErr != nil {
+			return nil, removeErr
+		}
+		for _, id := range updated {
+			updatedSet[id] = true
+		}
+		_ = os.RemoveAll(extDir)
+	}
+	updated := make([]string, 0, len(updatedSet))
+	for id := range updatedSet {
+		updated = append(updated, id)
+	}
+	return &ExtensionImportResult{
+		ExtensionDir:    lastDir,
+		ExtensionID:     wantedID,
+		UpdatedProfiles: updated,
+		Message:         fmt.Sprintf("全局扩展已移除并从 %d 个实例解绑，运行中的实例重启后生效", len(updated)),
+	}, nil
+}
+
+// BrowserGlobalExtensionList reports the persisted backend policies. The
+// frontend uses this to distinguish an actually installed global extension
+// from an item that merely exists in localStorage.
+func (a *App) BrowserGlobalExtensionList() ([]GlobalManagedExtension, error) {
+	if a == nil {
+		return nil, fmt.Errorf("应用未初始化")
+	}
+	registry, err := a.loadGlobalExtensionRegistry()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]GlobalManagedExtension, 0, len(registry.Extensions))
+	for _, entry := range registry.Extensions {
+		extDir := a.globalExtensionDir(entry.ExtensionID)
+		out = append(out, GlobalManagedExtension{
+			DownloadAddress: entry.DownloadAddress,
+			ExtensionID:     entry.ExtensionID,
+			ExtensionDir:    extDir,
+			Installed:       extensionManifestExists(extDir),
+		})
+	}
+	return out, nil
+}
+
+func (a *App) downloadAndInstallExtension(downloadAddress string) (string, string, error) {
+	extID := extractExtensionID(downloadAddress)
+	downloadURL := resolveExtensionDownloadURL(downloadAddress, extID)
+	if err := validateExtensionDownloadURL(downloadURL); err != nil {
+		return "", "", err
+	}
+	payload, err := downloadExtensionPayload(downloadURL)
+	if err != nil {
+		return "", "", err
+	}
+	zipPayload, err := extractZipPayloadFromCRX(payload)
+	if err != nil {
+		return "", "", err
+	}
+	if extID == "" {
+		sum := sha256.Sum256(payload)
+		extID = "external-" + hex.EncodeToString(sum[:])[:16]
+	}
+	extDir, err := installUnpackedExtension(a.appRoot, extID, zipPayload)
+	if err != nil {
+		return "", "", err
+	}
+	return extID, extDir, nil
 }
 
 func normalizeProfileIDs(ids []string) []string {
@@ -170,7 +335,7 @@ func extractExtensionID(input string) string {
 func resolveExtensionDownloadURL(input string, extID string) string {
 	input = strings.TrimSpace(input)
 	if extID != "" && (strings.Contains(strings.ToLower(input), "chromewebstore.google.com") || input == extID) {
-		return "https://clients2.google.com/service/update2/crx?response=redirect&prodversion=144.0.7559.61&acceptformat=crx2,crx3&x=" + url.QueryEscape("id="+extID+"&installsource=ondemand&uc")
+		return "https://clients2.google.com/service/update2/crx?response=redirect&prodversion=" + managedExtensionChromeVersion + "&acceptformat=crx2,crx3&x=" + url.QueryEscape("id="+extID+"&installsource=ondemand&uc")
 	}
 	return input
 }
@@ -193,7 +358,7 @@ func downloadExtensionPayload(downloadURL string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("扩展下载地址无效：%w", err)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.7559.61 Safari/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+managedExtensionChromeVersion+" Safari/537.36")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("扩展下载失败：%w", err)
@@ -391,6 +556,177 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) ([]
 		return nil, fmt.Errorf("保存实例扩展配置失败：%w", err)
 	}
 	return updated, nil
+}
+
+func (a *App) bindExtensionDirToAllProfiles(extDir string) ([]string, error) {
+	a.browserMgr.Mutex.Lock()
+	defer a.browserMgr.Mutex.Unlock()
+	updated := make([]string, 0, len(a.browserMgr.Profiles))
+	for id, profile := range a.browserMgr.Profiles {
+		if profile == nil {
+			continue
+		}
+		if hasExtensionDirInLaunchArgs(profile.LaunchArgs, extDir) {
+			updated = append(updated, id)
+			continue
+		}
+		profile.LaunchArgs = addExtensionDirToLaunchArgs(profile.LaunchArgs, extDir)
+		profile.UpdatedAt = time.Now().Format(time.RFC3339)
+		updated = append(updated, id)
+	}
+	if len(updated) == 0 {
+		return updated, nil
+	}
+	if err := a.browserMgr.SaveProfiles(); err != nil {
+		return nil, fmt.Errorf("保存全局扩展配置失败：%w", err)
+	}
+	return updated, nil
+}
+
+func (a *App) removeExtensionDirFromAllProfiles(extDir string, extID string) ([]string, error) {
+	a.browserMgr.Mutex.Lock()
+	defer a.browserMgr.Mutex.Unlock()
+	updated := make([]string, 0, len(a.browserMgr.Profiles))
+	for id, profile := range a.browserMgr.Profiles {
+		if profile == nil {
+			continue
+		}
+		nextArgs, changed := removeExtensionDirFromLaunchArgs(profile.LaunchArgs, extDir)
+		if !changed {
+			continue
+		}
+		profile.LaunchArgs = nextArgs
+		profile.UpdatedAt = time.Now().Format(time.RFC3339)
+		cleanupRemovedManagedExtension(profile.UserDataDir, extDir, extID, a.appRoot)
+		updated = append(updated, id)
+	}
+	if len(updated) == 0 {
+		return updated, nil
+	}
+	if err := a.browserMgr.SaveProfiles(); err != nil {
+		return nil, fmt.Errorf("保存全局扩展配置失败：%w", err)
+	}
+	return updated, nil
+}
+
+func (a *App) globalExtensionRegistryPath() string {
+	return a.resolveAppPath(filepath.Join("data", globalExtensionRegistryFilename))
+}
+
+func (a *App) globalExtensionDir(extensionID string) string {
+	return filepath.Join(a.appRoot, "extensions", "imported", safePathName(strings.TrimSpace(extensionID)))
+}
+
+func (a *App) loadGlobalExtensionRegistry() (globalExtensionRegistry, error) {
+	registry := globalExtensionRegistry{Extensions: []globalExtensionRegistryEntry{}}
+	data, err := os.ReadFile(a.globalExtensionRegistryPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return registry, nil
+		}
+		return registry, fmt.Errorf("读取全局扩展配置失败：%w", err)
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return registry, nil
+	}
+	if err := json.Unmarshal(data, &registry); err != nil {
+		return registry, fmt.Errorf("解析全局扩展配置失败：%w", err)
+	}
+	registry.Extensions = normalizeGlobalExtensionRegistryEntries(registry.Extensions)
+	return registry, nil
+}
+
+func (a *App) saveGlobalExtensionRegistry(registry globalExtensionRegistry) error {
+	registry.Extensions = normalizeGlobalExtensionRegistryEntries(registry.Extensions)
+	data, err := json.MarshalIndent(registry, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化全局扩展配置失败：%w", err)
+	}
+	path := a.globalExtensionRegistryPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("创建全局扩展配置目录失败：%w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".global-extensions-*.tmp")
+	if err != nil {
+		return fmt.Errorf("创建全局扩展临时配置失败：%w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("设置全局扩展配置权限失败：%w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("写入全局扩展临时配置失败：%w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("关闭全局扩展临时配置失败：%w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("保存全局扩展配置失败：%w", err)
+	}
+	return nil
+}
+
+func normalizeGlobalExtensionRegistryEntries(entries []globalExtensionRegistryEntry) []globalExtensionRegistryEntry {
+	out := make([]globalExtensionRegistryEntry, 0, len(entries))
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		entry.DownloadAddress = strings.TrimSpace(entry.DownloadAddress)
+		entry.ExtensionID = strings.TrimSpace(entry.ExtensionID)
+		if entry.ExtensionID == "" {
+			continue
+		}
+		key := strings.ToLower(entry.ExtensionID)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, entry)
+	}
+	return out
+}
+
+func upsertGlobalExtensionRegistryEntry(entries []globalExtensionRegistryEntry, want globalExtensionRegistryEntry) []globalExtensionRegistryEntry {
+	want.DownloadAddress = strings.TrimSpace(want.DownloadAddress)
+	want.ExtensionID = strings.TrimSpace(want.ExtensionID)
+	replaced := false
+	out := make([]globalExtensionRegistryEntry, 0, len(entries)+1)
+	for _, entry := range entries {
+		if strings.EqualFold(strings.TrimSpace(entry.ExtensionID), want.ExtensionID) {
+			if !replaced {
+				out = append(out, want)
+				replaced = true
+			}
+			continue
+		}
+		out = append(out, entry)
+	}
+	if !replaced {
+		out = append(out, want)
+	}
+	return normalizeGlobalExtensionRegistryEntries(out)
+}
+
+func extensionManifestExists(extDir string) bool {
+	info, err := os.Stat(filepath.Join(extDir, "manifest.json"))
+	return err == nil && !info.IsDir()
+}
+
+func (a *App) appendGlobalExtensionLaunchArgs(args []string) []string {
+	registry, err := a.loadGlobalExtensionRegistry()
+	if err != nil {
+		return args
+	}
+	for _, entry := range registry.Extensions {
+		extDir := a.globalExtensionDir(entry.ExtensionID)
+		if !extensionManifestExists(extDir) {
+			continue
+		}
+		args = addExtensionDirToLaunchArgs(args, extDir)
+	}
+	return args
 }
 
 // readManifestNameFromDir 从已解包的扩展目录里读 manifest.name（用于 toast 提示）。

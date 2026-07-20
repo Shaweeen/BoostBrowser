@@ -88,6 +88,12 @@ export function BrowserProfileDeleteWithCache(arg1:string,arg2:boolean):Promise<
 
 export function BrowserProfileGetCode(arg1:string):Promise<string>;
 
+export function BrowserGlobalExtensionImport(arg1:string):Promise<backend.ExtensionImportResult>;
+
+export function BrowserGlobalExtensionList():Promise<Array<backend.GlobalManagedExtension>>;
+
+export function BrowserGlobalExtensionRemove(arg1:string):Promise<backend.ExtensionImportResult>;
+
 export function BrowserProfileImportExtension(arg1:Array<string>,arg2:string):Promise<backend.ExtensionImportResult>;
 
 export function BrowserProfileImportMoreLoginXLSX():Promise<Record<string, any>>;

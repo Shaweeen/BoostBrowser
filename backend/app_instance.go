@@ -399,6 +399,10 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	args = append(args, effectiveFingerprintArgs...)
 	args = append(args, sanitizedProfileLaunchArgs...)
 	args = append(args, sanitizedExtraLaunchArgs...)
+	// Global extensions are backend policies, not profile-local UI metadata.
+	// Re-inject them on every launch so newly-created and previously missed
+	// profiles automatically receive the same extension set.
+	args = a.appendGlobalExtensionLaunchArgs(args)
 	args = appendChromeTestingInfobarSuppressArg(args, isCloakSelectedCore)
 
 	// cloak 路径下额外剥掉几个会暴露 chromium 身份的 launch arg：

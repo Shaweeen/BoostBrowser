@@ -1,4 +1,4 @@
-import type { BrowserProfile, BrowserProfileInput, BrowserTab, BrowserSettings, BrowserCore, BrowserCoreInput, BrowserCoreValidateResult, BrowserProxy, BrowserCoreExtended, CookieInfo, SnapshotInfo, BrowserBookmark, BrowserGroup, BrowserGroupInput, BrowserGroupWithCount, ProxyIPHealthResult, ExtensionImportResult } from './types'
+import type { BrowserProfile, BrowserProfileInput, BrowserTab, BrowserSettings, BrowserCore, BrowserCoreInput, BrowserCoreValidateResult, BrowserProxy, BrowserCoreExtended, CookieInfo, SnapshotInfo, BrowserBookmark, BrowserGroup, BrowserGroupInput, BrowserGroupWithCount, ProxyIPHealthResult, ExtensionImportResult, GlobalManagedExtension } from './types'
 
 const getBindings = async () => {
   try {
@@ -203,6 +203,40 @@ export async function importExtensionToBrowserProfiles(profileIds: string[], dow
     updatedProfiles: profileIds,
     message: `扩展已绑定到 ${profileIds.length} 个实例`,
   }
+}
+
+export async function importGlobalExtension(downloadAddress: string): Promise<ExtensionImportResult> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserGlobalExtensionImport) {
+    return await bindings.BrowserGlobalExtensionImport(downloadAddress)
+  }
+  return {
+    extensionDir: `mock-global-extension-from-${downloadAddress}`,
+    extensionId: 'mock-global-extension',
+    updatedProfiles: mockProfiles.map(item => item.profileId),
+    message: `扩展已设为全局使用并同步到 ${mockProfiles.length} 个实例`,
+  }
+}
+
+export async function removeGlobalExtension(downloadAddress: string): Promise<ExtensionImportResult> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserGlobalExtensionRemove) {
+    return await bindings.BrowserGlobalExtensionRemove(downloadAddress)
+  }
+  return {
+    extensionDir: '',
+    extensionId: 'mock-global-extension',
+    updatedProfiles: mockProfiles.map(item => item.profileId),
+    message: '全局扩展已移除',
+  }
+}
+
+export async function fetchGlobalExtensions(): Promise<GlobalManagedExtension[]> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserGlobalExtensionList) {
+    return (await bindings.BrowserGlobalExtensionList()) || []
+  }
+  return []
 }
 
 export async function removeExtensionFromBrowserProfiles(profileIds: string[], downloadAddress: string): Promise<ExtensionImportResult> {

@@ -166,6 +166,18 @@ export function BrowserProfileGetCode(arg1) {
   return window['go']['main']['App']['BrowserProfileGetCode'](arg1);
 }
 
+export function BrowserGlobalExtensionImport(arg1) {
+  return window['go']['main']['App']['BrowserGlobalExtensionImport'](arg1);
+}
+
+export function BrowserGlobalExtensionList() {
+  return window['go']['main']['App']['BrowserGlobalExtensionList']();
+}
+
+export function BrowserGlobalExtensionRemove(arg1) {
+  return window['go']['main']['App']['BrowserGlobalExtensionRemove'](arg1);
+}
+
 export function BrowserProfileImportExtension(arg1, arg2) {
   return window['go']['main']['App']['BrowserProfileImportExtension'](arg1, arg2);
 }

@@ -1,7 +1,14 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { MoreHorizontal, PackagePlus, Puzzle, Search, ShieldCheck, UploadCloud, X } from 'lucide-react'
 import { Button, Card, FormItem, Input, Modal, Select, Textarea, toast } from '../../../shared/components'
-import { fetchBrowserProfiles, importExtensionToBrowserProfiles, removeExtensionFromBrowserProfiles } from '../api'
+import {
+  fetchBrowserProfiles,
+  fetchGlobalExtensions,
+  importExtensionToBrowserProfiles,
+  importGlobalExtension,
+  removeExtensionFromBrowserProfiles,
+  removeGlobalExtension,
+} from '../api'
 import type { BrowserProfile } from '../types'
 
 type ExtensionPlatform = 'google' | 'firefox'
@@ -48,6 +55,10 @@ function saveExtensions(items: ManagedExtension[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(items))
 }
 
+function extensionAddressKey(value: string) {
+  return value.trim().toLowerCase()
+}
+
 function extensionIcon(name: string) {
   const text = (name || 'E').trim().slice(0, 1).toUpperCase()
   const palettes = [
@@ -67,12 +78,14 @@ function extensionIcon(name: string) {
 export function ExtensionManagementPage() {
   const [extensions, setExtensions] = useState<ManagedExtension[]>(() => loadExtensions())
   const [profiles, setProfiles] = useState<BrowserProfile[]>([])
+  const [appliedGlobalAddresses, setAppliedGlobalAddresses] = useState<Set<string>>(() => new Set())
   const [activePlatform, setActivePlatform] = useState<'all' | ExtensionPlatform>('all')
   const [keyword, setKeyword] = useState('')
   const [uploadOpen, setUploadOpen] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
   const [currentId, setCurrentId] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const initializedRef = useRef(false)
   const [form, setForm] = useState({
     name: '',
     description: '',
@@ -84,7 +97,46 @@ export function ExtensionManagementPage() {
   })
 
   useEffect(() => {
-    fetchBrowserProfiles().then(setProfiles).catch(() => setProfiles([]))
+    if (initializedRef.current) return
+    initializedRef.current = true
+    const initialize = async () => {
+      const [loadedProfiles, globalPolicies] = await Promise.all([
+        fetchBrowserProfiles().catch(() => []),
+        fetchGlobalExtensions().catch(() => []),
+      ])
+      setProfiles(loadedProfiles)
+      const applied = new Set(
+        globalPolicies
+          .filter(item => item.installed)
+          .map(item => extensionAddressKey(item.downloadAddress)),
+      )
+
+      // Migrate items saved by older clients. Previously “global use” was only
+      // localStorage metadata, so register each missing item with the backend.
+      const missing = loadExtensions().filter(item =>
+        item.platform === 'google' &&
+        item.distributionMode === 'global' &&
+        !applied.has(extensionAddressKey(item.downloadAddress)),
+      )
+      let migratedCount = 0
+      for (const item of missing) {
+        try {
+          await importGlobalExtension(item.downloadAddress)
+          applied.add(extensionAddressKey(item.downloadAddress))
+          migratedCount += 1
+        } catch (error: any) {
+          toast.error(`${item.name} 全局同步失败：${error?.message || '请检查扩展下载地址'}`)
+        }
+      }
+      setAppliedGlobalAddresses(new Set(applied))
+      if (migratedCount > 0) {
+        toast.success('旧版全局扩展配置已同步到后端，重启运行中的浏览器后生效')
+      }
+    }
+    initialize().catch(() => {
+      setProfiles([])
+      setAppliedGlobalAddresses(new Set())
+    })
   }, [])
 
   useEffect(() => {
@@ -161,6 +213,27 @@ export function ExtensionManagementPage() {
     }
     setSubmitting(true)
     try {
+      if (form.distributionMode === 'global' && form.platform !== 'google') {
+        toast.warning('全局自动安装当前仅支持 Google/Chrome 扩展')
+        return
+      }
+      if (currentExtension?.distributionMode === 'global' && (
+        form.distributionMode !== 'global' ||
+        extensionAddressKey(currentExtension.downloadAddress) !== extensionAddressKey(downloadAddress)
+      )) {
+        await removeGlobalExtension(currentExtension.downloadAddress)
+        setAppliedGlobalAddresses(prev => {
+          const next = new Set(prev)
+          next.delete(extensionAddressKey(currentExtension.downloadAddress))
+          return next
+        })
+      }
+      let globalMessage = ''
+      if (form.distributionMode === 'global') {
+        const result = await importGlobalExtension(downloadAddress)
+        globalMessage = result?.message || ''
+        setAppliedGlobalAddresses(prev => new Set(prev).add(extensionAddressKey(downloadAddress)))
+      }
       const nextItem: ManagedExtension = {
         id: currentId || `ext-${Date.now()}`,
         name,
@@ -176,7 +249,7 @@ export function ExtensionManagementPage() {
         ? prev.map(item => item.id === currentId ? nextItem : item)
         : [nextItem, ...prev]
       )
-      toast.success(currentId ? '扩展配置已保存' : '扩展已加入列表')
+      toast.success(globalMessage || (currentId ? '扩展配置已保存' : '扩展已加入列表'))
       setUploadOpen(false)
       setConfigOpen(false)
       resetForm()
@@ -190,14 +263,19 @@ export function ExtensionManagementPage() {
     const targetIds = item.distributionMode === 'global'
       ? profiles.map(profile => profile.profileId)
       : item.profileIds
-    if (targetIds.length === 0) {
+    if (item.distributionMode === 'manual' && targetIds.length === 0) {
       toast.warning('请先在配置里选择要分配的实例')
       return
     }
     setSubmitting(true)
     try {
-      const result = await importExtensionToBrowserProfiles(targetIds, item.downloadAddress)
+      const result = item.distributionMode === 'global'
+        ? await importGlobalExtension(item.downloadAddress)
+        : await importExtensionToBrowserProfiles(targetIds, item.downloadAddress)
       toast.success(result?.message || `已分配到 ${targetIds.length} 个实例`)
+      if (item.distributionMode === 'global') {
+        setAppliedGlobalAddresses(prev => new Set(prev).add(extensionAddressKey(item.downloadAddress)))
+      }
       setExtensions(prev => prev.map(ext => ext.id === item.id ? { ...ext, updatedAt: new Date().toISOString() } : ext))
     } catch (error: any) {
       toast.error(error?.message || '扩展分配失败')
@@ -212,7 +290,15 @@ export function ExtensionManagementPage() {
       : item.profileIds
     setSubmitting(true)
     try {
-      if (targetIds.length > 0) {
+      if (item.distributionMode === 'global') {
+        const result = await removeGlobalExtension(item.downloadAddress)
+        toast.success(result?.message || '全局扩展已移除')
+        setAppliedGlobalAddresses(prev => {
+          const next = new Set(prev)
+          next.delete(extensionAddressKey(item.downloadAddress))
+          return next
+        })
+      } else if (targetIds.length > 0) {
         const result = await removeExtensionFromBrowserProfiles(targetIds, item.downloadAddress)
         toast.success(result?.message || '扩展已解绑')
       } else {
@@ -296,7 +382,8 @@ export function ExtensionManagementPage() {
                   <td colSpan={5} className="px-5 py-14 text-center text-sm text-[var(--color-text-muted)]">暂无扩展</td>
                 </tr>
               ) : filtered.map(item => {
-                const count = item.distributionMode === 'global' ? profiles.length : item.profileIds.length
+                const globalApplied = item.distributionMode === 'global' && appliedGlobalAddresses.has(extensionAddressKey(item.downloadAddress))
+                const count = item.distributionMode === 'global' ? (globalApplied ? profiles.length : 0) : item.profileIds.length
                 return (
                   <tr key={item.id} className="hover:bg-[var(--color-bg-hover)] transition-colors">
                     <td className="px-5 py-4">
@@ -315,7 +402,7 @@ export function ExtensionManagementPage() {
                           ? 'bg-green-50 text-green-700 dark:bg-green-900/30 dark:text-green-300'
                           : 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
                       }`}>
-                        {modeLabel[item.distributionMode]}{count > 0 ? ` · ${count}` : ''}
+                        {modeLabel[item.distributionMode]}{count > 0 ? ` · ${count}` : item.distributionMode === 'global' ? ' · 待同步' : ''}
                       </span>
                     </td>
                     <td className="px-5 py-4 text-sm text-[var(--color-text-secondary)]">{platformLabel[item.platform]}</td>
@@ -395,7 +482,7 @@ export function ExtensionManagementPage() {
           ) : (
             <div className="flex items-center gap-2 rounded-xl border border-green-200 bg-green-50 dark:bg-green-900/20 dark:border-green-900 px-4 py-3 text-sm text-green-700 dark:text-green-300">
               <ShieldCheck className="w-4 h-4" />
-              全局使用会分配到当前全部 {profiles.length} 个实例；后续新建实例仍可再次点击“分配”写入。
+              保存后会自动安装到当前全部 {profiles.length} 个实例；后续新建实例及每次启动也会自动继承，无需再次分配。
             </div>
           )}
 

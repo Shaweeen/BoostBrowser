@@ -34,6 +34,13 @@ export interface ExtensionImportResult {
   message: string
 }
 
+export interface GlobalManagedExtension {
+  downloadAddress: string
+  extensionId: string
+  extensionDir: string
+  installed: boolean
+}
+
 export interface BrowserProfileInput {
   profileName: string
   userDataDir: string

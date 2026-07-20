@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -63,6 +64,61 @@ func TestRemoveExtensionDirFromLaunchArgs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(next, want) {
 		t.Fatalf("unexpected args after removal\nwant: %#v\n got: %#v", want, next)
+	}
+}
+
+func TestGlobalExtensionRegistryUpsertUsesExtensionIDAsIdentity(t *testing.T) {
+	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
+	entries := []globalExtensionRegistryEntry{{
+		DownloadAddress: "https://old.example/" + extID,
+		ExtensionID:     extID,
+	}}
+	got := upsertGlobalExtensionRegistryEntry(entries, globalExtensionRegistryEntry{
+		DownloadAddress: "https://chromewebstore.google.com/detail/metamask/" + extID,
+		ExtensionID:     extID,
+	})
+	if len(got) != 1 {
+		t.Fatalf("expected one global policy, got %d", len(got))
+	}
+	if got[0].DownloadAddress != "https://chromewebstore.google.com/detail/metamask/"+extID {
+		t.Fatalf("global policy address was not updated: %#v", got[0])
+	}
+}
+
+func TestResolveExtensionDownloadURLUsesBundledChromeVersion(t *testing.T) {
+	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
+	got := resolveExtensionDownloadURL(extID, extID)
+	if !strings.Contains(got, "prodversion="+managedExtensionChromeVersion) {
+		t.Fatalf("extension download URL does not match bundled Chrome %s: %s", managedExtensionChromeVersion, got)
+	}
+}
+
+func TestAppendGlobalExtensionLaunchArgsSurvivesNewProfiles(t *testing.T) {
+	root := t.TempDir()
+	app := NewApp(root)
+	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
+	extDir := app.globalExtensionDir(extID)
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"MetaMask","version":"1.0","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.saveGlobalExtensionRegistry(globalExtensionRegistry{Extensions: []globalExtensionRegistryEntry{{
+		DownloadAddress: extID,
+		ExtensionID:     extID,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := app.appendGlobalExtensionLaunchArgs([]string{"--no-first-run"})
+	if !hasExtensionDirInLaunchArgs(got, extDir) {
+		t.Fatalf("global extension was not injected into fresh launch args: %#v", got)
+	}
+	got = app.appendGlobalExtensionLaunchArgs(got)
+	active := activeLoadExtensionDirs(got)
+	if len(active) != 1 {
+		t.Fatalf("global extension should be de-duplicated, got %#v", got)
 	}
 }
 
