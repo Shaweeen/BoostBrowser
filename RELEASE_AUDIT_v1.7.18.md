@@ -1,4 +1,4 @@
-# BrowserStudio v1.7.17 release audit
+# BrowserStudio v1.7.18 release audit
 
 Audit date: 2026-07-20
 
@@ -65,6 +65,6 @@ Audit date: 2026-07-20
   not be uploaded to a public GitHub release.
 - BrowserStudio does not implement CAPTCHA solving or anti-bot bypass.
 
-Release decision: the lightweight v1.7.17 update assets are ready after their
+Release decision: the lightweight v1.7.18 update assets are ready after their
 published GitHub hashes are verified. The private full NSIS installer is ready
 to build on the Windows packaging PC using the pinned one-command workflow.

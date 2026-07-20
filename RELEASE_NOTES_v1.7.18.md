@@ -1,4 +1,4 @@
-# BrowserStudio v1.7.17
+# BrowserStudio v1.7.18
 
 ## Main improvements
 

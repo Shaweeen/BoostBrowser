@@ -24,16 +24,16 @@ func TestNormalizeUpdateSHA256(t *testing.T) {
 }
 
 func TestValidateUpdateAssetURL(t *testing.T) {
-	valid := "https://github.com/Shaweeen/BoostBrowser/releases/download/v1.7.17/boost-browser.exe"
+	valid := "https://github.com/Shaweeen/BoostBrowser/releases/download/v1.7.18/boost-browser.exe"
 	if _, err := validateUpdateAssetURL(valid, "boost-browser.exe"); err != nil {
 		t.Fatalf("trusted release URL rejected: %v", err)
 	}
 	invalid := []string{
-		"http://github.com/Shaweeen/BoostBrowser/releases/download/v1.7.17/boost-browser.exe",
-		"https://example.com/Shaweeen/BoostBrowser/releases/download/v1.7.17/boost-browser.exe",
-		"https://github.com/Shaweeen/BrowserStudio/releases/download/v1.7.17/boost-browser.exe",
-		"https://github.com/Shaweeen/BoostBrowser/releases/download/v1.7.17/updater.exe",
-		"https://github.com/Shaweeen/BoostBrowser/releases/download/v1.7.17/boost-browser.exe?raw=1",
+		"http://github.com/Shaweeen/BoostBrowser/releases/download/v1.7.18/boost-browser.exe",
+		"https://example.com/Shaweeen/BoostBrowser/releases/download/v1.7.18/boost-browser.exe",
+		"https://github.com/Shaweeen/BrowserStudio/releases/download/v1.7.18/boost-browser.exe",
+		"https://github.com/Shaweeen/BoostBrowser/releases/download/v1.7.18/updater.exe",
+		"https://github.com/Shaweeen/BoostBrowser/releases/download/v1.7.18/boost-browser.exe?raw=1",
 	}
 	for _, value := range invalid {
 		if _, err := validateUpdateAssetURL(value, "boost-browser.exe"); err == nil {
