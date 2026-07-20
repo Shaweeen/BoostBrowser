@@ -437,7 +437,7 @@ func moreLoginCacheProfileCandidates(root, profileID string) []string {
 }
 
 func looksLikeMoreLoginRuntimeUserDataDir(path string) bool {
-	path = filepath.ToSlash(strings.ToLower(strings.Trim(strings.TrimSpace(path), `"`)))
+	path = strings.ReplaceAll(filepath.ToSlash(strings.ToLower(strings.Trim(strings.TrimSpace(path), `"`))), `\`, "/")
 	if path == "" {
 		return false
 	}
@@ -449,7 +449,12 @@ func extractMoreLoginRuntimeProfileID(path string) string {
 	if cleaned == "" {
 		return ""
 	}
-	parent := filepath.Base(filepath.Dir(filepath.Clean(cleaned)))
+	cleaned = strings.TrimSuffix(strings.ReplaceAll(filepath.ToSlash(cleaned), `\`, "/"), "/")
+	parts := strings.Split(cleaned, "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	parent := parts[len(parts)-2]
 	if !strings.HasPrefix(strings.ToLower(parent), "chrome_") {
 		return ""
 	}

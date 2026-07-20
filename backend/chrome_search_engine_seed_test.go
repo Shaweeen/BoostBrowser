@@ -67,8 +67,8 @@ func TestSeedDefaultSearchEngineCleansNonGoogleEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(rows) != 2 {
-		t.Fatalf("keywords row count=%d, want 2; rows=%#v", len(rows), rows)
+	if len(rows) != 3 {
+		t.Fatalf("keywords row count=%d, want 3; rows=%#v", len(rows), rows)
 	}
 	var googleRow *struct {
 		ID      int64
@@ -86,6 +86,14 @@ func TestSeedDefaultSearchEngineCleansNonGoogleEntries(t *testing.T) {
 		Active  int
 		GUID    string
 	}
+	var geminiRow *struct {
+		ID      int64
+		Name    string
+		Keyword string
+		URL     string
+		Active  int
+		GUID    string
+	}
 	for i := range rows {
 		row := &rows[i]
 		if row.Name == "Google" {
@@ -94,12 +102,18 @@ func TestSeedDefaultSearchEngineCleansNonGoogleEntries(t *testing.T) {
 		if row.Keyword == "@书签" {
 			bookmarkRow = row
 		}
+		if row.Keyword == "@gemini" {
+			geminiRow = row
+		}
 	}
 	if googleRow == nil || googleRow.Keyword != "9oo91e.qjz9zk" || googleRow.Active != 1 || googleRow.GUID == "" {
 		t.Fatalf("google row not normalized: %#v", rows)
 	}
 	if bookmarkRow == nil {
 		t.Fatalf("site-search shortcut should remain: %#v", rows)
+	}
+	if geminiRow == nil || geminiRow.Active != 0 {
+		t.Fatalf("starter-pack site-search shortcut should remain inactive: %#v", rows)
 	}
 
 	prefsData, err := os.ReadFile(prefsPath)
@@ -116,7 +130,7 @@ func TestSeedDefaultSearchEngineCleansNonGoogleEntries(t *testing.T) {
 	}
 	dspData := prefs["default_search_provider_data"].(map[string]any)
 	mirrored := dspData["mirrored_template_url_data"].(map[string]any)
-	if mirrored["short_name"] != "Google" || mirrored["keyword"] != "9oo91e.qjz9zk" {
+	if mirrored["name"] != "Google" || mirrored["keyword"] != "9oo91e.qjz9zk" {
 		t.Fatalf("mirrored_template_url_data not patched to Google: %#v", mirrored)
 	}
 }

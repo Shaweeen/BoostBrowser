@@ -20,11 +20,11 @@ func TestRestorableTabURLsFromTargetsFiltersInternalAndDedupes(t *testing.T) {
 	}
 }
 
-func TestBuildTargetURLsPrefersSavedLastTabsOverDefaultVerificationURLs(t *testing.T) {
+func TestBuildTargetURLsStartsBlankByDefault(t *testing.T) {
 	profile := &BrowserProfile{LastTabs: []string{"https://last.example/one", "https://last.example/two"}}
 	got := buildTargetURLs(profile, nil, false)
-	if !sameLastTabs(got, profile.LastTabs) {
-		t.Fatalf("expected saved tabs, got=%v", got)
+	if len(got) != 0 {
+		t.Fatalf("expected a clean blank launch, got=%v", got)
 	}
 }
 
