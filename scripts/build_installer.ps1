@@ -248,6 +248,12 @@ Function .onInit
   File /oname=close-browserstudio-processes.ps1 "$ScopedProcessCleanup"
 FunctionEnd
 
+Function un.onInit
+  InitPluginsDir
+  SetOutPath `$PLUGINSDIR
+  File /oname=close-browserstudio-processes.ps1 "$ScopedProcessCleanup"
+FunctionEnd
+
 Function ActivationPage
   nsDialogs::Create 1018
   Pop `$ActivationDialog
@@ -285,6 +291,15 @@ Function CloseBoostProcesses
   MessageBox MB_ICONSTOP|MB_OK "BrowserStudio processes are still running. Close BrowserStudio and its managed browser windows, then retry."
   Abort
 done:
+FunctionEnd
+
+Function un.CloseBoostProcesses
+  IfFileExists "`$INSTDIR" 0 un_done
+  ExecWait '"`$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "`$PLUGINSDIR\close-browserstudio-processes.ps1" -InstallRoot "`$INSTDIR"' `$0
+  IntCmp `$0 0 un_done
+  MessageBox MB_ICONSTOP|MB_OK "BrowserStudio processes are still running. Close BrowserStudio and its managed browser windows, then retry."
+  Abort
+un_done:
 FunctionEnd
 
 Function EnsureVCRuntime
@@ -364,7 +379,7 @@ Section "$ProductName" SecMain
 SectionEnd
 
 Section "Uninstall"
-  Call CloseBoostProcesses
+  Call un.CloseBoostProcesses
   Delete "`$DESKTOP\`${PRODUCT_NAME}.lnk"
   Delete "`$SMPROGRAMS\`${PRODUCT_NAME}\`${PRODUCT_NAME}.lnk"
   Delete "`$SMPROGRAMS\`${PRODUCT_NAME}\Uninstall `${PRODUCT_NAME}.lnk"

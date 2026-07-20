@@ -68,6 +68,11 @@ class PackagingScriptsTest(unittest.TestCase):
         installer = self.read("scripts/build_installer.ps1")
         cleanup = self.read("scripts/close_browserstudio_processes.ps1")
         self.assertIn("close-browserstudio-processes.ps1", installer)
+        self.assertIn("Function un.onInit", installer)
+        self.assertIn("Function un.CloseBoostProcesses", installer)
+        self.assertIn("Call un.CloseBoostProcesses", installer)
+        uninstall_section = installer.split('Section "Uninstall"', 1)[1].split("SectionEnd", 1)[0]
+        self.assertNotIn("Call CloseBoostProcesses", uninstall_section)
         self.assertNotIn('/IM chrome.exe', installer)
         self.assertNotIn('/IM xray.exe', installer)
         self.assertNotIn('/IM sing-box.exe', installer)
