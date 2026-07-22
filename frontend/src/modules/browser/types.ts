@@ -43,6 +43,7 @@ export interface GlobalManagedExtension {
 
 export interface RabbyWalletImportPreviewRow {
   rowNumber: number
+  environmentNumber: number
   profileId: string
   profileName: string
   wordCount: number

@@ -743,7 +743,7 @@ export function ExtensionManagementPage() {
           <div className="flex items-center justify-between gap-4 rounded-xl border border-[var(--color-border-default)] px-4 py-3">
             <div>
               <div className="text-sm font-medium text-[var(--color-text-primary)]">1. 准备环境映射文件</div>
-              <div className="text-xs text-[var(--color-text-muted)] mt-1">CSV：profile_id,profile_name,mnemonic；TXT：profile_id&lt;Tab&gt;助记词 或 profile_id|助记词</div>
+              <div className="text-xs text-[var(--color-text-muted)] mt-1">CSV：environment_number,profile_id,profile_name,mnemonic；三种环境标识任选一项，填写多项时必须指向同一环境</div>
             </div>
             <Button variant="secondary" size="sm" onClick={downloadRabbyTemplate} disabled={rabbyExecuting}><FileDown className="w-4 h-4" />下载 CSV 模板</Button>
           </div>
@@ -755,17 +755,18 @@ export function ExtensionManagementPage() {
                   <div className="text-sm font-medium text-[var(--color-text-primary)]">{rabbyPreview.fileName}</div>
                   <div className="text-xs text-[var(--color-text-muted)] mt-0.5">已校验 {rabbyPreview.rows.length} 条；助记词只保存在后端临时内存，15 分钟后自动失效</div>
                 </div>
-                <span className="text-xs text-[var(--color-text-muted)]">按 profile_id 精确映射</span>
+                <span className="text-xs text-[var(--color-text-muted)]">按环境编号 / profile_id / 名称精确映射</span>
               </div>
               <div className="max-h-52 overflow-auto">
                 <table className="w-full text-sm">
                   <thead className="sticky top-0 bg-[var(--color-bg-surface)] text-xs text-[var(--color-text-muted)]">
-                    <tr><th className="px-4 py-2 text-left">行</th><th className="px-4 py-2 text-left">环境</th><th className="px-4 py-2 text-left">profile_id</th><th className="px-4 py-2 text-left">词数</th><th className="px-4 py-2 text-right">状态</th></tr>
+                    <tr><th className="px-4 py-2 text-left">行</th><th className="px-4 py-2 text-left">编号</th><th className="px-4 py-2 text-left">环境</th><th className="px-4 py-2 text-left">profile_id</th><th className="px-4 py-2 text-left">词数</th><th className="px-4 py-2 text-right">状态</th></tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--color-border-muted)]">
                     {rabbyPreview.rows.map(row => (
                       <tr key={`${row.rowNumber}-${row.profileId}`}>
                         <td className="px-4 py-2 text-[var(--color-text-muted)]">{row.rowNumber}</td>
+                        <td className="px-4 py-2 font-semibold text-[var(--color-text-primary)]">#{row.environmentNumber}</td>
                         <td className="px-4 py-2 text-[var(--color-text-primary)]">{row.profileName || row.profileId}</td>
                         <td className="px-4 py-2 font-mono text-xs text-[var(--color-text-muted)]">{row.profileId}</td>
                         <td className="px-4 py-2 text-[var(--color-text-secondary)]">{row.wordCount}</td>

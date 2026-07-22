@@ -15,6 +15,10 @@ var (
 		return wailsruntime.OpenFileDialog(ctx, options)
 	}
 	showWalletImportFallbackDialog = openWalletImportFallbackDialog
+	showWalletTemplateWailsDialog  = func(ctx context.Context, options wailsruntime.SaveDialogOptions) (string, error) {
+		return wailsruntime.SaveFileDialog(ctx, options)
+	}
+	showWalletTemplateFallbackDialog = saveWalletImportTemplateFallbackDialog
 )
 
 // selectWalletImportFile keeps wallet contents out of the WebView. The Wails
@@ -43,6 +47,30 @@ func (a *App) selectWalletImportFile(spec walletImportSpec) (string, error) {
 	fallbackPath, fallbackErr := showWalletImportFallbackDialog(options.Title)
 	if fallbackErr != nil {
 		return "", fmt.Errorf("系统文件选择器不可用（Wails: %v；Windows 后备: %v）", primaryErr, fallbackErr)
+	}
+	return strings.TrimSpace(fallbackPath), nil
+}
+
+func (a *App) selectWalletImportTemplatePath(spec walletImportSpec) (string, error) {
+	options := wailsruntime.SaveDialogOptions{
+		Title:           "保存 " + spec.Name + " 批量导入模板",
+		DefaultFilename: spec.Type + "-wallet-import-template.csv",
+		Filters: []wailsruntime.FileFilter{
+			{DisplayName: "CSV 文件 (*.csv)", Pattern: "*.csv"},
+		},
+	}
+	path, primaryErr := showWalletTemplateWailsDialog(a.ctx, options)
+	if primaryErr == nil {
+		return strings.TrimSpace(path), nil
+	}
+
+	logger.New("WalletImport").Warn("Wails 模板保存对话框不可用，尝试 Windows 系统后备选择器",
+		logger.F("wallet_type", spec.Type),
+		logger.F("error", primaryErr.Error()),
+	)
+	fallbackPath, fallbackErr := showWalletTemplateFallbackDialog(options.Title, options.DefaultFilename)
+	if fallbackErr != nil {
+		return "", fmt.Errorf("系统模板保存对话框不可用（Wails: %v；Windows 后备: %v）", primaryErr, fallbackErr)
 	}
 	return strings.TrimSpace(fallbackPath), nil
 }

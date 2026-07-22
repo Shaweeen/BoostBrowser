@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -57,9 +58,11 @@ var walletImportSpecs = map[string]walletImportSpec{
 var rabbyAddressPattern = regexp.MustCompile(`(?i)0x[0-9a-f]{40}`)
 
 type rabbyWalletImportSecretRow struct {
-	RowNumber int
-	ProfileID string
-	Mnemonic  string
+	RowNumber         int
+	ProfileID         string
+	ProfileName       string
+	EnvironmentNumber string
+	Mnemonic          string
 }
 
 type rabbyWalletImportSession struct {
@@ -71,11 +74,12 @@ type rabbyWalletImportSession struct {
 }
 
 type RabbyWalletImportPreviewRow struct {
-	RowNumber   int    `json:"rowNumber"`
-	ProfileID   string `json:"profileId"`
-	ProfileName string `json:"profileName"`
-	WordCount   int    `json:"wordCount"`
-	Running     bool   `json:"running"`
+	RowNumber         int    `json:"rowNumber"`
+	EnvironmentNumber int    `json:"environmentNumber"`
+	ProfileID         string `json:"profileId"`
+	ProfileName       string `json:"profileName"`
+	WordCount         int    `json:"wordCount"`
+	Running           bool   `json:"running"`
 }
 
 type RabbyWalletImportPreview struct {
@@ -202,13 +206,7 @@ func (a *App) WalletExportImportTemplate(walletType string) (map[string]any, err
 	if err != nil {
 		return nil, err
 	}
-	path, err := wailsruntime.SaveFileDialog(a.ctx, wailsruntime.SaveDialogOptions{
-		Title:           "保存 " + spec.Name + " 批量导入模板",
-		DefaultFilename: spec.Type + "-wallet-import-template.csv",
-		Filters: []wailsruntime.FileFilter{
-			{DisplayName: "CSV 文件 (*.csv)", Pattern: "*.csv"},
-		},
-	})
+	path, err := a.selectWalletImportTemplatePath(spec)
 	if err != nil {
 		return nil, fmt.Errorf("打开模板保存对话框失败：%w", err)
 	}
@@ -220,12 +218,17 @@ func (a *App) WalletExportImportTemplate(walletType string) (map[string]any, err
 	}
 
 	profiles := a.BrowserProfileList()
+	profileSnapshot := a.rabbyProfileSnapshot()
 	var buf bytes.Buffer
 	buf.Write([]byte{0xEF, 0xBB, 0xBF})
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"profile_id", "profile_name", "mnemonic"})
+	_ = w.Write([]string{"environment_number", "profile_id", "profile_name", "mnemonic"})
 	for _, profile := range profiles {
-		_ = w.Write([]string{profile.ProfileId, profile.ProfileName, ""})
+		number := 0
+		if snapshot, ok := profileSnapshot[profile.ProfileId]; ok {
+			number = snapshot.EnvironmentNumber
+		}
+		_ = w.Write([]string{strconv.Itoa(number), profile.ProfileId, profile.ProfileName, ""})
 	}
 	w.Flush()
 	if err := w.Error(); err != nil {
@@ -424,9 +427,10 @@ func (a *App) rabbyProfileSnapshot() map[string]RabbyWalletImportPreviewRow {
 			continue
 		}
 		out[id] = RabbyWalletImportPreviewRow{
-			ProfileID:   id,
-			ProfileName: profile.ProfileName,
-			Running:     profile.Running,
+			EnvironmentNumber: resolveBadgeDisplayNumber(id, profile.ProfileName, a.browserMgr.Profiles),
+			ProfileID:         id,
+			ProfileName:       profile.ProfileName,
+			Running:           profile.Running,
 		}
 	}
 	return out
@@ -558,13 +562,13 @@ func parseWalletImportFile(path string, profiles map[string]RabbyWalletImportPre
 	preview := make([]RabbyWalletImportPreviewRow, 0, len(parsed))
 	for i := range parsed {
 		row := &parsed[i]
-		row.ProfileID = strings.TrimSpace(row.ProfileID)
 		row.Mnemonic = normalizeRabbyMnemonic(row.Mnemonic)
-		profile, ok := profiles[row.ProfileID]
-		if !ok {
+		profile, resolveErr := resolveWalletImportProfile(*row, profiles)
+		if resolveErr != nil {
 			clearRabbySecretRows(parsed)
-			return nil, nil, fmt.Errorf("第 %d 行的 profile_id 不存在", row.RowNumber)
+			return nil, nil, resolveErr
 		}
+		row.ProfileID = profile.ProfileID
 		if previous, exists := seenProfiles[row.ProfileID]; exists {
 			clearRabbySecretRows(parsed)
 			return nil, nil, fmt.Errorf("第 %d 行与第 %d 行重复使用同一环境", row.RowNumber, previous)
@@ -588,11 +592,12 @@ func parseWalletImportFile(path string, profiles map[string]RabbyWalletImportPre
 		}
 		seenMnemonics[hash] = row.RowNumber
 		preview = append(preview, RabbyWalletImportPreviewRow{
-			RowNumber:   row.RowNumber,
-			ProfileID:   row.ProfileID,
-			ProfileName: profile.ProfileName,
-			WordCount:   wordCount,
-			Running:     profile.Running,
+			RowNumber:         row.RowNumber,
+			EnvironmentNumber: profile.EnvironmentNumber,
+			ProfileID:         row.ProfileID,
+			ProfileName:       profile.ProfileName,
+			WordCount:         wordCount,
+			Running:           profile.Running,
 		})
 	}
 	return parsed, preview, nil
@@ -608,34 +613,46 @@ func parseRabbyCSV(data []byte) ([]rabbyWalletImportSecretRow, error) {
 	if len(records) < 2 {
 		return nil, fmt.Errorf("CSV 至少需要表头和一行数据")
 	}
-	profileColumn, mnemonicColumn := -1, -1
+	profileColumn, profileNameColumn, environmentNumberColumn, mnemonicColumn := -1, -1, -1, -1
 	for index, raw := range records[0] {
 		header := strings.ToLower(strings.TrimSpace(raw))
 		switch header {
 		case "profile_id", "profileid", "环境id", "环境_id":
 			profileColumn = index
+		case "profile_name", "profilename", "环境名称", "环境_名称":
+			profileNameColumn = index
+		case "environment_number", "environmentnumber", "profile_number", "profilenumber", "环境编号", "编号":
+			environmentNumberColumn = index
 		case "mnemonic", "seed_phrase", "seedphrase", "助记词":
 			mnemonicColumn = index
 		}
 	}
-	if profileColumn < 0 || mnemonicColumn < 0 {
-		return nil, fmt.Errorf("CSV 表头必须包含 profile_id 和 mnemonic")
+	if mnemonicColumn < 0 || (profileColumn < 0 && profileNameColumn < 0 && environmentNumberColumn < 0) {
+		return nil, fmt.Errorf("CSV 表头必须包含 mnemonic，以及 environment_number、profile_id、profile_name 中至少一项")
 	}
 	rows := make([]rabbyWalletImportSecretRow, 0, len(records)-1)
 	for index, record := range records[1:] {
 		rowNumber := index + 2
-		if profileColumn >= len(record) || mnemonicColumn >= len(record) {
-			return nil, fmt.Errorf("CSV 第 %d 行缺少 profile_id 或 mnemonic", rowNumber)
+		cell := func(column int) string {
+			if column < 0 || column >= len(record) {
+				return ""
+			}
+			return strings.TrimSpace(record[column])
 		}
-		profileID := strings.TrimSpace(record[profileColumn])
-		mnemonic := strings.TrimSpace(record[mnemonicColumn])
-		if profileID == "" && mnemonic == "" {
+		profileID := cell(profileColumn)
+		profileName := cell(profileNameColumn)
+		environmentNumber := cell(environmentNumberColumn)
+		mnemonic := cell(mnemonicColumn)
+		if profileID == "" && profileName == "" && environmentNumber == "" && mnemonic == "" {
 			continue
 		}
-		if profileID == "" || mnemonic == "" {
-			return nil, fmt.Errorf("CSV 第 %d 行的 profile_id 或 mnemonic 为空", rowNumber)
+		if mnemonic == "" || (profileID == "" && profileName == "" && environmentNumber == "") {
+			return nil, fmt.Errorf("CSV 第 %d 行必须填写 mnemonic，并至少填写环境编号、profile_id、profile_name 中一项", rowNumber)
 		}
-		rows = append(rows, rabbyWalletImportSecretRow{RowNumber: rowNumber, ProfileID: profileID, Mnemonic: mnemonic})
+		rows = append(rows, rabbyWalletImportSecretRow{
+			RowNumber: rowNumber, ProfileID: profileID, ProfileName: profileName,
+			EnvironmentNumber: environmentNumber, Mnemonic: mnemonic,
+		})
 	}
 	return rows, nil
 }
@@ -653,7 +670,7 @@ func parseRabbyTXT(data []byte) ([]rabbyWalletImportSecretRow, error) {
 			separator = "|"
 		}
 		if !strings.Contains(line, separator) {
-			return nil, fmt.Errorf("TXT 第 %d 行格式错误，应为 profile_id<Tab>助记词 或 profile_id|助记词", index+1)
+			return nil, fmt.Errorf("TXT 第 %d 行格式错误，应为 环境编号/profile_id/环境名称<Tab>助记词，或使用 | 分隔", index+1)
 		}
 		parts := strings.SplitN(line, separator, 2)
 		profileID, mnemonic := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
@@ -663,6 +680,101 @@ func parseRabbyTXT(data []byte) ([]rabbyWalletImportSecretRow, error) {
 		rows = append(rows, rabbyWalletImportSecretRow{RowNumber: index + 1, ProfileID: profileID, Mnemonic: mnemonic})
 	}
 	return rows, nil
+}
+
+func resolveWalletImportProfile(row rabbyWalletImportSecretRow, profiles map[string]RabbyWalletImportPreviewRow) (RabbyWalletImportPreviewRow, error) {
+	var selected RabbyWalletImportPreviewRow
+	hasSelected := false
+	bind := func(label, value string, matches []RabbyWalletImportPreviewRow) error {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return nil
+		}
+		if len(matches) == 0 {
+			return fmt.Errorf("第 %d 行的 %s %q 未匹配到环境", row.RowNumber, label, value)
+		}
+		if len(matches) > 1 {
+			if hasSelected {
+				for _, match := range matches {
+					if match.ProfileID == selected.ProfileID {
+						return nil
+					}
+				}
+				return fmt.Errorf("第 %d 行填写的环境编号、profile_id、profile_name 指向不同环境，已停止导入", row.RowNumber)
+			}
+			return fmt.Errorf("第 %d 行的 %s %q 匹配到多个环境，请改用唯一的 profile_id", row.RowNumber, label, value)
+		}
+		if hasSelected && selected.ProfileID != matches[0].ProfileID {
+			return fmt.Errorf("第 %d 行填写的环境编号、profile_id、profile_name 指向不同环境，已停止导入", row.RowNumber)
+		}
+		selected = matches[0]
+		hasSelected = true
+		return nil
+	}
+
+	matchByID := func(value string) []RabbyWalletImportPreviewRow {
+		value = strings.TrimSpace(value)
+		if profile, ok := profiles[value]; ok {
+			return []RabbyWalletImportPreviewRow{profile}
+		}
+		for id, profile := range profiles {
+			if strings.EqualFold(strings.TrimSpace(id), value) {
+				return []RabbyWalletImportPreviewRow{profile}
+			}
+		}
+		return nil
+	}
+	matchByName := func(value string) []RabbyWalletImportPreviewRow {
+		value = strings.TrimSpace(value)
+		matches := make([]RabbyWalletImportPreviewRow, 0, 1)
+		for _, profile := range profiles {
+			if strings.EqualFold(strings.TrimSpace(profile.ProfileName), value) {
+				matches = append(matches, profile)
+			}
+		}
+		return matches
+	}
+	matchByNumber := func(value string) []RabbyWalletImportPreviewRow {
+		normalized := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(value), "#"))
+		number, err := strconv.Atoi(normalized)
+		if err != nil || number <= 0 {
+			return nil
+		}
+		matches := make([]RabbyWalletImportPreviewRow, 0, 1)
+		for _, profile := range profiles {
+			if profile.EnvironmentNumber == number {
+				matches = append(matches, profile)
+			}
+		}
+		return matches
+	}
+
+	profileID := strings.TrimSpace(row.ProfileID)
+	if profileID != "" {
+		matches := matchByID(profileID)
+		// Legacy two-column CSV/TXT files often put the visible number or name
+		// in the profile_id position. Accept it only when no explicit selector
+		// column is also populated.
+		if len(matches) == 0 && strings.TrimSpace(row.EnvironmentNumber) == "" && strings.TrimSpace(row.ProfileName) == "" {
+			matches = matchByNumber(profileID)
+			if len(matches) == 0 {
+				matches = matchByName(profileID)
+			}
+		}
+		if err := bind("profile_id", profileID, matches); err != nil {
+			return RabbyWalletImportPreviewRow{}, err
+		}
+	}
+	if err := bind("environment_number", row.EnvironmentNumber, matchByNumber(row.EnvironmentNumber)); err != nil {
+		return RabbyWalletImportPreviewRow{}, err
+	}
+	if err := bind("profile_name", row.ProfileName, matchByName(row.ProfileName)); err != nil {
+		return RabbyWalletImportPreviewRow{}, err
+	}
+	if !hasSelected {
+		return RabbyWalletImportPreviewRow{}, fmt.Errorf("第 %d 行未填写可识别的环境编号、profile_id 或 profile_name", row.RowNumber)
+	}
+	return selected, nil
 }
 
 func normalizeRabbyMnemonic(value string) string {

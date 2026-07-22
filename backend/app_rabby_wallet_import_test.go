@@ -63,6 +63,32 @@ func TestWalletImportFileDialogReportsBothFailures(t *testing.T) {
 	}
 }
 
+func TestWalletImportTemplateDialogUsesWindowsFallbackAfterWailsFailure(t *testing.T) {
+	originalPrimary := showWalletTemplateWailsDialog
+	originalFallback := showWalletTemplateFallbackDialog
+	t.Cleanup(func() {
+		showWalletTemplateWailsDialog = originalPrimary
+		showWalletTemplateFallbackDialog = originalFallback
+	})
+
+	showWalletTemplateWailsDialog = func(context.Context, wailsruntime.SaveDialogOptions) (string, error) {
+		return "", errors.New("COM unavailable")
+	}
+	showWalletTemplateFallbackDialog = func(title, defaultFilename string) (string, error) {
+		if !strings.Contains(title, "Rabby") || defaultFilename != "rabby-wallet-import-template.csv" {
+			t.Fatalf("unexpected fallback options title=%q filename=%q", title, defaultFilename)
+		}
+		return `C:\Users\test\rabby-wallet-import-template.csv`, nil
+	}
+
+	app := NewApp("")
+	app.ctx = context.Background()
+	path, err := app.selectWalletImportTemplatePath(walletImportSpecs["rabby"])
+	if err != nil || path != `C:\Users\test\rabby-wallet-import-template.csv` {
+		t.Fatalf("template fallback result path=%q err=%v", path, err)
+	}
+}
+
 func rabbyTestMnemonic(prefix string, count int) string {
 	words := make([]string, count)
 	for i := range words {
@@ -82,8 +108,8 @@ func writeRabbyImportFixture(t *testing.T, name, content string) string {
 
 func rabbyTestProfiles() map[string]RabbyWalletImportPreviewRow {
 	return map[string]RabbyWalletImportPreviewRow{
-		"profile-1": {ProfileID: "profile-1", ProfileName: "环境一"},
-		"profile-2": {ProfileID: "profile-2", ProfileName: "环境二", Running: true},
+		"profile-1": {EnvironmentNumber: 1, ProfileID: "profile-1", ProfileName: "环境一"},
+		"profile-2": {EnvironmentNumber: 2, ProfileID: "profile-2", ProfileName: "环境二", Running: true},
 	}
 }
 
@@ -107,6 +133,73 @@ func TestParseRabbyWalletImportCSV(t *testing.T) {
 	}
 	if bytes.Contains(encoded, []byte("alphaa")) {
 		t.Fatal("frontend preview exposed mnemonic material")
+	}
+}
+
+func TestParseWalletImportCSVByEnvironmentNumber(t *testing.T) {
+	mnemonic := rabbyTestMnemonic("number", 12)
+	path := writeRabbyImportFixture(t, "wallets-by-number.csv", "environment_number,mnemonic\n2,"+mnemonic+"\n")
+
+	rows, preview, err := parseRabbyWalletImportFile(path, rabbyTestProfiles())
+	if err != nil {
+		t.Fatalf("parse environment number CSV: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ProfileID != "profile-2" || len(preview) != 1 || preview[0].EnvironmentNumber != 2 || preview[0].ProfileName != "环境二" {
+		t.Fatalf("unexpected number mapping rows=%#v preview=%#v", rows, preview)
+	}
+}
+
+func TestParseWalletImportCSVByProfileName(t *testing.T) {
+	mnemonic := rabbyTestMnemonic("name", 12)
+	path := writeRabbyImportFixture(t, "wallets-by-name.csv", "profile_name,mnemonic\n环境一,"+mnemonic+"\n")
+
+	rows, preview, err := parseRabbyWalletImportFile(path, rabbyTestProfiles())
+	if err != nil || len(rows) != 1 || rows[0].ProfileID != "profile-1" || len(preview) != 1 {
+		t.Fatalf("expected exact name mapping rows=%#v preview=%#v err=%v", rows, preview, err)
+	}
+}
+
+func TestParseWalletImportLegacyProfileIDColumnAcceptsVisibleNumber(t *testing.T) {
+	mnemonic := rabbyTestMnemonic("legacy", 12)
+	path := writeRabbyImportFixture(t, "wallets-legacy-number.csv", "profile_id,mnemonic\n#1,"+mnemonic+"\n")
+
+	rows, _, err := parseRabbyWalletImportFile(path, rabbyTestProfiles())
+	if err != nil || len(rows) != 1 || rows[0].ProfileID != "profile-1" {
+		t.Fatalf("legacy visible number did not resolve rows=%#v err=%v", rows, err)
+	}
+}
+
+func TestParseWalletImportRejectsConflictingSelectors(t *testing.T) {
+	mnemonic := rabbyTestMnemonic("conflict", 12)
+	path := writeRabbyImportFixture(t, "wallets-conflict.csv", "environment_number,profile_id,mnemonic\n2,profile-1,"+mnemonic+"\n")
+
+	_, _, err := parseRabbyWalletImportFile(path, rabbyTestProfiles())
+	if err == nil || !strings.Contains(err.Error(), "指向不同环境") {
+		t.Fatalf("expected conflicting selector error, got %v", err)
+	}
+}
+
+func TestParseWalletImportRejectsAmbiguousEnvironmentNumber(t *testing.T) {
+	profiles := rabbyTestProfiles()
+	profiles["profile-3"] = RabbyWalletImportPreviewRow{EnvironmentNumber: 2, ProfileID: "profile-3", ProfileName: "另一个环境二"}
+	mnemonic := rabbyTestMnemonic("ambiguous", 12)
+	path := writeRabbyImportFixture(t, "wallets-ambiguous.csv", "environment_number,mnemonic\n2,"+mnemonic+"\n")
+
+	_, _, err := parseRabbyWalletImportFile(path, profiles)
+	if err == nil || !strings.Contains(err.Error(), "匹配到多个环境") {
+		t.Fatalf("expected ambiguous number error, got %v", err)
+	}
+}
+
+func TestParseWalletImportExactIDDisambiguatesRepeatedNumber(t *testing.T) {
+	profiles := rabbyTestProfiles()
+	profiles["profile-3"] = RabbyWalletImportPreviewRow{EnvironmentNumber: 2, ProfileID: "profile-3", ProfileName: "另一个环境二"}
+	mnemonic := rabbyTestMnemonic("disambiguated", 12)
+	path := writeRabbyImportFixture(t, "wallets-disambiguated.csv", "environment_number,profile_id,mnemonic\n2,profile-2,"+mnemonic+"\n")
+
+	rows, _, err := parseRabbyWalletImportFile(path, profiles)
+	if err != nil || len(rows) != 1 || rows[0].ProfileID != "profile-2" {
+		t.Fatalf("exact profile ID should disambiguate repeated number rows=%#v err=%v", rows, err)
 	}
 }
 

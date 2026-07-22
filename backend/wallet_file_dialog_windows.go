@@ -29,7 +29,32 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 $dialog.Dispose()
 `
 
+const walletTemplateWinFormsScript = `$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.SaveFileDialog
+$dialog.Title = $env:BROWSERSTUDIO_DIALOG_TITLE
+$dialog.FileName = $env:BROWSERSTUDIO_DEFAULT_FILENAME
+$dialog.Filter = 'CSV files (*.csv)|*.csv'
+$dialog.DefaultExt = 'csv'
+$dialog.AddExtension = $true
+$dialog.OverwritePrompt = $true
+$dialog.RestoreDirectory = $true
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($dialog.FileName)
+    [Console]::Out.Write([Convert]::ToBase64String($bytes))
+}
+$dialog.Dispose()
+`
+
 func openWalletImportFallbackDialog(title string) (string, error) {
+	return runWalletWinFormsDialog(walletImportWinFormsScript, title, "")
+}
+
+func saveWalletImportTemplateFallbackDialog(title, defaultFilename string) (string, error) {
+	return runWalletWinFormsDialog(walletTemplateWinFormsScript, title, defaultFilename)
+}
+
+func runWalletWinFormsDialog(script, title, defaultFilename string) (string, error) {
 	powershellPath := filepath.Join(os.Getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 	if _, err := os.Stat(powershellPath); err != nil {
 		resolved, lookErr := exec.LookPath("powershell.exe")
@@ -39,8 +64,8 @@ func openWalletImportFallbackDialog(title string) (string, error) {
 		powershellPath = resolved
 	}
 
-	cmd := exec.Command(powershellPath, "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-Command", walletImportWinFormsScript)
-	cmd.Env = append(os.Environ(), "BROWSERSTUDIO_DIALOG_TITLE="+title)
+	cmd := exec.Command(powershellPath, "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-Command", script)
+	cmd.Env = append(os.Environ(), "BROWSERSTUDIO_DIALOG_TITLE="+title, "BROWSERSTUDIO_DEFAULT_FILENAME="+defaultFilename)
 	// CREATE_NO_WINDOW suppresses the PowerShell console without hiding the
 	// WinForms file picker that the user must interact with.
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000}
