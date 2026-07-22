@@ -360,6 +360,7 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	s.mu.Unlock()
 	go s.cdpKeyDispatchLoop(s.stopCh, s.cdpKeyQueue)
 	go s.pageInputDispatchLoop(s.stopCh, s.pageInputQueue)
+	go s.syncPopupBoundsLoop(s.stopCh)
 
 	// 安装全局鼠标和键盘钩子。启动必须等待安装结果；旧逻辑在安装
 	// 失败时仍立即返回成功，前端因此会显示“同步中”但没有任何事件。
@@ -385,6 +386,7 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 		if err != nil {
 			activeInputSyncer.CompareAndSwap(s, nil)
 			atomic.StoreInt32(&s.active, 0)
+			s.signalStop()
 			return err
 		}
 		return nil

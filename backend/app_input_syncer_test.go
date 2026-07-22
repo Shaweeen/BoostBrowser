@@ -76,17 +76,18 @@ func TestMainProcessCannotOwnInputSyncHooks(t *testing.T) {
 }
 
 func TestWindowEnumerationCallbacksAreProcessReusable(t *testing.T) {
-	if processWindowEnumCallback == 0 || chromeRenderChildEnumCallback == 0 || syncInputSurfaceEnumCallback == 0 || browserWindowRestoreEnumCallback == 0 || processMouseHookCallback == 0 || processKeyHookCallback == 0 {
+	if processWindowEnumCallback == 0 || chromeRenderChildEnumCallback == 0 || syncInputSurfaceEnumCallback == 0 || syncPopupBoundsEnumCallback == 0 || browserWindowRestoreEnumCallback == 0 || processMouseHookCallback == 0 || processKeyHookCallback == 0 {
 		t.Fatal("expected reusable Win32 enumeration callbacks")
 	}
 	processCallback := processWindowEnumCallback
 	renderCallback := chromeRenderChildEnumCallback
 	surfaceCallback := syncInputSurfaceEnumCallback
+	popupBoundsCallback := syncPopupBoundsEnumCallback
 	restoreCallback := browserWindowRestoreEnumCallback
 	mouseCallback := processMouseHookCallback
 	keyCallback := processKeyHookCallback
 	for i := 0; i < 10000; i++ {
-		if processWindowEnumCallback != processCallback || chromeRenderChildEnumCallback != renderCallback || syncInputSurfaceEnumCallback != surfaceCallback || browserWindowRestoreEnumCallback != restoreCallback || processMouseHookCallback != mouseCallback || processKeyHookCallback != keyCallback {
+		if processWindowEnumCallback != processCallback || chromeRenderChildEnumCallback != renderCallback || syncInputSurfaceEnumCallback != surfaceCallback || syncPopupBoundsEnumCallback != popupBoundsCallback || browserWindowRestoreEnumCallback != restoreCallback || processMouseHookCallback != mouseCallback || processKeyHookCallback != keyCallback {
 			t.Fatal("Win32 callback address changed; repeated lookup would exhaust the callback table")
 		}
 	}
@@ -110,6 +111,47 @@ func TestExpectedPopupSurfaceLeftPreservesNearestWindowEdge(t *testing.T) {
 	}
 	if got := expectedPopupSurfaceLeft(20, 320, 0, 1000, 1000, 1800); got != 1020 {
 		t.Fatalf("left-anchored menu mismatch: got=%d want=1020", got)
+	}
+}
+
+func TestConstrainSyncPopupRectKeepsNestedMenuInsideTile(t *testing.T) {
+	owner := winRect{Left: 0, Top: 0, Right: 500, Bottom: 700}
+	popup := winRect{Left: 430, Top: 120, Right: 680, Bottom: 520}
+	x, y, width, height, changed := constrainSyncPopupRect(popup, owner, 2)
+	if !changed || x != 248 || y != 120 || width != 250 || height != 400 {
+		t.Fatalf("nested menu clamp mismatch: x=%d y=%d width=%d height=%d changed=%v", x, y, width, height, changed)
+	}
+}
+
+func TestConstrainSyncPopupRectShrinksOversizedPopupToTile(t *testing.T) {
+	owner := winRect{Left: 100, Top: 50, Right: 400, Bottom: 350}
+	popup := winRect{Left: 20, Top: 10, Right: 700, Bottom: 800}
+	x, y, width, height, changed := constrainSyncPopupRect(popup, owner, 2)
+	if !changed || x != 102 || y != 52 || width != 296 || height != 296 {
+		t.Fatalf("oversized popup clamp mismatch: x=%d y=%d width=%d height=%d changed=%v", x, y, width, height, changed)
+	}
+}
+
+func TestConstrainSyncPopupRectLeavesContainedPopupUnchanged(t *testing.T) {
+	owner := winRect{Left: 0, Top: 0, Right: 800, Bottom: 700}
+	popup := winRect{Left: 300, Top: 100, Right: 600, Bottom: 500}
+	x, y, width, height, changed := constrainSyncPopupRect(popup, owner, 2)
+	if changed || x != 300 || y != 100 || width != 300 || height != 400 {
+		t.Fatalf("contained popup changed unexpectedly: x=%d y=%d width=%d height=%d changed=%v", x, y, width, height, changed)
+	}
+}
+
+func TestSyncPopupCandidateRejectsMainWindowAndDevTools(t *testing.T) {
+	owner := winRect{Left: 0, Top: 0, Right: 500, Bottom: 700}
+	popup := winRect{Left: 200, Top: 100, Right: 480, Bottom: 600}
+	if isSyncPopupSurfaceCandidate("Example - Google Chrome", popup, owner, false) {
+		t.Fatal("unowned browser frame must not be constrained as a popup")
+	}
+	if isSyncPopupSurfaceCandidate("DevTools - chrome-extension://example", popup, owner, true) {
+		t.Fatal("DevTools must not be constrained as a popup")
+	}
+	if !isSyncPopupSurfaceCandidate("", popup, owner, false) {
+		t.Fatal("empty-title Chrome menu surface should be constrained")
 	}
 }
 
