@@ -178,6 +178,9 @@ func TestLegacyResolveDataRootAcceptsRawBrowserFoldersWithoutDatabase(t *testing
 	if err := os.MkdirAll(filepath.Join(dataRoot, "wallet-folder", "Default"), 0755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dataRoot, "wallet-folder", "Default", "Preferences"), []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	root, dbPath, err := legacyResolveDataRoot(dataRoot)
 	if err != nil {
 		t.Fatal(err)
@@ -188,6 +191,65 @@ func TestLegacyResolveDataRootAcceptsRawBrowserFoldersWithoutDatabase(t *testing
 	profiles, err := legacyProfilesFromRawFolders(dataRoot)
 	if err != nil || len(profiles) != 1 || profiles[0].UserDataDir != "wallet-folder" || profiles[0].ProfileId == "" {
 		t.Fatalf("unexpected raw folder profiles=%#v err=%v", profiles, err)
+	}
+}
+
+func TestLegacyRawDataFoldersFindsNestedChromeProfiles(t *testing.T) {
+	dataRoot := t.TempDir()
+	nested := filepath.Join(dataRoot, "profiles", "group-a", "environment-108")
+	if err := os.MkdirAll(filepath.Join(nested, "Default", "Network"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "Local State"), []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "Default", "Network", "Cookies"), []byte("sqlite"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	folders, err := legacyRawDataFolders(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join("profiles", "group-a", "environment-108")
+	if len(folders) != 1 || folders[0] != expected {
+		t.Fatalf("nested environment not recognized: %#v", folders)
+	}
+	profiles, err := legacyProfilesFromRawFolders(dataRoot)
+	if err != nil || len(profiles) != 1 || profiles[0].ProfileName != "environment-108" || profiles[0].UserDataDir != expected {
+		t.Fatalf("unexpected nested profiles=%#v err=%v", profiles, err)
+	}
+}
+
+func TestLegacyPrepareFallsBackToFoldersWhenDatabaseIsCorrupt(t *testing.T) {
+	appRoot := filepath.Join(t.TempDir(), "new")
+	cfg := config.DefaultConfig()
+	app := NewApp(appRoot)
+	app.config = cfg
+	app.browserMgr = browser.NewManager(cfg, appRoot)
+	app.browserMgr.Profiles = map[string]*browser.Profile{}
+
+	dataRoot := filepath.Join(t.TempDir(), "old", "data")
+	profileRoot := filepath.Join(dataRoot, "profiles", "environment-9")
+	if err := os.MkdirAll(filepath.Join(profileRoot, "Default"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profileRoot, "Default", "Preferences"), []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataRoot, "app.db"), []byte("not a sqlite database"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	preview, err := app.legacyDataRecoveryPreparePath(dataRoot)
+	if err != nil {
+		t.Fatalf("corrupt database should fall back to folders: %v", err)
+	}
+	defer app.clearLegacyDataRecovery()
+	if preview.Total != 1 || preview.Restorable != 1 || len(preview.Rows) != 1 || preview.Rows[0].SourceFolderName != "environment-9" {
+		t.Fatalf("unexpected fallback preview: %+v", preview)
+	}
+	if preview.Message == "" {
+		t.Fatal("fallback preview should explain detection mode")
 	}
 }
 

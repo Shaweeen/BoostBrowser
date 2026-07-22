@@ -18,6 +18,12 @@ import (
 
 const legacyDataRecoveryTTL = 30 * time.Minute
 
+const (
+	legacyRawScanMaxDepth    = 4
+	legacyRawScanMaxDirs     = 20000
+	legacyRawScanMaxProfiles = 5000
+)
+
 type LegacyDataRecoveryRow struct {
 	EnvironmentNumber int    `json:"environmentNumber"`
 	ProfileID         string `json:"profileId"`
@@ -73,6 +79,7 @@ type legacyDataRecoverySession struct {
 	SourcePath string
 	TempRoot   string
 	Candidates []*legacyDataRecoveryCandidate
+	Notice     string
 	Timer      *time.Timer
 }
 
@@ -114,23 +121,18 @@ func (a *App) legacyDataRecoveryPreparePath(selected string) (*LegacyDataRecover
 		}
 	}()
 	profiles := make([]*browser.Profile, 0)
+	notice := ""
 	if dbPath != "" {
-		tempDB := filepath.Join(tempRoot, "app.db")
-		if err := legacyCopySQLiteSet(dbPath, tempDB); err != nil {
-			return nil, err
-		}
-		sourceDB, openErr := database.NewDB(tempDB)
-		if openErr != nil {
-			return nil, fmt.Errorf("旧版 app.db 无法打开: %w", openErr)
-		}
-		if migrateErr := sourceDB.Migrate(); migrateErr != nil {
-			_ = sourceDB.Close()
-			return nil, fmt.Errorf("旧版 app.db 结构无法升级识别: %w", migrateErr)
-		}
-		profiles, err = browser.NewSQLiteProfileDAO(sourceDB.GetConn()).List()
-		_ = sourceDB.Close()
+		profiles, err = legacyProfilesFromDatabase(dbPath, tempRoot)
 		if err != nil {
-			return nil, fmt.Errorf("读取旧版环境清单失败: %w", err)
+			rawProfiles, rawErr := legacyProfilesFromRawFolders(sourceRoot)
+			if rawErr != nil || len(rawProfiles) == 0 {
+				return nil, fmt.Errorf("旧 app.db 读取失败，文件夹扫描也未识别到环境；数据库错误: %v；扫描错误: %v", err, rawErr)
+			}
+			profiles = rawProfiles
+			notice = fmt.Sprintf("旧 app.db 不可用，已改用文件夹结构识别 %d 个环境", len(rawProfiles))
+		} else {
+			profiles, notice = legacyMergeRawFolderProfiles(sourceRoot, profiles)
 		}
 	} else {
 		profiles, err = legacyProfilesFromRawFolders(sourceRoot)
@@ -139,7 +141,7 @@ func (a *App) legacyDataRecoveryPreparePath(selected string) (*LegacyDataRecover
 		}
 	}
 	if len(profiles) == 0 {
-		return nil, fmt.Errorf("旧版 app.db 中没有可恢复的浏览器环境")
+		return nil, fmt.Errorf("未识别到可恢复的浏览器环境；请选择包含环境子文件夹的 data 根目录")
 	}
 
 	sourceMap := make(map[string]*browser.Profile, len(profiles))
@@ -213,7 +215,7 @@ func (a *App) legacyDataRecoveryPreparePath(selected string) (*LegacyDataRecover
 	if err != nil {
 		return nil, err
 	}
-	session := &legacyDataRecoverySession{ID: sessionID, CreatedAt: time.Now(), SourcePath: sourceRoot, TempRoot: tempRoot, Candidates: candidates}
+	session := &legacyDataRecoverySession{ID: sessionID, CreatedAt: time.Now(), SourcePath: sourceRoot, TempRoot: tempRoot, Candidates: candidates, Notice: notice}
 	session.Timer = time.AfterFunc(legacyDataRecoveryTTL, func() { a.clearLegacyDataRecoverySession(sessionID) })
 	a.legacyRecoveryMu.Lock()
 	old := a.legacyRecovery
@@ -396,37 +398,158 @@ func legacyProfilesFromRawFolders(sourceRoot string) ([]*browser.Profile, error)
 	}
 	profiles := make([]*browser.Profile, 0, len(folders))
 	for _, folder := range folders {
-		hash := sha256.Sum256([]byte(strings.ToLower(folder)))
-		profiles = append(profiles, &browser.Profile{
-			ProfileId:   "recovered-folder-" + hex.EncodeToString(hash[:8]),
-			ProfileName: folder,
-			UserDataDir: folder,
-		})
+		profiles = append(profiles, legacyRawFolderProfile(folder))
 	}
 	return profiles, nil
 }
 
+func legacyProfilesFromDatabase(dbPath, tempRoot string) ([]*browser.Profile, error) {
+	tempDB := filepath.Join(tempRoot, "app.db")
+	if err := legacyCopySQLiteSet(dbPath, tempDB); err != nil {
+		return nil, err
+	}
+	sourceDB, err := database.NewDB(tempDB)
+	if err != nil {
+		return nil, fmt.Errorf("旧版 app.db 无法打开: %w", err)
+	}
+	if err := sourceDB.Migrate(); err != nil {
+		_ = sourceDB.Close()
+		return nil, fmt.Errorf("旧版 app.db 结构无法升级识别: %w", err)
+	}
+	profiles, err := browser.NewSQLiteProfileDAO(sourceDB.GetConn()).List()
+	_ = sourceDB.Close()
+	if err != nil {
+		return nil, fmt.Errorf("读取旧版环境清单失败: %w", err)
+	}
+	if len(profiles) == 0 {
+		return nil, fmt.Errorf("旧 app.db 中没有环境记录")
+	}
+	return profiles, nil
+}
+
+func legacyMergeRawFolderProfiles(sourceRoot string, profiles []*browser.Profile) ([]*browser.Profile, string) {
+	folders, err := legacyRawDataFolders(sourceRoot)
+	if err != nil || len(folders) == 0 {
+		return profiles, ""
+	}
+	known := make(map[string]bool, len(profiles))
+	for _, profile := range profiles {
+		if profile == nil {
+			continue
+		}
+		sourceDir := legacyResolveProfileSourceDir(sourceRoot, profile)
+		if backupPathExists(sourceDir) {
+			known[backupNormalizePath(sourceDir)] = true
+		}
+	}
+	added := 0
+	for _, folder := range folders {
+		absolute := filepath.Join(sourceRoot, folder)
+		if known[backupNormalizePath(absolute)] {
+			continue
+		}
+		profiles = append(profiles, legacyRawFolderProfile(folder))
+		added++
+	}
+	if added == 0 {
+		return profiles, ""
+	}
+	return profiles, fmt.Sprintf("除 app.db 清单外，又从文件夹结构补充识别 %d 个环境", added)
+}
+
+func legacyRawFolderProfile(folder string) *browser.Profile {
+	normalized := filepath.Clean(folder)
+	hash := sha256.Sum256([]byte(strings.ToLower(filepath.ToSlash(normalized))))
+	return &browser.Profile{
+		ProfileId:   "recovered-folder-" + hex.EncodeToString(hash[:8]),
+		ProfileName: filepath.Base(normalized),
+		UserDataDir: normalized,
+	}
+}
+
 func legacyRawDataFolders(sourceRoot string) ([]string, error) {
-	entries, err := os.ReadDir(sourceRoot)
+	type scanNode struct {
+		path  string
+		rel   string
+		depth int
+	}
+	root, err := filepath.Abs(sourceRoot)
 	if err != nil {
 		return nil, err
 	}
+	queue := []scanNode{{path: root, depth: 0}}
 	folders := make([]string, 0)
-	for _, entry := range entries {
-		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+	visited := 0
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		entries, readErr := os.ReadDir(node.path)
+		if readErr != nil {
+			if node.depth == 0 {
+				return nil, readErr
+			}
 			continue
 		}
-		name := strings.TrimSpace(entry.Name())
-		if name == "" || strings.EqualFold(name, "recovery-backups") {
-			continue
-		}
-		defaultDir := filepath.Join(sourceRoot, name, "Default")
-		if info, statErr := os.Lstat(defaultDir); statErr == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-			folders = append(folders, name)
+		for _, entry := range entries {
+			if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+				continue
+			}
+			visited++
+			if visited > legacyRawScanMaxDirs {
+				return nil, fmt.Errorf("备份目录层级过大，已扫描 %d 个子目录；请直接选择环境数据所在的 data 根目录", visited)
+			}
+			name := strings.TrimSpace(entry.Name())
+			if name == "" || legacySkipRawScanDirectory(name) {
+				continue
+			}
+			childPath := filepath.Join(node.path, name)
+			childRel := name
+			if node.rel != "" {
+				childRel = filepath.Join(node.rel, name)
+			}
+			if legacyLooksLikeChromeUserDataDir(childPath) {
+				folders = append(folders, childRel)
+				if len(folders) > legacyRawScanMaxProfiles {
+					return nil, fmt.Errorf("识别到的环境超过 %d 个，请分批选择 data 目录", legacyRawScanMaxProfiles)
+				}
+				continue
+			}
+			if node.depth+1 < legacyRawScanMaxDepth {
+				queue = append(queue, scanNode{path: childPath, rel: childRel, depth: node.depth + 1})
+			}
 		}
 	}
 	sort.Slice(folders, func(i, j int) bool { return strings.ToLower(folders[i]) < strings.ToLower(folders[j]) })
 	return folders, nil
+}
+
+func legacyLooksLikeChromeUserDataDir(dir string) bool {
+	defaultDir := filepath.Join(dir, "Default")
+	info, err := os.Lstat(defaultDir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	for _, signal := range []string{
+		filepath.Join(dir, "Local State"),
+		filepath.Join(defaultDir, "Preferences"),
+		filepath.Join(defaultDir, "History"),
+		filepath.Join(defaultDir, "Cookies"),
+		filepath.Join(defaultDir, "Network", "Cookies"),
+	} {
+		if info, statErr := os.Lstat(signal); statErr == nil && !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func legacySkipRawScanDirectory(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "default", "cache", "code cache", "gpucache", "dawncache", "shadercache", "grshadercache", "service worker", "crashpad", "extensions", "recovery-backups", "updates", "logs", "temp", "tmp":
+		return true
+	default:
+		return strings.HasPrefix(strings.ToLower(strings.TrimSpace(name)), "profile ")
+	}
 }
 
 func legacyResolveProfileSourceDir(sourceRoot string, profile *browser.Profile) string {
@@ -537,6 +660,9 @@ func legacyRecoveryPreview(session *legacyDataRecoverySession) *LegacyDataRecove
 		preview.Rows = append(preview.Rows, legacyRecoveryRow(candidate))
 	}
 	preview.Message = fmt.Sprintf("识别到 %d 个备份环境，可恢复或按文件夹名覆盖 %d 个", preview.Total, preview.Restorable)
+	if strings.TrimSpace(session.Notice) != "" {
+		preview.Message += "；" + session.Notice
+	}
 	return preview
 }
 

@@ -8,6 +8,7 @@ import { defaultSettings } from './types'
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 import { useBackupStore } from '../../store/backupStore'
 import { triggerUpdateCheck } from '../updater/UpdateChecker'
+import { resolveActionErrorMessage } from '../browser/utils/actionErrors'
 
 interface BackupExportProgress {
   phase: string
@@ -329,7 +330,7 @@ export function SettingsPage() {
       setLegacyModalOpen(true)
       if (preview.restorable === 0) toast.warning('旧 data 已识别，但没有可安全恢复的环境')
     } catch (error: any) {
-      toast.error(error?.message || '旧 data 识别失败')
+      toast.error(resolveActionErrorMessage(error, '旧 data 识别失败'))
     } finally {
       setActionLoading('none')
     }
@@ -357,8 +358,9 @@ export function SettingsPage() {
       setLegacyPreview(null)
       setLegacyProgress(null)
     } catch (error: any) {
-      setLegacyProgress(prev => ({ phase: 'error', progress: prev?.progress || 0, message: error?.message || '恢复失败' }))
-      toast.error(error?.message || '恢复失败')
+      const message = resolveActionErrorMessage(error, '旧 data 恢复失败')
+      setLegacyProgress(prev => ({ phase: 'error', progress: prev?.progress || 0, message }))
+      toast.error(message)
     } finally {
       setActionLoading('none')
     }
