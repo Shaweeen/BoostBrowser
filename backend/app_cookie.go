@@ -34,6 +34,7 @@ type cdpTarget struct {
 	Title                string `json:"title"`
 	WebSocketDebuggerUrl string `json:"webSocketDebuggerUrl"`
 	Type                 string `json:"type"`
+	OpenerID             string `json:"openerId,omitempty"`
 }
 
 type cdpBrowserVersion struct {
@@ -79,18 +80,30 @@ func cdpCall(debugPort int, method string, params map[string]any) (map[string]an
 		return nil, fmt.Errorf("CDP targets 解析失败或为空")
 	}
 
-	wsURL := ""
+	var selected cdpTarget
 	for _, t := range targets {
 		if t.Type == "page" && t.WebSocketDebuggerUrl != "" {
-			wsURL = t.WebSocketDebuggerUrl
+			selected = t
 			break
 		}
 	}
-	if wsURL == "" && targets[0].WebSocketDebuggerUrl != "" {
-		wsURL = targets[0].WebSocketDebuggerUrl
+	if selected.WebSocketDebuggerUrl == "" && targets[0].WebSocketDebuggerUrl != "" {
+		selected = targets[0]
 	}
-	if wsURL == "" {
+	if selected.WebSocketDebuggerUrl == "" {
 		return nil, fmt.Errorf("未找到可用的 WebSocket 调试地址")
+	}
+	return cdpCallTarget(selected, method, params)
+}
+
+// cdpCallTarget sends a command to one explicit page target. Multi-window
+// browser profiles can expose several page WebSockets on the same debug port;
+// callers that already resolved the active popup must not fall back to the
+// first tab returned by /json.
+func cdpCallTarget(target cdpTarget, method string, params map[string]any) (map[string]any, error) {
+	wsURL := strings.TrimSpace(target.WebSocketDebuggerUrl)
+	if wsURL == "" {
+		return nil, fmt.Errorf("CDP target %s 没有 WebSocket 调试地址", target.ID)
 	}
 
 	// 2. 建立 WebSocket 连接

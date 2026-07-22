@@ -110,12 +110,124 @@ type SyncConfig struct {
 }
 
 type cdpKeyEvent struct {
-	ports     []int
-	hwnds     []windows.HWND
-	down      bool
-	vk        uint32
-	character rune
-	modifiers int
+	masterPort int
+	ports      []int
+	hwnds      []windows.HWND
+	down       bool
+	vk         uint32
+	character  rune
+	modifiers  int
+}
+
+func pageCDPTargets(debugPort int) []cdpTarget {
+	targets, err := listCDPTargets(debugPort)
+	if err != nil {
+		return nil
+	}
+	pages := make([]cdpTarget, 0, len(targets))
+	for _, target := range targets {
+		if strings.EqualFold(strings.TrimSpace(target.Type), "page") && strings.TrimSpace(target.WebSocketDebuggerUrl) != "" {
+			pages = append(pages, target)
+		}
+	}
+	return pages
+}
+
+func focusedCDPTarget(debugPort int) (cdpTarget, bool) {
+	pages := pageCDPTargets(debugPort)
+	for _, target := range pages {
+		result, err := cdpCallTarget(target, "Runtime.evaluate", map[string]any{
+			"expression": "document.hasFocus()", "returnByValue": true,
+		})
+		if err != nil {
+			continue
+		}
+		value, ok := cdpRuntimeValue(result)
+		focused, _ := value.(bool)
+		if ok && focused {
+			return target, true
+		}
+	}
+	if len(pages) > 0 {
+		return pages[0], true
+	}
+	return cdpTarget{}, false
+}
+
+func cdpTargetURLWithoutFragment(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if index := strings.IndexByte(raw, '#'); index >= 0 {
+		raw = raw[:index]
+	}
+	return raw
+}
+
+func cdpTargetURLDocument(raw string) string {
+	raw = cdpTargetURLWithoutFragment(raw)
+	if index := strings.IndexByte(raw, '?'); index >= 0 {
+		raw = raw[:index]
+	}
+	return raw
+}
+
+func syncCDPTargetMatchScore(master, candidate cdpTarget) int {
+	if !strings.EqualFold(strings.TrimSpace(master.Type), strings.TrimSpace(candidate.Type)) {
+		return -1
+	}
+	score := 0
+	masterURL := strings.TrimSpace(master.URL)
+	candidateURL := strings.TrimSpace(candidate.URL)
+	if masterURL != "" && masterURL == candidateURL {
+		score += 10000
+	} else if masterURL != "" && cdpTargetURLWithoutFragment(masterURL) == cdpTargetURLWithoutFragment(candidateURL) {
+		score += 6000
+	} else if masterURL != "" && cdpTargetURLDocument(masterURL) == cdpTargetURLDocument(candidateURL) {
+		score += 4000
+	}
+	if master.Title != "" && strings.EqualFold(strings.TrimSpace(master.Title), strings.TrimSpace(candidate.Title)) {
+		score += 1000
+	}
+	return score
+}
+
+func popupLikeCDPTarget(target cdpTarget) bool {
+	if strings.TrimSpace(target.OpenerID) != "" {
+		return true
+	}
+	url := strings.ToLower(strings.TrimSpace(target.URL))
+	return strings.HasPrefix(url, "chrome-extension://") &&
+		(strings.Contains(url, "popup") || strings.Contains(url, "notification") || strings.Contains(url, "confirm"))
+}
+
+func matchingFollowerCDPTarget(master cdpTarget, debugPort int, waitForPopup bool) (cdpTarget, bool) {
+	attempts := 1
+	if waitForPopup {
+		attempts = 5
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
+		pages := pageCDPTargets(debugPort)
+		if len(pages) == 1 {
+			if !popupLikeCDPTarget(master) || syncCDPTargetMatchScore(master, pages[0]) > 0 {
+				return pages[0], true
+			}
+		}
+		bestScore := -1
+		var best cdpTarget
+		for _, candidate := range pages {
+			score := syncCDPTargetMatchScore(master, candidate)
+			if score > bestScore {
+				bestScore = score
+				best = candidate
+			}
+		}
+		if bestScore > 0 {
+			return best, true
+		}
+		if attempt+1 < attempts {
+			time.Sleep(40 * time.Millisecond)
+		}
+	}
+	return cdpTarget{}, false
 }
 
 // NewInputSyncer 创建输入同步器
@@ -746,6 +858,22 @@ func mapPointBetweenInputSurfaces(screenX, screenY int, masterSurface, followerS
 	return MAKELONG(uint16(int16(fx)), uint16(int16(fy))), true
 }
 
+func mapScreenPointBetweenInputSurfaces(screenX, screenY int, masterSurface, followerSurface windows.HWND) (int, int, bool) {
+	mx, my := screenToClient(masterSurface, screenX, screenY)
+	mw, mh, ok := getClientSize(masterSurface)
+	if !ok || mw <= 0 || mh <= 0 || mx < 0 || my < 0 || mx > mw || my > mh {
+		return 0, 0, false
+	}
+	fw, fh, ok := getClientSize(followerSurface)
+	if !ok || fw <= 0 || fh <= 0 {
+		return 0, 0, false
+	}
+	fx := int(float64(mx) / float64(mw) * float64(fw))
+	fy := int(float64(my) / float64(mh) * float64(fh))
+	left, top, _, _ := getWindowRect(followerSurface)
+	return int(left) + fx, int(top) + fy, true
+}
+
 func mapChromeInputTarget(screenX, screenY int, masterMain, followerMain windows.HWND) (windows.HWND, uintptr, bool) {
 	masterSurface := chromeInputSurfaceAtPoint(masterMain, screenX, screenY)
 	if masterSurface == masterMain {
@@ -945,12 +1073,30 @@ func findChromeRenderChild(hwnd windows.HWND) windows.HWND {
 	return found
 }
 
-func pointInsideChromeRender(hwnd windows.HWND, screenX, screenY int) bool {
-	render := findChromeRenderChild(hwnd)
-	if render == 0 {
-		return false
+func chromePageSurfaceAtPoint(mainHwnd windows.HWND, screenX, screenY int) (windows.HWND, windows.HWND, bool) {
+	surface := chromeInputSurfaceAtPoint(mainHwnd, screenX, screenY)
+	render := findChromeRenderChild(surface)
+	if render == 0 || !pointInsideWindow(render, screenX, screenY) {
+		return surface, 0, false
 	}
-	return pointInsideWindow(render, screenX, screenY)
+	return surface, render, true
+}
+
+func pointInsideChromeRender(hwnd windows.HWND, screenX, screenY int) bool {
+	_, _, inside := chromePageSurfaceAtPoint(hwnd, screenX, screenY)
+	return inside
+}
+
+func followerRenderForMasterSurface(masterSurface, masterMain, followerMain windows.HWND) (windows.HWND, windows.HWND, bool) {
+	followerSurface := followerMain
+	if masterSurface != masterMain {
+		followerSurface = findMatchingChromeInputSurface(masterSurface, masterMain, followerMain)
+		if followerSurface == followerMain {
+			return 0, 0, false
+		}
+	}
+	render := findChromeRenderChild(followerSurface)
+	return followerSurface, render, render != 0
 }
 
 // ============================================================================
@@ -1194,6 +1340,30 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 			keyState |= MK_SHIFT
 		}
 		wheelWParam := uintptr(uint32(keyState) | uint32(wheelDelta)<<16)
+		if keyState&MK_CONTROL != 0 {
+			masterSurface := chromeInputSurfaceAtPoint(s.masterHwnd, screenX, screenY)
+			for _, hwnd := range followers {
+				if !isWindow(hwnd) {
+					continue
+				}
+				followerSurface := hwnd
+				if masterSurface != s.masterHwnd {
+					followerSurface = findMatchingChromeInputSurface(masterSurface, s.masterHwnd, hwnd)
+					if followerSurface == hwnd {
+						continue
+					}
+				}
+				targetX, targetY, ok := mapScreenPointBetweenInputSurfaces(screenX, screenY, masterSurface, followerSurface)
+				if !ok || targetX < -32768 || targetX > 32767 || targetY < -32768 || targetY > 32767 {
+					continue
+				}
+				wheelLParam := MAKELONG(uint16(int16(targetX)), uint16(int16(targetY)))
+				s.dispatchWithRandomDelay(followerSurface, func() {
+					procPostMessageW.Call(uintptr(followerSurface), uintptr(msg), wheelWParam, wheelLParam)
+				})
+			}
+			return callNextHook(nCode, wParam, lParam)
+		}
 		if pointInsideChromeRender(s.masterHwnd, screenX, screenY) {
 			s.dispatchPageWheelViaCDP(msg, screenX, screenY, int16(wheelDelta), keyState)
 			return callNextHook(nCode, wParam, lParam)
@@ -1290,17 +1460,29 @@ func (s *InputSyncer) keyHookCallback(nCode int, wParam uintptr, lParam uintptr)
 	}
 
 	atomic.AddInt32(&s.keyCount, 1)
-	if atomic.LoadInt32(&s.pageKeyboardFocus) == 1 {
-		s.dispatchPageKeyViaCDP(msg, hook.VkCode, hook.ScanCode, hook.Flags)
-		return callNextHook(nCode, wParam, lParam)
-	}
-
 	// 获取跟随窗口快照
 	followers := s.getFollowerSnapshot()
 
 	// 检测修饰键状态
 	ctrlPressed := isKeyDown(VK_CONTROL)
 	altPressed := isKeyDown(VK_MENU)
+	if ctrlPressed && isBrowserZoomVirtualKey(vk) {
+		if msg == WM_KEYDOWN {
+			shiftPressed := isKeyDown(VK_SHIFT)
+			for _, hwnd := range followers {
+				if isWindow(hwnd) {
+					s.dispatchBrowserZoomShortcut(hwnd, vk, shiftPressed)
+				}
+			}
+		}
+		return callNextHook(nCode, wParam, lParam)
+	}
+
+	if atomic.LoadInt32(&s.pageKeyboardFocus) == 1 {
+		s.dispatchPageKeyViaCDP(msg, hook.VkCode, hook.ScanCode, hook.Flags)
+		return callNextHook(nCode, wParam, lParam)
+	}
+
 	keyboardLayout := foregroundKeyboardLayout()
 	imeActive := keyboardLayoutUsesIME(keyboardLayout)
 
@@ -1372,8 +1554,35 @@ func (s *InputSyncer) keyHookCallback(nCode int, wParam uintptr, lParam uintptr)
 	return callNextHook(nCode, wParam, lParam)
 }
 
+func isBrowserZoomVirtualKey(vk uint32) bool {
+	switch vk {
+	case 0x30, // 0: reset zoom
+		0x6B, 0x6D, // numpad add/subtract
+		0xBB, 0xBD: // OEM plus/minus
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *InputSyncer) dispatchBrowserZoomShortcut(hwnd windows.HWND, vk uint32, shiftPressed bool) {
+	s.dispatchWithRandomDelay(hwnd, func() {
+		procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, VK_CONTROL, makeKeyLParam(VK_CONTROL, true))
+		if shiftPressed {
+			procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, VK_SHIFT, makeKeyLParam(VK_SHIFT, true))
+		}
+		procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, uintptr(vk), makeKeyLParam(vk, true))
+		procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, uintptr(vk), makeKeyLParam(vk, false))
+		if shiftPressed {
+			procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, VK_SHIFT, makeKeyLParam(VK_SHIFT, false))
+		}
+		procPostMessageW.Call(uintptr(hwnd), WM_KEYUP, VK_CONTROL, makeKeyLParam(VK_CONTROL, false))
+	})
+}
+
 func (s *InputSyncer) dispatchPageKeyViaCDP(msg uint32, vk, scanCode, flags uint32) {
 	s.mu.Lock()
+	masterPort := s.masterDebug
 	ports := append([]int(nil), s.followerDebug...)
 	hwnds := append([]windows.HWND(nil), s.followerHwnds...)
 	s.mu.Unlock()
@@ -1395,7 +1604,7 @@ func (s *InputSyncer) dispatchPageKeyViaCDP(msg uint32, vk, scanCode, flags uint
 	}
 	down := msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN
 	ch := toUnicode(uint16(vk), uint16(scanCode), (flags&0x01) != 0)
-	event := cdpKeyEvent{ports: ports, hwnds: hwnds, down: down, vk: vk, character: ch, modifiers: modifiers}
+	event := cdpKeyEvent{masterPort: masterPort, ports: ports, hwnds: hwnds, down: down, vk: vk, character: ch, modifiers: modifiers}
 	select {
 	case s.cdpKeyQueue <- event:
 	default:
@@ -1409,6 +1618,7 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
 		case <-stopCh:
 			return
 		case event := <-queue:
+			masterTarget, hasMasterTarget := focusedCDPTarget(event.masterPort)
 			var wg sync.WaitGroup
 			for i, hwnd := range event.hwnds {
 				port := 0
@@ -1419,12 +1629,16 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
 				go func(debugPort int, follower windows.HWND) {
 					s.dispatchWithRandomDelay(follower, func() {
 						defer wg.Done()
-						if debugPort <= 0 {
+						if debugPort <= 0 || !hasMasterTarget {
 							s.dispatchPageKeyFallback(follower, event)
 							return
 						}
+						followerTarget, ok := matchingFollowerCDPTarget(masterTarget, debugPort, true)
+						if !ok {
+							return
+						}
 						if event.down && event.character != 0 && event.modifiers&3 == 0 {
-							if _, err := cdpCall(debugPort, "Input.insertText", map[string]any{"text": string(event.character)}); err != nil {
+							if _, err := cdpCallTarget(followerTarget, "Input.insertText", map[string]any{"text": string(event.character)}); err != nil {
 								s.dispatchPageKeyFallback(follower, event)
 							}
 							return
@@ -1434,7 +1648,7 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
 							"windowsVirtualKeyCode": int(event.vk), "nativeVirtualKeyCode": int(event.vk),
 							"modifiers": event.modifiers, "key": cdpKeyName(event.vk),
 						}
-						if _, err := cdpCall(debugPort, "Input.dispatchKeyEvent", params); err != nil {
+						if _, err := cdpCallTarget(followerTarget, "Input.dispatchKeyEvent", params); err != nil {
 							s.dispatchPageKeyFallback(follower, event)
 						}
 					})
@@ -1495,8 +1709,8 @@ func (s *InputSyncer) pageInputDispatchLoop(stopCh <-chan struct{}, queue <-chan
 }
 
 func (s *InputSyncer) dispatchPageMouseViaCDPNow(msg uint32, screenX, screenY int) {
-	masterRender := findChromeRenderChild(s.masterHwnd)
-	if masterRender == 0 {
+	masterSurface, masterRender, insidePage := chromePageSurfaceAtPoint(s.masterHwnd, screenX, screenY)
+	if !insidePage {
 		return
 	}
 	ml, mt, mr, mb := getWindowRect(masterRender)
@@ -1506,9 +1720,11 @@ func (s *InputSyncer) dispatchPageMouseViaCDPNow(msg uint32, screenX, screenY in
 	rx := float64(screenX-int(ml)) / float64(mr-ml)
 	ry := float64(screenY-int(mt)) / float64(mb-mt)
 	s.mu.Lock()
+	masterPort := s.masterDebug
 	ports := append([]int(nil), s.followerDebug...)
 	hwnds := append([]windows.HWND(nil), s.followerHwnds...)
 	s.mu.Unlock()
+	masterTarget, hasMasterTarget := focusedCDPTarget(masterPort)
 	button := "left"
 	if msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP {
 		button = "right"
@@ -1529,13 +1745,17 @@ func (s *InputSyncer) dispatchPageMouseViaCDPNow(msg uint32, screenX, screenY in
 		wg.Add(1)
 		go func(port int, hwnd windows.HWND) {
 			defer wg.Done()
-			if port <= 0 {
+			if port <= 0 || !hasMasterTarget {
 				s.dispatchPageMouseFallback(hwnd, msg, screenX, screenY)
 				return
 			}
-			render := findChromeRenderChild(hwnd)
-			if render == 0 {
+			_, render, ok := followerRenderForMasterSurface(masterSurface, s.masterHwnd, hwnd)
+			if !ok {
 				s.dispatchPageMouseFallback(hwnd, msg, screenX, screenY)
+				return
+			}
+			followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, true)
+			if !ok {
 				return
 			}
 			fl, ft, fr, fb := getWindowRect(render)
@@ -1545,7 +1765,7 @@ func (s *InputSyncer) dispatchPageMouseViaCDPNow(msg uint32, screenX, screenY in
 				_, buttons = pageMouseButton(msg)
 			}
 			s.dispatchWithRandomDelay(hwnd, func() {
-				if _, err := cdpCall(port, "Input.dispatchMouseEvent", map[string]any{
+				if _, err := cdpCallTarget(followerTarget, "Input.dispatchMouseEvent", map[string]any{
 					"type": eventType, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": 1,
 				}); err != nil {
 					s.dispatchPageMouseFallback(hwnd, msg, screenX, screenY)
@@ -1585,8 +1805,8 @@ func (s *InputSyncer) dispatchPageMouseMoveViaCDP(screenX, screenY int, buttonDo
 }
 
 func (s *InputSyncer) dispatchPageMouseMoveViaCDPNow(screenX, screenY int, buttonDownMsg uint32) {
-	masterRender := findChromeRenderChild(s.masterHwnd)
-	if masterRender == 0 {
+	masterSurface, masterRender, insidePage := chromePageSurfaceAtPoint(s.masterHwnd, screenX, screenY)
+	if !insidePage {
 		return
 	}
 	ml, mt, mr, mb := getWindowRect(masterRender)
@@ -1597,9 +1817,11 @@ func (s *InputSyncer) dispatchPageMouseMoveViaCDPNow(screenX, screenY int, butto
 	ry := float64(screenY-int(mt)) / float64(mb-mt)
 	button, buttons := pageMouseButton(buttonDownMsg)
 	s.mu.Lock()
+	masterPort := s.masterDebug
 	ports := append([]int(nil), s.followerDebug...)
 	hwnds := append([]windows.HWND(nil), s.followerHwnds...)
 	s.mu.Unlock()
+	masterTarget, hasMasterTarget := focusedCDPTarget(masterPort)
 	var wg sync.WaitGroup
 	for i, hwnd := range hwnds {
 		port := 0
@@ -1609,14 +1831,21 @@ func (s *InputSyncer) dispatchPageMouseMoveViaCDPNow(screenX, screenY int, butto
 		wg.Add(1)
 		go func(port int, hwnd windows.HWND) {
 			defer wg.Done()
-			render := findChromeRenderChild(hwnd)
-			if port <= 0 || render == 0 {
+			if port <= 0 || !hasMasterTarget {
+				return
+			}
+			_, render, ok := followerRenderForMasterSurface(masterSurface, s.masterHwnd, hwnd)
+			if !ok {
+				return
+			}
+			followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, false)
+			if !ok {
 				return
 			}
 			fl, ft, fr, fb := getWindowRect(render)
 			x, y := rx*float64(fr-fl), ry*float64(fb-ft)
 			s.dispatchWithRandomDelay(hwnd, func() {
-				_, _ = cdpCall(port, "Input.dispatchMouseEvent", map[string]any{
+				_, _ = cdpCallTarget(followerTarget, "Input.dispatchMouseEvent", map[string]any{
 					"type": "mouseMoved", "x": x, "y": y, "button": button, "buttons": buttons,
 				})
 			})
@@ -1632,8 +1861,8 @@ func (s *InputSyncer) dispatchPageWheelViaCDP(msg uint32, screenX, screenY int, 
 }
 
 func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY int, delta int16, keyState uint16) {
-	masterRender := findChromeRenderChild(s.masterHwnd)
-	if masterRender == 0 {
+	masterSurface, masterRender, insidePage := chromePageSurfaceAtPoint(s.masterHwnd, screenX, screenY)
+	if !insidePage {
 		return
 	}
 	ml, mt, mr, mb := getWindowRect(masterRender)
@@ -1657,9 +1886,11 @@ func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY in
 		modifiers |= 8
 	}
 	s.mu.Lock()
+	masterPort := s.masterDebug
 	ports := append([]int(nil), s.followerDebug...)
 	hwnds := append([]windows.HWND(nil), s.followerHwnds...)
 	s.mu.Unlock()
+	masterTarget, hasMasterTarget := focusedCDPTarget(masterPort)
 	var wg sync.WaitGroup
 	for i, hwnd := range hwnds {
 		port := 0
@@ -1669,15 +1900,23 @@ func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY in
 		wg.Add(1)
 		go func(port int, hwnd windows.HWND) {
 			defer wg.Done()
-			render := findChromeRenderChild(hwnd)
-			if port <= 0 || render == 0 {
+			if port <= 0 || !hasMasterTarget {
 				s.dispatchPageWheelFallback(hwnd, msg, screenX, screenY, delta, keyState)
+				return
+			}
+			_, render, ok := followerRenderForMasterSurface(masterSurface, s.masterHwnd, hwnd)
+			if !ok {
+				s.dispatchPageWheelFallback(hwnd, msg, screenX, screenY, delta, keyState)
+				return
+			}
+			followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, true)
+			if !ok {
 				return
 			}
 			fl, ft, fr, fb := getWindowRect(render)
 			x, y := rx*float64(fr-fl), ry*float64(fb-ft)
 			s.dispatchWithRandomDelay(hwnd, func() {
-				if _, err := cdpCall(port, "Input.dispatchMouseEvent", map[string]any{
+				if _, err := cdpCallTarget(followerTarget, "Input.dispatchMouseEvent", map[string]any{
 					"type": "mouseWheel", "x": x, "y": y,
 					"deltaX": deltaX, "deltaY": deltaY, "modifiers": modifiers,
 				}); err != nil {

@@ -86,12 +86,35 @@ function extensionIcon(name: string) {
   )
 }
 
+function matchesProfileSearch(profile: BrowserProfile, query: string) {
+  const tokens = query
+    .trim()
+    .toLowerCase()
+    .split(/[\s,，;；]+/)
+    .filter(Boolean)
+  if (tokens.length === 0) return true
+
+  const name = (profile.profileName || '').toLowerCase()
+  const profileId = (profile.profileId || '').toLowerCase()
+  const launchCode = (profile.launchCode || '').toLowerCase()
+  const nameNumbers = name.match(/\d+/g) || []
+
+  return tokens.some(token => {
+    if (/^\d+$/.test(token)) {
+      const normalized = String(Number(token))
+      return nameNumbers.some(value => String(Number(value)) === normalized) || launchCode === token
+    }
+    return name.includes(token) || profileId.includes(token) || launchCode.includes(token)
+  })
+}
+
 export function ExtensionManagementPage() {
   const [extensions, setExtensions] = useState<ManagedExtension[]>(() => loadExtensions())
   const [profiles, setProfiles] = useState<BrowserProfile[]>([])
   const [appliedGlobalAddresses, setAppliedGlobalAddresses] = useState<Set<string>>(() => new Set())
   const [activePlatform, setActivePlatform] = useState<'all' | ExtensionPlatform>('all')
   const [keyword, setKeyword] = useState('')
+  const [profileKeyword, setProfileKeyword] = useState('')
   const [uploadOpen, setUploadOpen] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
   const [rabbyOpen, setRabbyOpen] = useState(false)
@@ -179,8 +202,16 @@ export function ExtensionManagementPage() {
 
   const currentExtension = extensions.find(item => item.id === currentId) || null
   const selectedCount = form.distributionMode === 'global' ? profiles.length : form.profileIds.length
+  const filteredProfiles = useMemo(
+    () => profiles.filter(profile => matchesProfileSearch(profile, profileKeyword)),
+    [profiles, profileKeyword],
+  )
+  const selectedProfileIds = useMemo(() => new Set(form.profileIds), [form.profileIds])
+  const allProfilesSelected = profiles.length > 0 && profiles.every(profile => selectedProfileIds.has(profile.profileId))
+  const allFilteredProfilesSelected = filteredProfiles.length > 0 && filteredProfiles.every(profile => selectedProfileIds.has(profile.profileId))
 
   const resetForm = () => {
+    setProfileKeyword('')
     setForm({
       name: '',
       description: '',
@@ -199,6 +230,7 @@ export function ExtensionManagementPage() {
   }
 
   const openConfig = (item: ManagedExtension) => {
+    setProfileKeyword('')
     setCurrentId(item.id)
     setForm({
       name: item.name,
@@ -221,6 +253,14 @@ export function ExtensionManagementPage() {
           ? prev.profileIds.filter(id => id !== profileId)
           : [...prev.profileIds, profileId],
       }
+    })
+  }
+
+  const setProfileSelection = (profileIds: string[], selected: boolean) => {
+    setForm(prev => {
+      const next = new Set(prev.profileIds)
+      profileIds.forEach(profileId => selected ? next.add(profileId) : next.delete(profileId))
+      return { ...prev, profileIds: Array.from(next) }
     })
   }
 
@@ -593,15 +633,46 @@ export function ExtensionManagementPage() {
             <div className="rounded-xl border border-[var(--color-border-default)] overflow-hidden">
               <div className="flex items-center justify-between px-4 py-3 bg-[var(--color-bg-muted)] border-b border-[var(--color-border-muted)]">
                 <div className="text-sm font-medium text-[var(--color-text-primary)]">选择分配实例</div>
-                <div className="text-xs text-[var(--color-text-muted)]">已选 {selectedCount} 个</div>
+                <div className="text-xs text-[var(--color-text-muted)]">已选 {selectedCount} / {profiles.length} 个</div>
+              </div>
+              <div className="flex items-center gap-2 px-3 py-2.5 border-b border-[var(--color-border-muted)] bg-[var(--color-bg-surface)]">
+                <div className="relative flex-1 min-w-0">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--color-text-muted)]" />
+                  <Input
+                    value={profileKeyword}
+                    onChange={event => setProfileKeyword(event.target.value)}
+                    placeholder="搜索编号/名称，多个编号用逗号分隔"
+                    className="pl-9"
+                  />
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => setProfileSelection(filteredProfiles.map(profile => profile.profileId), !allFilteredProfilesSelected)}
+                  disabled={filteredProfiles.length === 0}
+                >
+                  {allFilteredProfilesSelected ? '取消结果' : `选择结果${profileKeyword.trim() ? ` (${filteredProfiles.length})` : ''}`}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => setProfileSelection(profiles.map(profile => profile.profileId), !allProfilesSelected)}
+                  disabled={profiles.length === 0}
+                >
+                  {allProfilesSelected ? '取消全选' : '全选'}
+                </Button>
               </div>
               <div className="max-h-56 overflow-auto divide-y divide-[var(--color-border-muted)]">
                 {profiles.length === 0 ? (
                   <div className="px-4 py-8 text-sm text-center text-[var(--color-text-muted)]">暂无实例</div>
-                ) : profiles.map(profile => (
+                ) : filteredProfiles.length === 0 ? (
+                  <div className="px-4 py-8 text-sm text-center text-[var(--color-text-muted)]">未找到匹配的实例</div>
+                ) : filteredProfiles.map(profile => (
                   <label key={profile.profileId} className="flex items-center justify-between px-4 py-2.5 cursor-pointer hover:bg-[var(--color-bg-hover)]">
                     <span className="flex items-center gap-2 text-sm text-[var(--color-text-primary)]">
-                      <input type="checkbox" className="accent-[var(--color-accent)]" checked={form.profileIds.includes(profile.profileId)} onChange={() => toggleProfile(profile.profileId)} />
+                      <input type="checkbox" className="accent-[var(--color-accent)]" checked={selectedProfileIds.has(profile.profileId)} onChange={() => toggleProfile(profile.profileId)} />
                       {profile.profileName || profile.profileId}
                     </span>
                     <span className={`text-xs ${profile.running ? 'text-green-600' : 'text-[var(--color-text-muted)]'}`}>{profile.running ? '运行中' : '未启动'}</span>

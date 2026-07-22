@@ -113,6 +113,53 @@ func TestExpectedPopupSurfaceLeftPreservesNearestWindowEdge(t *testing.T) {
 	}
 }
 
+func TestSyncCDPTargetMatchPrefersCorrespondingPopup(t *testing.T) {
+	master := cdpTarget{Type: "page", URL: "chrome-extension://wallet/popup.html#/sign", Title: "Wallet"}
+	matching := cdpTarget{Type: "page", URL: "chrome-extension://wallet/popup.html#/sign", Title: "Wallet"}
+	mainTab := cdpTarget{Type: "page", URL: "https://example.com/", Title: "Example"}
+	if syncCDPTargetMatchScore(master, matching) <= syncCDPTargetMatchScore(master, mainTab) {
+		t.Fatal("corresponding popup target must win over the profile main tab")
+	}
+}
+
+func TestSyncCDPTargetMatchAllowsSamePopupRouteBase(t *testing.T) {
+	master := cdpTarget{Type: "page", URL: "chrome-extension://wallet/popup.html#/confirm", Title: "Wallet"}
+	follower := cdpTarget{Type: "page", URL: "chrome-extension://wallet/popup.html#/pending", Title: "Wallet"}
+	if score := syncCDPTargetMatchScore(master, follower); score < 6000 {
+		t.Fatalf("same popup document with a transient hash route should remain matchable: score=%d", score)
+	}
+}
+
+func TestSyncCDPTargetMatchIgnoresTransientPopupQuery(t *testing.T) {
+	master := cdpTarget{Type: "page", URL: "https://wallet.example/approve?request=master", Title: "Approve"}
+	follower := cdpTarget{Type: "page", URL: "https://wallet.example/approve?request=follower", Title: "Approve"}
+	if score := syncCDPTargetMatchScore(master, follower); score < 4000 {
+		t.Fatalf("same popup document with per-profile query data should remain matchable: score=%d", score)
+	}
+}
+
+func TestPopupLikeCDPTargetDoesNotConfuseMainPage(t *testing.T) {
+	popup := cdpTarget{Type: "page", URL: "chrome-extension://wallet/popup.html#/confirm"}
+	main := cdpTarget{Type: "page", URL: "https://example.com/"}
+	if !popupLikeCDPTarget(popup) {
+		t.Fatal("extension popup target should require a corresponding follower target")
+	}
+	if popupLikeCDPTarget(main) {
+		t.Fatal("ordinary main page must not be classified as a popup")
+	}
+}
+
+func TestBrowserZoomVirtualKeys(t *testing.T) {
+	for _, vk := range []uint32{0x30, 0x6B, 0x6D, 0xBB, 0xBD} {
+		if !isBrowserZoomVirtualKey(vk) {
+			t.Fatalf("expected zoom virtual key %#x", vk)
+		}
+	}
+	if isBrowserZoomVirtualKey(0x41) {
+		t.Fatal("ordinary keys must not be treated as browser zoom shortcuts")
+	}
+}
+
 func TestCDPRuntimeValueSupportsProtocolAndLegacyShapes(t *testing.T) {
 	value, ok := cdpRuntimeValue(map[string]any{"result": map[string]any{"type": "string", "value": "chrome://extensions"}})
 	if !ok || value != "chrome://extensions" {
