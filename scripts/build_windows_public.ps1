@@ -9,10 +9,9 @@ Set-Location $RepoRoot
 $args = @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass',
     '-File', "$RepoRoot\scripts\build_windows_selfuse.ps1",
-    '-ManagerOnly', '-SkipKernelInstall', '-SkipGoogleFallback'
+    '-ManagerOnly', '-SkipKernelInstall', '-SkipGoogleFallback', '-NoInstall'
 )
 if ($RunGoTests) { $args += '-RunGoTests' }
 
 & powershell.exe @args
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-

@@ -181,6 +181,7 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("-ManagerOnly", wrapper)
         self.assertIn("-SkipKernelInstall", wrapper)
         self.assertIn("-SkipGoogleFallback", wrapper)
+        self.assertIn("-NoInstall", wrapper)
         self.assertIn("if (-not $ManagerOnly -and (Test-Path -LiteralPath $BinSrc))", installer)
         self.assertIn("if (-not $ManagerOnly) {", installer)
         self.assertIn("BrowserStudio-Manager-Setup", installer)
@@ -188,6 +189,24 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertRegex(public_config, r"(?m)^\s*proxies:\s*\[\]\s*$")
         self.assertNotIn("cloak-146", public_config)
         self.assertNotIn("google-148", public_config)
+
+    def test_github_release_publisher_excludes_private_assets(self):
+        raw = (ROOT / "scripts/publish_windows_github_release.ps1").read_bytes()
+        self.assertTrue(all(byte < 128 for byte in raw), "release publisher must remain ASCII-only for Windows PowerShell 5.1")
+        text = raw.decode("ascii")
+        self.assertIn("BrowserStudio-Update-v$Version-windows-x64.zip", text)
+        self.assertIn("BrowserStudio-Manager-Setup-v$Version.exe", text)
+        self.assertIn("--verify-tag", text)
+        self.assertIn("--draft", text)
+        self.assertIn("--draft=false", text)
+        self.assertIn("boost-browser.exe", text)
+        self.assertIn('"$MainExe.sha256"', text)
+        self.assertIn("release-manifest.json", text)
+        self.assertIn("activation-check.exe", text)
+        self.assertIn("BrowserStudio-Private-Setup-v$Version.exe", text)
+        assets_block = text.split("$assets = @(", 1)[1].split(")", 1)[0]
+        self.assertNotIn("activation-check.exe", assets_block)
+        self.assertNotIn("BrowserStudio-Private-Setup", assets_block)
 
     def test_no_active_script_keeps_old_machine_specific_paths(self):
         for path in (ROOT / "scripts").rglob("*"):
