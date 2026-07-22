@@ -110,6 +110,64 @@ func TestLegacyPrepareMapsSameFolderToExistingEnvironmentForOverwrite(t *testing
 	}
 }
 
+func TestLegacyPrepareMapsDifferentFolderByEnvironmentNumber(t *testing.T) {
+	appRoot := filepath.Join(t.TempDir(), "new")
+	cfg := config.DefaultConfig()
+	app := NewApp(appRoot)
+	app.config = cfg
+	app.browserMgr = browser.NewManager(cfg, appRoot)
+	app.browserMgr.Profiles = map[string]*browser.Profile{
+		"current-profile": {ProfileId: "current-profile", ProfileName: "新建环境-12", UserDataDir: "new-folder", CoreId: "working-core"},
+	}
+	currentDir := app.browserMgr.ResolveUserDataDir(app.browserMgr.Profiles["current-profile"])
+	if err := os.MkdirAll(filepath.Join(currentDir, "Default"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRoot := filepath.Join(t.TempDir(), "old", "data")
+	if err := os.MkdirAll(filepath.Join(oldRoot, "old-folder", "Default"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := database.NewDB(filepath.Join(oldRoot, "app.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := browser.NewSQLiteProfileDAO(db.GetConn()).Upsert(&browser.Profile{ProfileId: "old-profile", ProfileName: "旧环境-12", UserDataDir: "old-folder"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	preview, err := app.legacyDataRecoveryPreparePath(oldRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.clearLegacyDataRecovery()
+	if preview.Restorable != 1 || len(preview.Rows) != 1 || !preview.Rows[0].Overwrite || preview.Rows[0].TargetProfileID != "current-profile" {
+		t.Fatalf("environment number did not map overwrite target: %+v", preview)
+	}
+}
+
+func TestLegacyRecoveredProfileRestoresOldMetadataAndKeepsWorkingTargetIdentity(t *testing.T) {
+	source := &browser.Profile{
+		ProfileId: "old-id", ProfileName: "旧环境-37", UserDataDir: "old-folder", CoreId: "missing-old-core",
+		FingerprintArgs: []string{"--old-fingerprint"}, ProxyId: "old-proxy", ProxyConfig: "127.0.0.1:8080",
+		Tags: []string{"old-tag"}, GroupId: "old-group", LastWindowWidth: 1234,
+	}
+	target := &browser.Profile{ProfileId: "current-id", ProfileName: "新环境-1", UserDataDir: "current-folder", CoreId: "working-core", GroupId: "current-group"}
+	profile := legacyRecoveredProfile(&legacyDataRecoveryCandidate{Profile: source, TargetProfile: target, RegisteredDir: target.UserDataDir})
+	if profile.ProfileId != "current-id" || profile.UserDataDir != "current-folder" || profile.CoreId != "working-core" || profile.GroupId != "current-group" {
+		t.Fatalf("target identity/core/group not preserved: %+v", profile)
+	}
+	if profile.ProfileName != "旧环境-37" || profile.ProxyId != "old-proxy" || len(profile.FingerprintArgs) != 1 || profile.Tags[0] != "old-tag" || profile.LastWindowWidth != 1234 {
+		t.Fatalf("legacy metadata not restored: %+v", profile)
+	}
+}
+
 func TestLegacyRestoreCandidateDataBacksUpAndCanRollbackOverwrite(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source-folder")

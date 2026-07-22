@@ -755,7 +755,8 @@ export function SettingsPage() {
         <div className="space-y-3 text-sm">
           <div className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-secondary)] p-3">
             <p className="font-medium text-[var(--color-text-primary)]">以 data 内的浏览器数据文件夹名作为恢复身份</p>
-            <p className="mt-1 text-xs text-[var(--color-text-muted)]">同名文件夹会覆盖已创建环境的浏览器账号、Cookies、Local Storage 和扩展本地数据，同时保留当前环境的 ID、名称、内核和代理设置。环境编号不作为恢复身份，恢复后可自由调整。覆盖前会保留回滚备份。</p>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">按数据文件夹名、Profile ID、环境编号依次匹配。匹配到的现有环境会恢复旧名称/编号、指纹、代理、标签、Cookies、Local Storage 和扩展/钱包本地数据；仅保留新客户端可用的内核、目标 Profile ID 和实际数据目录。覆盖前会保留回滚备份。</p>
+            <p className="mt-1 text-xs text-[var(--color-warning)]">跨 Windows 电脑或跨系统账号恢复时，受 Windows DPAPI 加密限制的 Cookies/密码可能需要重新登录；钱包扩展需重新安装相同的官方扩展 ID，其本地数据才能被扩展识别。</p>
           </div>
           {legacyPreview && (
             <>
