@@ -33,6 +33,37 @@ export interface BackupActionResult {
   }>
 }
 
+export interface LegacyDataRecoveryRow {
+  environmentNumber: number
+  profileId: string
+  profileName: string
+  userDataDir: string
+  directoryExists: boolean
+  status: 'ready' | 'conflict' | 'missing' | 'success' | 'failed'
+  message: string
+}
+
+export interface LegacyDataRecoveryPreview {
+  cancelled?: boolean
+  sessionId: string
+  sourcePath: string
+  total: number
+  restorable: number
+  conflicts: number
+  missing: number
+  rows: LegacyDataRecoveryRow[]
+  message?: string
+}
+
+export interface LegacyDataRecoveryResult {
+  imported: number
+  skipped: number
+  failed: number
+  backupPath: string
+  rows: LegacyDataRecoveryRow[]
+  message?: string
+}
+
 // 获取设置
 export async function fetchSettings(): Promise<AppSettings> {
   let settings = defaultSettings
@@ -96,4 +127,27 @@ export async function importSystemConfig(resetFirst: boolean): Promise<BackupAct
     return { cancelled: false, message: '当前环境不支持后端加载接口' }
   }
   return (await bindings.BackupImportPackage(resetFirst)) || {}
+}
+
+export async function prepareLegacyDataRecovery(): Promise<LegacyDataRecoveryPreview> {
+  const bindings: any = await getBindings()
+  if (!bindings?.LegacyDataRecoveryPrepare) {
+    throw new Error('当前客户端不支持旧版 data 识别')
+  }
+  return await bindings.LegacyDataRecoveryPrepare()
+}
+
+export async function executeLegacyDataRecovery(sessionId: string): Promise<LegacyDataRecoveryResult> {
+  const bindings: any = await getBindings()
+  if (!bindings?.LegacyDataRecoveryExecute) {
+    throw new Error('当前客户端不支持旧版 data 恢复')
+  }
+  return await bindings.LegacyDataRecoveryExecute(sessionId)
+}
+
+export async function cancelLegacyDataRecovery(sessionId: string): Promise<void> {
+  const bindings: any = await getBindings()
+  if (bindings?.LegacyDataRecoveryCancel && sessionId) {
+    await bindings.LegacyDataRecoveryCancel(sessionId)
+  }
 }

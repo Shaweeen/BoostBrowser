@@ -61,6 +61,8 @@ type App struct {
 	rabbyImportMu      sync.Mutex
 	rabbyImports       map[string]*rabbyWalletImportSession
 	rabbyImportActive  map[string]bool
+	legacyRecoveryMu   sync.Mutex
+	legacyRecovery     *legacyDataRecoverySession
 	stopServicesOnce   sync.Once
 	finalizeOnce       sync.Once
 	updateMu           sync.Mutex
@@ -425,6 +427,7 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 	a.rabbyImportActive = make(map[string]bool)
 	a.rabbyImportMu.Unlock()
+	a.clearLegacyDataRecovery()
 	a.lifecycleLog("shutdown", fmt.Sprintf("mode=%d", a.quitMode), fmt.Sprintf("forceQuit=%t", a.forceQuit))
 	stopPanelOwnedSync(a)
 	if a.shouldStopRuntimeServicesOnShutdown() {
@@ -676,8 +679,8 @@ func (a *App) BrowserProfileBatchCreate(prefix string, startIndex int, count int
 	if count <= 0 {
 		return nil, fmt.Errorf("批量创建数量必须大于0")
 	}
-	if count > 200 {
-		return nil, fmt.Errorf("单次批量创建不能超过200个")
+	if count > 2000 {
+		return nil, fmt.Errorf("单次批量创建不能超过2000个")
 	}
 	if startIndex < 1 {
 		startIndex = 1

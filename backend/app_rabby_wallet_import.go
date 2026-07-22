@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -30,7 +31,8 @@ const (
 	metamaskExtensionID    = "nkbihfbeogaeaoehlefnkodbefgpgknn"
 	rabbyImportSessionTTL  = 15 * time.Minute
 	rabbyImportMaxFileSize = 4 * 1024 * 1024
-	rabbyImportMaxRows     = 500
+	rabbyImportMaxRows     = 2000
+	walletImportWorkers    = 4
 )
 
 type walletImportSpec struct {
@@ -80,6 +82,8 @@ type RabbyWalletImportPreviewRow struct {
 	ProfileName       string `json:"profileName"`
 	WordCount         int    `json:"wordCount"`
 	Running           bool   `json:"running"`
+	DebugPort         int    `json:"-"`
+	DebugReady        bool   `json:"-"`
 }
 
 type RabbyWalletImportPreview struct {
@@ -324,74 +328,85 @@ func (a *App) WalletBatchExecute(input RabbyWalletBatchExecuteInput) (*RabbyWall
 		return nil, fmt.Errorf("%s Wallet 扩展不存在或已损坏，请重新安装官方全局扩展", spec.Name)
 	}
 	profiles := a.rabbyProfileSnapshot()
-	for _, row := range session.Rows {
-		profile, exists := profiles[row.ProfileID]
-		if !exists {
-			return nil, fmt.Errorf("第 %d 行对应的环境已不存在，请重新选择文件", row.RowNumber)
-		}
-		if profile.Running {
-			return nil, fmt.Errorf("环境 %s 正在运行，请先关闭文件中全部环境后再执行", profile.ProfileName)
-		}
+	if err := validateRunningWalletImportProfiles(session.Rows, profiles); err != nil {
+		return nil, err
 	}
 
 	result := &RabbyWalletImportResult{
 		Total: len(session.Rows),
-		Rows:  make([]RabbyWalletImportResultRow, 0, len(session.Rows)),
+		Rows:  make([]RabbyWalletImportResultRow, len(session.Rows)),
 	}
 	log := logger.New("WalletImport")
-	for index, row := range session.Rows {
-		profileSnapshot := profiles[row.ProfileID]
-		resultRow := RabbyWalletImportResultRow{
-			RowNumber:   row.RowNumber,
-			ProfileID:   row.ProfileID,
-			ProfileName: profileSnapshot.ProfileName,
-			Status:      "running",
-			Message:     "正在启动环境并导入 " + spec.Name,
-		}
-		a.emitWalletImportProgress(spec.Type, index, len(session.Rows), resultRow)
-
-		// During secret entry, load only the selected official wallet extension
-		// and suppress ordinary startup pages. This prevents other installed
-		// extensions and websites from observing the automated import session.
-		extensionDir := a.globalExtensionDir(spec.ExtensionID)
-		importLaunchArgs := []string{"--disable-extensions-except=" + extensionDir}
-		started, startErr := a.browserInstanceStartInternal(row.ProfileID, importLaunchArgs, nil, true, false, true)
-		if startErr != nil || started == nil || started.DebugPort <= 0 {
-			resultRow.Status = "failed"
-			resultRow.Message = safeRabbyImportError("环境启动失败", startErr)
-			result.Failed++
-			result.Rows = append(result.Rows, resultRow)
-			a.emitWalletImportProgress(spec.Type, index+1, len(session.Rows), resultRow)
-			continue
-		}
-
-		address, importErr := importMnemonicIntoFreshWallet(spec.Type, started.DebugPort, row.Mnemonic, input.Password)
-		_, stopErr := a.BrowserInstanceStop(row.ProfileID)
-		if stopErr != nil {
-			log.Warn("导入后关闭环境失败", logger.F("profile_id", row.ProfileID), logger.F("error", stopErr.Error()))
-		}
-		if importErr != nil {
-			resultRow.Status = "failed"
-			resultRow.Message = safeRabbyImportError(spec.Name+" 导入失败", importErr)
-			if stopErr != nil {
-				resultRow.Message += "；环境自动关闭失败，请手动关闭"
-			}
-			result.Failed++
-		} else {
-			resultRow.Status = "success"
-			resultRow.Address = address
-			resultRow.Message = spec.Name + " 钱包导入成功"
-			if stopErr != nil {
-				resultRow.Message += "，但环境自动关闭失败，请手动关闭"
-			}
-			result.Succeeded++
-		}
-		result.Rows = append(result.Rows, resultRow)
-		a.emitWalletImportProgress(spec.Type, index+1, len(session.Rows), resultRow)
-		log.Info("钱包批量导入单项完成", logger.F("wallet_type", spec.Type), logger.F("profile_id", row.ProfileID), logger.F("status", resultRow.Status))
+	workerCount := walletImportWorkers
+	if workerCount > len(session.Rows) {
+		workerCount = len(session.Rows)
 	}
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	var resultMu sync.Mutex
+	completed := 0
+	for worker := 0; worker < workerCount; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				row := session.Rows[index]
+				profileSnapshot := profiles[row.ProfileID]
+				resultRow := RabbyWalletImportResultRow{
+					RowNumber: row.RowNumber, ProfileID: row.ProfileID, ProfileName: profileSnapshot.ProfileName,
+					Status: "running", Message: "正在向已启动环境导入 " + spec.Name,
+				}
+				resultMu.Lock()
+				startedCompleted := completed
+				resultMu.Unlock()
+				a.emitWalletImportProgress(spec.Type, startedCompleted, len(session.Rows), resultRow)
+				address, importErr := importMnemonicIntoFreshWallet(spec.Type, profileSnapshot.DebugPort, row.Mnemonic, input.Password)
+				if importErr != nil {
+					resultRow.Status = "failed"
+					resultRow.Message = safeRabbyImportError(spec.Name+" 导入失败", importErr)
+				} else {
+					resultRow.Status = "success"
+					resultRow.Address = address
+					resultRow.Message = spec.Name + " 钱包导入成功；环境保持打开"
+				}
+				resultMu.Lock()
+				result.Rows[index] = resultRow
+				if importErr != nil {
+					result.Failed++
+				} else {
+					result.Succeeded++
+				}
+				completed++
+				currentCompleted := completed
+				resultMu.Unlock()
+				a.emitWalletImportProgress(spec.Type, currentCompleted, len(session.Rows), resultRow)
+				log.Info("钱包批量导入单项完成", logger.F("wallet_type", spec.Type), logger.F("profile_id", row.ProfileID), logger.F("status", resultRow.Status))
+			}
+		}()
+	}
+	for index := range session.Rows {
+		jobs <- index
+	}
+	close(jobs)
+	workers.Wait()
 	result.Message = fmt.Sprintf("%s 批量导入完成：成功 %d，失败 %d", spec.Name, result.Succeeded, result.Failed)
 	return result, nil
+}
+
+func validateRunningWalletImportProfiles(rows []rabbyWalletImportSecretRow, profiles map[string]RabbyWalletImportPreviewRow) error {
+	for _, row := range rows {
+		profile, exists := profiles[row.ProfileID]
+		if !exists {
+			return fmt.Errorf("第 %d 行对应的环境已不存在，请重新选择文件", row.RowNumber)
+		}
+		if !profile.Running {
+			return fmt.Errorf("环境 #%d %s 尚未启动；请先启动 CSV 中全部目标环境并保持窗口打开", profile.EnvironmentNumber, profile.ProfileName)
+		}
+		if !profile.DebugReady || profile.DebugPort <= 0 {
+			return fmt.Errorf("环境 #%d %s 调试接口尚未就绪，请等待窗口加载完成后重试", profile.EnvironmentNumber, profile.ProfileName)
+		}
+	}
+	return nil
 }
 
 func (a *App) emitRabbyImportProgress(completed, total int, row RabbyWalletImportResultRow) {
@@ -431,6 +446,8 @@ func (a *App) rabbyProfileSnapshot() map[string]RabbyWalletImportPreviewRow {
 			ProfileID:         id,
 			ProfileName:       profile.ProfileName,
 			Running:           profile.Running,
+			DebugPort:         profile.DebugPort,
+			DebugReady:        profile.DebugReady,
 		}
 	}
 	return out

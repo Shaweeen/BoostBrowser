@@ -113,6 +113,28 @@ func rabbyTestProfiles() map[string]RabbyWalletImportPreviewRow {
 	}
 }
 
+func TestValidateRunningWalletImportProfiles(t *testing.T) {
+	rows := []rabbyWalletImportSecretRow{{RowNumber: 2, ProfileID: "profile-1"}}
+	profiles := map[string]RabbyWalletImportPreviewRow{
+		"profile-1": {EnvironmentNumber: 1, ProfileID: "profile-1", ProfileName: "实例-1"},
+	}
+	if err := validateRunningWalletImportProfiles(rows, profiles); err == nil || !strings.Contains(err.Error(), "尚未启动") {
+		t.Fatalf("stopped environment should be rejected: %v", err)
+	}
+	profile := profiles["profile-1"]
+	profile.Running = true
+	profiles["profile-1"] = profile
+	if err := validateRunningWalletImportProfiles(rows, profiles); err == nil || !strings.Contains(err.Error(), "调试接口") {
+		t.Fatalf("not-ready environment should be rejected: %v", err)
+	}
+	profile.DebugReady = true
+	profile.DebugPort = 9222
+	profiles["profile-1"] = profile
+	if err := validateRunningWalletImportProfiles(rows, profiles); err != nil {
+		t.Fatalf("running ready environment should pass: %v", err)
+	}
+}
+
 func TestParseRabbyWalletImportCSV(t *testing.T) {
 	mnemonic := rabbyTestMnemonic("alpha", 12)
 	path := writeRabbyImportFixture(t, "wallets.csv", "\ufeffprofile_id,profile_name,mnemonic\nprofile-1,环境一,\""+mnemonic+"\"\n")

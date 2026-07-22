@@ -26,6 +26,18 @@ export function BackupInitializeSystem() {
   return window['go']['main']['App']['BackupInitializeSystem']();
 }
 
+export function LegacyDataRecoveryPrepare() {
+  return window['go']['main']['App']['LegacyDataRecoveryPrepare']();
+}
+
+export function LegacyDataRecoveryExecute(arg1) {
+  return window['go']['main']['App']['LegacyDataRecoveryExecute'](arg1);
+}
+
+export function LegacyDataRecoveryCancel(arg1) {
+  return window['go']['main']['App']['LegacyDataRecoveryCancel'](arg1);
+}
+
 export function BookmarkList() {
   return window['go']['main']['App']['BookmarkList']();
 }

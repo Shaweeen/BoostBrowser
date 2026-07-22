@@ -711,7 +711,7 @@ export function ExtensionManagementPage() {
           <>
             <Button variant="secondary" onClick={closeRabbyImport} disabled={rabbyExecuting}>取消</Button>
             <Button variant="secondary" onClick={selectRabbyImportFile} loading={rabbyPreparing} disabled={rabbyExecuting}>选择 CSV/TXT</Button>
-            <Button onClick={startRabbyImport} loading={rabbyExecuting} disabled={!rabbyPreview || rabbyPreview.rows.some(row => row.running)}>开始导入</Button>
+            <Button onClick={startRabbyImport} loading={rabbyExecuting} disabled={!rabbyPreview || rabbyPreview.rows.some(row => !row.running)}>开始导入</Button>
           </>
         )}
       >
@@ -734,8 +734,8 @@ export function ExtensionManagementPage() {
             <div className="flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
               <div>
-                <div className="font-medium">仅导入到未初始化的 {walletLabels[walletType]}，检测到已有钱包会立即拒绝覆盖</div>
-                <div className="mt-1 text-xs leading-5">BrowserStudio 只提供导入，不提供助记词或私钥导出接口；文件和密码不写入数据库或日志。钱包扩展仍会按自身机制保存加密密钥，其中 Jupiter 为闭源第三方扩展，无法由 BrowserStudio 审计或保证其内部行为。请只安装官方扩展，并在可信电脑操作。</div>
+                <div className="font-medium">先启动 CSV 指定的环境并保持窗口打开；仅导入未初始化的 {walletLabels[walletType]}</div>
+                <div className="mt-1 text-xs leading-5">BrowserStudio 通过已启动环境的本地调试接口直接操作官方钱包扩展，完成后不会关闭环境。文件、助记词和自定义密码不写入数据库或日志，也不提供导出接口。导入时请关闭无关网页并停用不可信扩展；其中 Jupiter 为闭源第三方扩展，BrowserStudio 无法审计或保证其内部行为。</div>
               </div>
             </div>
           </div>
@@ -770,7 +770,7 @@ export function ExtensionManagementPage() {
                         <td className="px-4 py-2 text-[var(--color-text-primary)]">{row.profileName || row.profileId}</td>
                         <td className="px-4 py-2 font-mono text-xs text-[var(--color-text-muted)]">{row.profileId}</td>
                         <td className="px-4 py-2 text-[var(--color-text-secondary)]">{row.wordCount}</td>
-                        <td className={`px-4 py-2 text-right ${row.running ? 'text-red-600' : 'text-green-600'}`}>{row.running ? '请先关闭' : '可导入'}</td>
+                        <td className={`px-4 py-2 text-right ${row.running ? 'text-green-600' : 'text-red-600'}`}>{row.running ? '已启动，可导入' : '请先启动'}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -793,7 +793,7 @@ export function ExtensionManagementPage() {
               </FormItem>
               <label className="flex items-start gap-2 text-sm text-[var(--color-text-secondary)] cursor-pointer">
                 <input type="checkbox" className="mt-0.5 accent-[var(--color-accent)]" checked={rabbyConfirmed} onChange={event => setRabbyConfirmed(event.target.checked)} disabled={rabbyExecuting} />
-                <span>我确认：文件中的助记词已安全备份；目标环境均为未初始化 {walletLabels[walletType]}；导入过程将逐个启动并自动关闭环境。</span>
+                <span>我确认：文件中的助记词已安全备份；CSV 目标环境已经启动并保持窗口打开；目标 {walletLabels[walletType]} 均未初始化。导入完成后环境不会自动关闭。</span>
               </label>
             </div>
           )}

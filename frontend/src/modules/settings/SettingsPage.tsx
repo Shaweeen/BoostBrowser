@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { Save, RotateCcw, Upload, Download, RefreshCw } from 'lucide-react'
+import { Save, RotateCcw, Upload, Download, RefreshCw, HardDriveDownload } from 'lucide-react'
 import { Card, Button, FormItem, Input, Select, Switch, ThemeSwitcher, toast, Modal, Progress } from '../../shared/components'
-import { fetchSettings, saveSettings, resetSettings, initializeSystemData, exportSystemConfig, importSystemConfig } from './api'
+import { fetchSettings, saveSettings, resetSettings, initializeSystemData, exportSystemConfig, importSystemConfig, prepareLegacyDataRecovery, executeLegacyDataRecovery, cancelLegacyDataRecovery } from './api'
+import type { LegacyDataRecoveryPreview } from './api'
 import type { AppSettings } from './types'
 import { defaultSettings } from './types'
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
@@ -32,7 +33,10 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
   const [importModalOpen, setImportModalOpen] = useState(false)
-  const [actionLoading, setActionLoading] = useState<'none' | 'init' | 'export' | 'import-reset' | 'import-merge'>('none')
+  const [legacyModalOpen, setLegacyModalOpen] = useState(false)
+  const [legacyPreview, setLegacyPreview] = useState<LegacyDataRecoveryPreview | null>(null)
+  const [legacyProgress, setLegacyProgress] = useState<BackupExportProgress | null>(null)
+  const [actionLoading, setActionLoading] = useState<'none' | 'init' | 'export' | 'import-reset' | 'import-merge' | 'legacy-prepare' | 'legacy-execute'>('none')
   const [exportProgress, setExportProgress] = useState<BackupExportProgress | null>(null)
   const [importProgress, setImportProgress] = useState<BackupExportProgress | null>(null)
   const [exportLogs, setExportLogs] = useState<BackupExportLogItem[]>([])
@@ -42,6 +46,19 @@ export function SettingsPage() {
 
   useEffect(() => {
     loadSettings()
+  }, [])
+
+  useEffect(() => {
+    const onProgress = (payload: any) => {
+      if (!payload || typeof payload !== 'object') return
+      setLegacyProgress({
+        phase: Number(payload.progress) >= 100 ? 'done' : 'importing',
+        progress: Math.max(0, Math.min(100, Number(payload.progress) || 0)),
+        message: String(payload.message || '正在恢复旧数据...'),
+      })
+    }
+    EventsOn('legacy-data-recovery:progress', onProgress)
+    return () => EventsOff('legacy-data-recovery:progress')
   }, [])
 
   useEffect(() => {
@@ -302,6 +319,50 @@ export function SettingsPage() {
     }
   }
 
+  const handlePrepareLegacyData = async () => {
+    setActionLoading('legacy-prepare')
+    setLegacyProgress(null)
+    try {
+      const preview = await prepareLegacyDataRecovery()
+      if (preview.cancelled) return
+      setLegacyPreview(preview)
+      setLegacyModalOpen(true)
+      if (preview.restorable === 0) toast.warning('旧 data 已识别，但没有可安全恢复的环境')
+    } catch (error: any) {
+      toast.error(error?.message || '旧 data 识别失败')
+    } finally {
+      setActionLoading('none')
+    }
+  }
+
+  const closeLegacyModal = async () => {
+    if (actionLoading === 'legacy-execute') return
+    const sessionId = legacyPreview?.sessionId || ''
+    setLegacyModalOpen(false)
+    setLegacyPreview(null)
+    setLegacyProgress(null)
+    if (sessionId) await cancelLegacyDataRecovery(sessionId)
+  }
+
+  const handleExecuteLegacyData = async () => {
+    if (!legacyPreview?.sessionId || legacyPreview.restorable < 1) return
+    if (!confirm(`将恢复 ${legacyPreview.restorable} 个环境。现有环境不会被覆盖，开始前必须关闭全部浏览器环境。是否继续？`)) return
+    setActionLoading('legacy-execute')
+    setLegacyProgress({ phase: 'starting', progress: 0, message: '准备恢复旧数据...' })
+    try {
+      const result = await executeLegacyDataRecovery(legacyPreview.sessionId)
+      toast.success(result.message || `恢复完成：成功 ${result.imported}，跳过 ${result.skipped}，失败 ${result.failed}`)
+      setLegacyModalOpen(false)
+      setLegacyPreview(null)
+      setLegacyProgress(null)
+    } catch (error: any) {
+      setLegacyProgress(prev => ({ phase: 'error', progress: prev?.progress || 0, message: error?.message || '恢复失败' }))
+      toast.error(error?.message || '恢复失败')
+    } finally {
+      setActionLoading('none')
+    }
+  }
+
   const importRunning = actionLoading === 'import-reset' || actionLoading === 'import-merge'
 
   if (loading) {
@@ -532,6 +593,16 @@ export function SettingsPage() {
               <Upload className="w-4 h-4" />
               加载配置
             </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handlePrepareLegacyData}
+              loading={actionLoading === 'legacy-prepare'}
+              disabled={actionLoading !== 'none' && actionLoading !== 'legacy-prepare'}
+            >
+              <HardDriveDownload className="w-4 h-4" />
+              从旧版 data 恢复
+            </Button>
           </div>
           {exportProgress && (
             <div className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-secondary)] px-3 py-2 space-y-2">
@@ -659,6 +730,56 @@ export function SettingsPage() {
             <p className="text-xs text-[var(--color-warning)]">
               当前正在加载配置，弹窗不可关闭。若需中断，请直接关闭应用。
             </p>
+          )}
+        </div>
+      </Modal>
+
+      <Modal
+        open={legacyModalOpen}
+        onClose={closeLegacyModal}
+        title="识别并恢复旧版 data"
+        width="760px"
+        closable={actionLoading !== 'legacy-execute'}
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeLegacyModal} disabled={actionLoading === 'legacy-execute'}>取消</Button>
+            <Button onClick={handleExecuteLegacyData} loading={actionLoading === 'legacy-execute'} disabled={!legacyPreview || legacyPreview.restorable < 1}>
+              恢复 {legacyPreview?.restorable || 0} 个安全环境
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3 text-sm">
+          <div className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-secondary)] p-3">
+            <p className="font-medium text-[var(--color-text-primary)]">恢复只导入旧环境数据，不替换当前程序版本和功能</p>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">完整环境目录包含浏览器账号、Cookies、Local Storage 和扩展本地数据。相同 ID、相同编号或已有目标目录一律跳过，不覆盖当前数据。恢复期间请关闭全部环境。</p>
+          </div>
+          {legacyPreview && (
+            <>
+              <div className="text-xs text-[var(--color-text-muted)] break-all">来源：{legacyPreview.sourcePath}</div>
+              <div className="flex gap-4 text-xs">
+                <span>识别 {legacyPreview.total}</span>
+                <span className="text-[var(--color-success)]">可恢复 {legacyPreview.restorable}</span>
+                <span className="text-[var(--color-warning)]">冲突 {legacyPreview.conflicts}</span>
+                <span className="text-[var(--color-error)]">目录缺失 {legacyPreview.missing}</span>
+              </div>
+              <div className="max-h-72 overflow-auto rounded border border-[var(--color-border-default)]">
+                <table className="w-full text-xs">
+                  <thead className="sticky top-0 bg-[var(--color-bg-secondary)] text-left"><tr><th className="p-2">编号</th><th className="p-2">环境</th><th className="p-2">状态</th><th className="p-2">说明</th></tr></thead>
+                  <tbody>{legacyPreview.rows.map(row => (
+                    <tr key={row.profileId} className="border-t border-[var(--color-border-muted)]">
+                      <td className="p-2">#{row.environmentNumber}</td>
+                      <td className="p-2">{row.profileName}</td>
+                      <td className={`p-2 ${row.status === 'ready' ? 'text-[var(--color-success)]' : 'text-[var(--color-warning)]'}`}>{row.status === 'ready' ? '可恢复' : row.status === 'missing' ? '缺失' : '跳过'}</td>
+                      <td className="p-2 text-[var(--color-text-muted)]">{row.message}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </>
+          )}
+          {legacyProgress && (
+            <div className="space-y-2"><div className="text-xs text-[var(--color-text-secondary)]">{legacyProgress.message}</div><Progress percent={legacyProgress.progress} size="sm" status={legacyProgress.phase === 'error' ? 'error' : legacyProgress.phase === 'done' ? 'success' : 'normal'} /></div>
           )}
         </div>
       </Modal>

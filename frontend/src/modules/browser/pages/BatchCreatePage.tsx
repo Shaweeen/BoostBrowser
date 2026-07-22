@@ -74,8 +74,8 @@ export function BatchCreatePage() {
       toast.error('请输入名称前缀')
       return
     }
-    if (count < 1 || count > 200) {
-      toast.error('批量创建数量需在 1~200 之间')
+    if (count < 1 || count > 2000) {
+      toast.error('批量创建数量需在 1~2000 之间')
       return
     }
     if (startIndex < 1) {
@@ -150,13 +150,13 @@ export function BatchCreatePage() {
               onChange={e => setStartIndex(Math.max(1, parseInt(e.target.value) || 1))}
             />
           </FormItem>
-          <FormItem label="创建数量" hint="1~200">
+          <FormItem label="创建数量" hint="1~2000（大量环境建议分批创建）">
             <Input
               type="number"
               min={1}
-              max={200}
+              max={2000}
               value={count}
-              onChange={e => setCount(Math.min(200, Math.max(1, parseInt(e.target.value) || 1)))}
+              onChange={e => setCount(Math.min(2000, Math.max(1, parseInt(e.target.value) || 1)))}
             />
           </FormItem>
         </div>

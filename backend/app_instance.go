@@ -755,6 +755,12 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 
 func (a *App) BrowserInstanceStop(profileId string) (*BrowserProfile, error) {
 	log := logger.New("Browser")
+	a.rabbyImportMu.Lock()
+	blocked := a.rabbyImportActive[profileId]
+	a.rabbyImportMu.Unlock()
+	if blocked {
+		return nil, fmt.Errorf("该环境正在执行钱包批量导入，请等待完成后再关闭")
+	}
 	a.browserMgr.Mutex.Lock()
 	defer a.browserMgr.Mutex.Unlock()
 
