@@ -15,6 +15,7 @@ import {
   removeGlobalExtension,
 } from '../api'
 import type { BrowserProfile, WalletImportPreview, WalletImportProgress, WalletImportResult, WalletImportType } from '../types'
+import { resolveActionErrorMessage } from '../utils/actionErrors'
 
 type ExtensionPlatform = 'google' | 'firefox'
 type DistributionMode = 'manual' | 'global'
@@ -427,7 +428,7 @@ export function ExtensionManagementPage() {
       setRabbyResult(null)
       toast.success(preview.message || `已读取 ${preview.rows.length} 条映射`)
     } catch (error: any) {
-      toast.error(error?.message || `读取 ${walletLabels[walletType]} 导入文件失败`)
+      toast.error(resolveActionErrorMessage(error, `读取 ${walletLabels[walletType]} 导入文件失败`))
     } finally {
       setRabbyPreparing(false)
     }
@@ -438,7 +439,7 @@ export function ExtensionManagementPage() {
       const response = await exportWalletImportTemplate(walletType)
       if (!response?.cancelled) toast.success(response?.message || `${walletLabels[walletType]} CSV 模板已生成`)
     } catch (error: any) {
-      toast.error(error?.message || `导出 ${walletLabels[walletType]} 模板失败`)
+      toast.error(resolveActionErrorMessage(error, `导出 ${walletLabels[walletType]} 模板失败`))
     }
   }
 
@@ -477,7 +478,7 @@ export function ExtensionManagementPage() {
       if (result.failed > 0) toast.warning(result.message)
       else toast.success(result.message)
     } catch (error: any) {
-      toast.error(error?.message || `${walletLabels[walletType]} 批量导入失败`)
+      toast.error(resolveActionErrorMessage(error, `${walletLabels[walletType]} 批量导入失败`))
       setRabbyPreview(null)
       setRabbyConfirmed(false)
     } finally {

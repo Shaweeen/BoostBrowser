@@ -2,13 +2,66 @@ package backend
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+func TestWalletImportFileDialogUsesWindowsFallbackAfterWailsFailure(t *testing.T) {
+	originalPrimary := showWalletImportWailsDialog
+	originalFallback := showWalletImportFallbackDialog
+	t.Cleanup(func() {
+		showWalletImportWailsDialog = originalPrimary
+		showWalletImportFallbackDialog = originalFallback
+	})
+
+	showWalletImportWailsDialog = func(context.Context, wailsruntime.OpenDialogOptions) (string, error) {
+		return "", errors.New("COM unavailable")
+	}
+	showWalletImportFallbackDialog = func(title string) (string, error) {
+		if !strings.Contains(title, "Rabby") {
+			t.Fatalf("fallback title missing wallet name: %q", title)
+		}
+		return `C:\Users\test\wallets.csv`, nil
+	}
+
+	app := NewApp("")
+	app.ctx = context.Background()
+	path, err := app.selectWalletImportFile(walletImportSpecs["rabby"])
+	if err != nil || path != `C:\Users\test\wallets.csv` {
+		t.Fatalf("fallback result path=%q err=%v", path, err)
+	}
+}
+
+func TestWalletImportFileDialogReportsBothFailures(t *testing.T) {
+	originalPrimary := showWalletImportWailsDialog
+	originalFallback := showWalletImportFallbackDialog
+	t.Cleanup(func() {
+		showWalletImportWailsDialog = originalPrimary
+		showWalletImportFallbackDialog = originalFallback
+	})
+
+	showWalletImportWailsDialog = func(context.Context, wailsruntime.OpenDialogOptions) (string, error) {
+		return "", errors.New("primary failed")
+	}
+	showWalletImportFallbackDialog = func(string) (string, error) {
+		return "", errors.New("fallback failed")
+	}
+
+	app := NewApp("")
+	app.ctx = context.Background()
+	_, err := app.selectWalletImportFile(walletImportSpecs["rabby"])
+	if err == nil || !strings.Contains(err.Error(), "primary failed") || !strings.Contains(err.Error(), "fallback failed") {
+		t.Fatalf("expected both dialog failures, got %v", err)
+	}
+}
 
 func rabbyTestMnemonic(prefix string, count int) string {
 	words := make([]string, count)

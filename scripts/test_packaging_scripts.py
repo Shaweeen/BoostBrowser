@@ -219,7 +219,10 @@ class PackagingScriptsTest(unittest.TestCase):
         raw = (ROOT / "scripts/repair_upgrade_windows.ps1").read_bytes()
         self.assertTrue(all(byte < 128 for byte in raw), "repair upgrader must remain ASCII-only for Windows PowerShell 5.1")
         text = raw.decode("ascii")
-        self.assertIn("TargetVersion = 'v1.7.19'", text)
+        import json
+
+        version = json.loads(self.read("wails.json"))["info"]["productVersion"]
+        self.assertIn(f"TargetVersion = 'v{version}'", text)
         self.assertIn("api.github.com/repos/$Owner/$Repo/releases/tags/$Tag", text)
         self.assertIn("Assert-TrustedAssetURL", text)
         self.assertIn("Get-FileHash", text)

@@ -140,14 +140,7 @@ func (a *App) WalletBatchPrepare(walletType string) (*RabbyWalletImportPreview, 
 	if !a.officialWalletExtensionInstalled(spec) {
 		return nil, fmt.Errorf("未检测到官方 %s Wallet 扩展，请先在扩展管理中安装并设为全局使用", spec.Name)
 	}
-	filePath, err := wailsruntime.OpenFileDialog(a.ctx, wailsruntime.OpenDialogOptions{
-		Title: "选择 " + spec.Name + " 钱包映射文件",
-		Filters: []wailsruntime.FileFilter{
-			{DisplayName: "钱包映射文件 (*.csv;*.txt)", Pattern: "*.csv;*.txt"},
-			{DisplayName: "CSV 文件 (*.csv)", Pattern: "*.csv"},
-			{DisplayName: "文本文件 (*.txt)", Pattern: "*.txt"},
-		},
-	})
+	filePath, err := a.selectWalletImportFile(spec)
 	if err != nil {
 		return nil, fmt.Errorf("打开钱包映射文件失败：%w", err)
 	}
