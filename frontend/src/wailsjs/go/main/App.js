@@ -226,14 +226,6 @@ export function BrowserProfileImportExtension(arg1, arg2) {
   return window['go']['main']['App']['BrowserProfileImportExtension'](arg1, arg2);
 }
 
-export function BrowserProfileImportMoreLoginXLSX() {
-  return window['go']['main']['App']['BrowserProfileImportMoreLoginXLSX']();
-}
-
-export function BrowserProfileImportRunningMoreLogin() {
-  return window['go']['main']['App']['BrowserProfileImportRunningMoreLogin']();
-}
-
 export function BrowserProfileList() {
   return window['go']['main']['App']['BrowserProfileList']();
 }

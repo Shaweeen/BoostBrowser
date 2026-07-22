@@ -260,28 +260,6 @@ export async function removeExtensionFromBrowserProfiles(profileIds: string[], d
   }
 }
 
-export async function importMoreLoginProfiles(): Promise<Record<string, any>> {
-  const bindings: any = await getBindings()
-  if (bindings?.BrowserProfileImportMoreLoginXLSX) {
-    return await bindings.BrowserProfileImportMoreLoginXLSX()
-  }
-  return {
-    cancelled: true,
-    message: '当前环境不支持导入 MoreLogin 环境',
-  }
-}
-
-export async function importRunningMoreLoginProfiles(): Promise<Record<string, any>> {
-  const bindings: any = await getBindings()
-  if (bindings?.BrowserProfileImportRunningMoreLogin) {
-    return await bindings.BrowserProfileImportRunningMoreLogin()
-  }
-  return {
-    cancelled: true,
-    message: '当前环境不支持导入运行中的 MoreLogin 环境',
-  }
-}
-
 // ============================================================================
 // Instance API
 // ============================================================================

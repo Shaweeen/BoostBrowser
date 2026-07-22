@@ -592,22 +592,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				}
 			}
 
-			importedCookieCount, skippedCookieCount, cookieErr := applyPendingImportedCookieSeed(stableDebugPort, userDataDir)
-			if cookieErr != nil {
-				log.Warn("导入环境 Cookie 注入失败",
-					logger.F("profile_id", profileId),
-					logger.F("debug_port", stableDebugPort),
-					logger.F("error", cookieErr.Error()),
-				)
-			} else if importedCookieCount > 0 {
-				log.Info("导入环境 Cookie 注入成功",
-					logger.F("profile_id", profileId),
-					logger.F("debug_port", stableDebugPort),
-					logger.F("applied", importedCookieCount),
-					logger.F("skipped", skippedCookieCount),
-				)
-			}
-
 			// stealth 注入完成后，通过 CDP 导航到目标 URL
 			// （浏览器以 about:blank 启动，首页面不载入任何真正的网站）
 			//

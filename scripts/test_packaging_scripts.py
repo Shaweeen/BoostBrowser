@@ -42,7 +42,9 @@ class PackagingScriptsTest(unittest.TestCase):
         stage_assets = self.read("scripts/stage_assets.ps1")
 
         self.assertIn("chrome-for-testing.marker", installer)
-        self.assertIn('RMDir /r "`$INSTDIR\\chrome\\google-148.0.7778.167"', installer)
+        self.assertIn("$BundleGoogleKernel", installer)
+        self.assertIn("$GoogleKernelCleanupLine", installer)
+        self.assertIn("Preserve any existing optional Google 148 kernel", installer)
         self.assertIn("chrome-for-testing.marker", wrapper)
         self.assertIn("install_chrome_for_testing_kernel.ps1", wrapper)
         self.assertNotIn("C:\\Program Files\\Google\\Chrome\\Application", wrapper)
@@ -184,6 +186,7 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("-NoInstall", wrapper)
         self.assertIn("if (-not $ManagerOnly -and (Test-Path -LiteralPath $BinSrc))", installer)
         self.assertIn("if (-not $ManagerOnly) {", installer)
+        self.assertIn("(-not $ManagerOnly)", installer)
         self.assertIn("BrowserStudio-Manager-Setup", installer)
         self.assertRegex(public_config, r"(?m)^\s*cores:\s*\[\]\s*$")
         self.assertRegex(public_config, r"(?m)^\s*proxies:\s*\[\]\s*$")

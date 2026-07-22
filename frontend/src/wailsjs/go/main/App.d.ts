@@ -115,10 +115,6 @@ export function WalletBatchCancel(arg1:string):Promise<void>;
 
 export function BrowserProfileImportExtension(arg1:Array<string>,arg2:string):Promise<backend.ExtensionImportResult>;
 
-export function BrowserProfileImportMoreLoginXLSX():Promise<Record<string, any>>;
-
-export function BrowserProfileImportRunningMoreLogin():Promise<Record<string, any>>;
-
 export function BrowserProfileList():Promise<Array<browser.Profile>>;
 
 export function BrowserProfileListByTag(arg1:string):Promise<Array<browser.Profile>>;

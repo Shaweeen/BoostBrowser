@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Activity, CheckCircle, ChevronDown, ChevronRight, ChevronUp, Copy, Download, Edit2, FileText, FolderInput, Key, Layers, Pencil, Play, Plus, RefreshCw, RotateCcw, Settings, Sliders, Square, Star, Trash2, Upload, Wand2, XCircle, LayoutGrid, List } from 'lucide-react'
+import { Activity, CheckCircle, ChevronDown, ChevronRight, ChevronUp, Copy, Download, Edit2, FileText, FolderInput, Key, Layers, Pencil, Play, Plus, RefreshCw, RotateCcw, Settings, Sliders, Square, Star, Trash2, Wand2, XCircle, LayoutGrid, List } from 'lucide-react'
 import { Badge, Button, Card, FormItem, Input, Modal, StatCard, Table, Textarea, toast } from '../../../shared/components'
 import { reloadConfig } from '../../dashboard/api'
 import type { TableColumn } from '../../../shared/components/Table'
@@ -25,8 +25,6 @@ import {
   deleteGroup,
   moveInstancesToGroup,
   importExtensionToBrowserProfiles,
-  importMoreLoginProfiles,
-  importRunningMoreLoginProfiles,
   regenerateBrowserProfileCode,
   randomizeProfileFingerprint,
   restartBrowserInstance,
@@ -981,44 +979,6 @@ export function BrowserListPage() {
     }
   }
 
-  const handleImportMoreLogin = async () => {
-    try {
-      const result = await importMoreLoginProfiles()
-      if (result?.cancelled) {
-        return
-      }
-      await Promise.all([loadProfiles(), loadGroups()])
-      const imported = Number(result?.imported || 0)
-      const createdGroups = Array.isArray(result?.createdGroups) ? result.createdGroups.length : 0
-      const keyworded = Array.isArray(result?.profiles) ? result.profiles.length : imported
-      const restoredBrowserData = Number(result?.restoredBrowserData || 0)
-      const cacheRoot = typeof result?.cacheRoot === 'string' ? result.cacheRoot.trim() : ''
-      const baseMessage = result?.message || (imported > 0 ? `成功导入 ${imported} 个环境` : '导入完成')
-      const suffix = `${createdGroups > 0 ? `，新建 ${createdGroups} 个分组` : ''}${keyworded > 0 ? `，已自动写入可搜索关键字` : ''}${restoredBrowserData > 0 ? `，已恢复 ${restoredBrowserData} 个完整环境` : ''}${cacheRoot ? `，缓存目录：${cacheRoot}` : ''}`
-      toast.success(`${baseMessage}${suffix}`)
-    } catch (error: any) {
-      toast.error(error?.message || '导入 MoreLogin 环境失败')
-    }
-  }
-
-  const handleImportRunningMoreLogin = async () => {
-    try {
-      const result = await importRunningMoreLoginProfiles()
-      if (result?.cancelled) {
-        return
-      }
-      await Promise.all([loadProfiles(), loadGroups()])
-      const imported = Number(result?.imported || 0)
-      const copiedFiles = Number(result?.copiedFiles || 0)
-      const createdGroups = Array.isArray(result?.createdGroups) ? result.createdGroups.length : 0
-      const baseMessage = result?.message || (imported > 0 ? `成功导入 ${imported} 个运行中环境` : '导入完成')
-      const suffix = `${createdGroups > 0 ? `，新建 ${createdGroups} 个分组` : ''}${copiedFiles > 0 ? `，已复制 ${copiedFiles} 个文件` : ''}`
-      toast.success(`${baseMessage}${suffix}`)
-    } catch (error: any) {
-      toast.error(error?.message || '导入运行中的 MoreLogin 环境失败')
-    }
-  }
-
   const handleCleanCache = async () => {
     const running = profiles.filter(p => p.running).length
     const message = running > 0
@@ -1283,8 +1243,6 @@ export function BrowserListPage() {
           <Button variant="secondary" size="sm" onClick={handleCleanCache} loading={cleaningCache} title="只清理网页图片缓存、小程序/网页 App 缓存和 Cookies；不删除配置/书签">
             <Trash2 className="w-4 h-4" />清理缓存
           </Button>
-          <Button variant="secondary" size="sm" onClick={handleImportMoreLogin} title="导入 MoreLogin 导出的 xlsx / txt 环境文件"><Upload className="w-4 h-4" />导入环境</Button>
-          <Button variant="secondary" size="sm" onClick={handleImportRunningMoreLogin} title="导入当前正在运行的 MoreLogin 环境（当前先支持一次导入 1 个）"><FolderInput className="w-4 h-4" />导入运行中环境</Button>
           <Button variant="secondary" size="sm" onClick={handleOpenExtensionModal} disabled={selectedIds.size === 0} title="先勾选环境，再输入扩展下载地址"><Download className="w-4 h-4" />导入扩展</Button>
           <Button variant="secondary" size="sm" onClick={handleOpenSettings}><Sliders className="w-4 h-4" />基础配置</Button>
           <div className="flex items-center bg-[var(--color-bg-secondary)] rounded-md border border-[var(--color-border-default)] p-0.5 ml-2">

@@ -130,6 +130,8 @@ $AssetRoot = if ($env:BOOST_KERNEL_SRC) { $env:BOOST_KERNEL_SRC } else { $RepoRo
 $CloakKernelSrc = "$AssetRoot\chrome\cloak-146.0.7680.177"
 $GoogleKernelSrc = "$AssetRoot\chrome\google-148.0.7778.167"
 $GoogleKernelCompatMarker = "$GoogleKernelSrc\chrome-for-testing.marker"
+$BundleGoogleKernel = (-not $ManagerOnly) -and (Test-Path -LiteralPath "$GoogleKernelSrc\chrome.exe") -and (Test-Path -LiteralPath $GoogleKernelCompatMarker)
+$GoogleKernelCleanupLine = if ($BundleGoogleKernel) { '  RMDir /r "`$INSTDIR\chrome\google-148.0.7778.167"' } else { '  ; Preserve any existing optional Google 148 kernel.' }
 $BinSrc = "$AssetRoot\bin"
 # Optional helper extension is intentionally not staged for the self-use clean
 # build. Users requested no default/search helper extension in packaged installs.
@@ -168,7 +170,7 @@ if (-not $ManagerOnly -and (Test-Path -LiteralPath $BinSrc)) { Copy-Dir $BinSrc 
 if (-not $ManagerOnly) {
     New-Item -ItemType Directory -Force -Path "$Stage\chrome" | Out-Null
     Copy-Dir $CloakKernelSrc "$Stage\chrome\cloak-146.0.7680.177"
-    if ((Test-Path -LiteralPath "$GoogleKernelSrc\chrome.exe") -and (Test-Path -LiteralPath $GoogleKernelCompatMarker)) {
+    if ($BundleGoogleKernel) {
         Copy-Dir $GoogleKernelSrc "$Stage\chrome\google-148.0.7778.167"
     } else {
         Write-Host "Optional extension-compatible Chrome fallback missing; skipped: $GoogleKernelSrc" -ForegroundColor Yellow
@@ -358,7 +360,7 @@ Section "$ProductName" SecMain
   Call CloseBoostProcesses
   Call EnsureVCRuntime
   Call EnsureWebView2Runtime
-  RMDir /r "`$INSTDIR\chrome\google-148.0.7778.167"
+$GoogleKernelCleanupLine
   SetOutPath "`$INSTDIR"
   !include "$NshPath"
   CopyFiles /SILENT "`$PLUGINSDIR\activation.marker" "`$INSTDIR\.browserstudio-activation.json"
