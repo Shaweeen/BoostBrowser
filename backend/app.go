@@ -63,6 +63,8 @@ type App struct {
 	rabbyImportActive  map[string]bool
 	legacyRecoveryMu   sync.Mutex
 	legacyRecovery     *legacyDataRecoverySession
+	startupDataMu      sync.RWMutex
+	startupDataStatus  StartupDataCompatibilityStatus
 	stopServicesOnce   sync.Once
 	finalizeOnce       sync.Once
 	updateMu           sync.Mutex
@@ -182,8 +184,10 @@ func (a *App) startup(ctx context.Context) {
 		)
 	}
 
-	// 确保 data 目录存在（存放数据库、用户数据、快照等）
-	if err := os.MkdirAll(a.resolveAppPath("data"), 0755); err != nil {
+	// 安装/升级永远复用已有 data；只有目录不存在时才创建最新版本的空结构。
+	activeDataRoot := a.resolveAppPath("data")
+	dataExisted := directoryHasEntries(activeDataRoot)
+	if err := os.MkdirAll(activeDataRoot, 0755); err != nil {
 		log.Error("创建 data 目录失败", logger.F("error", err))
 	}
 
@@ -234,6 +238,7 @@ func (a *App) startup(ctx context.Context) {
 	// 一次性迁移：若 SQLite 表为空则从旧文件导入
 	a.migrateToSQLite()
 	a.browserMgr.InitData()
+	a.initializeActiveDataCompatibility(activeDataRoot, dataExisted)
 	if !a.panelMode {
 		// 默认使用随 BrowserStudio 打包/下载到 chrome/ 目录内的独立 Google Chrome 内核；不再引用系统安装的 Chrome。
 		a.ensureBundledGoogleChromeCore()

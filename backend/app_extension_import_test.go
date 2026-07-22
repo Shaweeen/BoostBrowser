@@ -37,13 +37,34 @@ func TestInstallUnpackedExtensionKeepsOldCopyWhenManifestInvalid(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(extDir, "marker.txt"), []byte("old"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := installUnpackedExtension(root, "example", extensionZipForTest(t, `{"name":"broken"}`))
+	_, _, _, err := installUnpackedExtension(root, "example", extensionZipForTest(t, `{"name":"broken"}`))
 	if err == nil {
 		t.Fatal("invalid manifest should be rejected")
 	}
 	data, readErr := os.ReadFile(filepath.Join(extDir, "marker.txt"))
 	if readErr != nil || string(data) != "old" {
 		t.Fatalf("old extension should be preserved: data=%q err=%v", data, readErr)
+	}
+}
+
+func TestInstallUnpackedExtensionUpdateKeepsProgramRollbackAndReportsVersions(t *testing.T) {
+	root := t.TempDir()
+	extDir := filepath.Join(root, "extensions", "imported", "example")
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"Wallet","version":"1.0","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	installed, previous, current, err := installUnpackedExtension(root, "example", extensionZipForTest(t, `{"name":"Wallet","version":"2.0","manifest_version":3}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installed != extDir || previous != "1.0" || current != "2.0" {
+		t.Fatalf("unexpected update result: dir=%s previous=%s current=%s", installed, previous, current)
+	}
+	if got := readManifestVersionFromDir(extDir + ".previous"); got != "1.0" {
+		t.Fatalf("previous extension package was not retained: %q", got)
 	}
 }
 

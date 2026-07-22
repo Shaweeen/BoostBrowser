@@ -20,6 +20,7 @@ export function BackupImportPackage(arg1:boolean):Promise<Record<string, any>>;
 
 export function BackupInitializeSystem():Promise<Record<string, any>>;
 export function LegacyDataRecoveryPrepare():Promise<any>;
+export function GetStartupDataCompatibilityStatus():Promise<any>;
 export function LegacyDataRecoveryExecute(arg1:string):Promise<any>;
 export function LegacyDataRecoveryCancel(arg1:string):Promise<void>;
 

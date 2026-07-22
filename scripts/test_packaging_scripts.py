@@ -66,6 +66,16 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("Call EnsureVCRuntime", installer)
         self.assertIn("Call EnsureWebView2Runtime", installer)
 
+    def test_installer_preserves_mutable_client_data(self):
+        installer = self.read("scripts/build_installer.ps1")
+        self.assertNotIn('Copy-Item -LiteralPath $ConfigSrc -Destination "$Stage\\config.yaml"', installer)
+        self.assertNotIn('New-Item -ItemType Directory -Force -Path "$Stage\\data"', installer)
+        self.assertIn('IfFileExists "`$INSTDIR\\config.yaml" config_present', installer)
+        uninstall_section = installer.split('Section "Uninstall"', 1)[1].split("SectionEnd", 1)[0]
+        self.assertNotIn('RMDir /r "`$INSTDIR"', uninstall_section)
+        for protected in ["config.yaml", "data", "extensions", "chrome"]:
+            self.assertNotRegex(uninstall_section, rf'(Delete|RMDir /r)[^\n]*{re.escape(protected)}')
+
     def test_installer_only_stops_browserstudio_owned_processes(self):
         installer = self.read("scripts/build_installer.ps1")
         cleanup = self.read("scripts/close_browserstudio_processes.ps1")

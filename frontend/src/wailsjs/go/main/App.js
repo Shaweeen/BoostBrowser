@@ -30,6 +30,10 @@ export function LegacyDataRecoveryPrepare() {
   return window['go']['main']['App']['LegacyDataRecoveryPrepare']();
 }
 
+export function GetStartupDataCompatibilityStatus() {
+  return window['go']['main']['App']['GetStartupDataCompatibilityStatus']();
+}
+
 export function LegacyDataRecoveryExecute(arg1) {
   return window['go']['main']['App']['LegacyDataRecoveryExecute'](arg1);
 }

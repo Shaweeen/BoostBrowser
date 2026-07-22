@@ -19,10 +19,12 @@ import (
 )
 
 type ExtensionImportResult struct {
-	ExtensionDir    string   `json:"extensionDir"`
-	ExtensionID     string   `json:"extensionId"`
-	UpdatedProfiles []string `json:"updatedProfiles"`
-	Message         string   `json:"message"`
+	ExtensionDir     string   `json:"extensionDir"`
+	ExtensionID      string   `json:"extensionId"`
+	ExtensionVersion string   `json:"extensionVersion"`
+	PreviousVersion  string   `json:"previousVersion"`
+	UpdatedProfiles  []string `json:"updatedProfiles"`
+	Message          string   `json:"message"`
 }
 
 // GlobalManagedExtension is the backend-authoritative global extension policy.
@@ -109,6 +111,7 @@ func (a *App) BrowserProfileRemoveExtension(profileIds []string, downloadAddress
 
 	if !stillReferenced {
 		_ = os.RemoveAll(extDir)
+		_ = os.RemoveAll(extDir + ".previous")
 	}
 
 	return &ExtensionImportResult{
@@ -134,7 +137,7 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 		return nil, fmt.Errorf("浏览器管理器未初始化")
 	}
 
-	extID, extDir, err := a.downloadAndInstallExtension(downloadAddress)
+	extID, extDir, previousVersion, extensionVersion, err := a.downloadAndInstallExtension(downloadAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -144,10 +147,12 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 		return nil, err
 	}
 	return &ExtensionImportResult{
-		ExtensionDir:    extDir,
-		ExtensionID:     extID,
-		UpdatedProfiles: updated,
-		Message:         fmt.Sprintf("扩展已导入并绑定到 %d 个实例，重启实例后生效", len(updated)),
+		ExtensionDir:     extDir,
+		ExtensionID:      extID,
+		ExtensionVersion: extensionVersion,
+		PreviousVersion:  previousVersion,
+		UpdatedProfiles:  updated,
+		Message:          extensionInstallMessage(previousVersion, extensionVersion, len(updated), false),
 	}, nil
 }
 
@@ -166,7 +171,7 @@ func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionIm
 	a.maintenanceMu.Lock()
 	defer a.maintenanceMu.Unlock()
 
-	extID, extDir, err := a.downloadAndInstallExtension(downloadAddress)
+	extID, extDir, previousVersion, extensionVersion, err := a.downloadAndInstallExtension(downloadAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -187,10 +192,12 @@ func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionIm
 		return nil, err
 	}
 	return &ExtensionImportResult{
-		ExtensionDir:    extDir,
-		ExtensionID:     extID,
-		UpdatedProfiles: updated,
-		Message:         fmt.Sprintf("扩展已设为全局使用并同步到 %d 个实例，运行中的实例重启后生效", len(updated)),
+		ExtensionDir:     extDir,
+		ExtensionID:      extID,
+		ExtensionVersion: extensionVersion,
+		PreviousVersion:  previousVersion,
+		UpdatedProfiles:  updated,
+		Message:          extensionInstallMessage(previousVersion, extensionVersion, len(updated), true),
 	}, nil
 }
 
@@ -248,6 +255,7 @@ func (a *App) BrowserGlobalExtensionRemove(downloadAddress string) (*ExtensionIm
 			updatedSet[id] = true
 		}
 		_ = os.RemoveAll(extDir)
+		_ = os.RemoveAll(extDir + ".previous")
 	}
 	updated := make([]string, 0, len(updatedSet))
 	for id := range updatedSet {
@@ -285,29 +293,40 @@ func (a *App) BrowserGlobalExtensionList() ([]GlobalManagedExtension, error) {
 	return out, nil
 }
 
-func (a *App) downloadAndInstallExtension(downloadAddress string) (string, string, error) {
+func (a *App) downloadAndInstallExtension(downloadAddress string) (string, string, string, string, error) {
 	extID := extractExtensionID(downloadAddress)
 	downloadURL := resolveExtensionDownloadURL(downloadAddress, extID)
 	if err := validateExtensionDownloadURL(downloadURL); err != nil {
-		return "", "", err
+		return "", "", "", "", err
 	}
 	payload, err := downloadExtensionPayload(downloadURL)
 	if err != nil {
-		return "", "", err
+		return "", "", "", "", err
 	}
 	zipPayload, err := extractZipPayloadFromCRX(payload)
 	if err != nil {
-		return "", "", err
+		return "", "", "", "", err
 	}
 	if extID == "" {
 		sum := sha256.Sum256(payload)
 		extID = "external-" + hex.EncodeToString(sum[:])[:16]
 	}
-	extDir, err := installUnpackedExtension(a.appRoot, extID, zipPayload)
+	extDir, previousVersion, extensionVersion, err := installUnpackedExtension(a.appRoot, extID, zipPayload)
 	if err != nil {
-		return "", "", err
+		return "", "", "", "", err
 	}
-	return extID, extDir, nil
+	return extID, extDir, previousVersion, extensionVersion, nil
+}
+
+func extensionInstallMessage(previousVersion, extensionVersion string, count int, global bool) string {
+	scope := "选中的"
+	if global {
+		scope = "全部现有和后续"
+	}
+	if previousVersion != "" && previousVersion != extensionVersion {
+		return fmt.Sprintf("扩展已从 %s 更新到 %s，并重新绑定到%s实例；各环境钱包/Cookies 数据未改动，重启实例后生效", previousVersion, extensionVersion, scope)
+	}
+	return fmt.Sprintf("扩展 %s 已绑定到 %d 个实例；各环境钱包/Cookies 数据未改动，重启实例后生效", extensionVersion, count)
 }
 
 func normalizeProfileIDs(ids []string) []string {
@@ -471,39 +490,56 @@ func unzipBytes(data []byte, dest string) error {
 	return nil
 }
 
-func installUnpackedExtension(appRoot string, extID string, zipPayload []byte) (string, error) {
+func installUnpackedExtension(appRoot string, extID string, zipPayload []byte) (string, string, string, error) {
 	parent := filepath.Join(appRoot, "extensions", "imported")
 	if err := os.MkdirAll(parent, 0755); err != nil {
-		return "", fmt.Errorf("创建扩展目录失败：%w", err)
+		return "", "", "", fmt.Errorf("创建扩展目录失败：%w", err)
 	}
 	extDir := filepath.Join(parent, safePathName(extID))
 	stageDir, err := os.MkdirTemp(parent, ".installing-")
 	if err != nil {
-		return "", fmt.Errorf("创建扩展暂存目录失败：%w", err)
+		return "", "", "", fmt.Errorf("创建扩展暂存目录失败：%w", err)
 	}
 	defer os.RemoveAll(stageDir)
 	if err := unzipBytes(zipPayload, stageDir); err != nil {
-		return "", err
+		return "", "", "", err
 	}
 	if err := validateUnpackedExtensionManifest(stageDir); err != nil {
-		return "", err
+		return "", "", "", err
 	}
+	newVersion := readManifestVersionFromDir(stageDir)
+	previousVersion := readManifestVersionFromDir(extDir)
 
 	backupDir := extDir + ".previous"
 	_ = os.RemoveAll(backupDir)
 	if _, statErr := os.Stat(extDir); statErr == nil {
 		if err := os.Rename(extDir, backupDir); err != nil {
-			return "", fmt.Errorf("替换旧扩展目录失败：%w", err)
+			return "", "", "", fmt.Errorf("替换旧扩展目录失败：%w", err)
 		}
 	} else if !os.IsNotExist(statErr) {
-		return "", fmt.Errorf("检查旧扩展目录失败：%w", statErr)
+		return "", "", "", fmt.Errorf("检查旧扩展目录失败：%w", statErr)
 	}
 	if err := os.Rename(stageDir, extDir); err != nil {
 		_ = os.Rename(backupDir, extDir)
-		return "", fmt.Errorf("安装扩展目录失败：%w", err)
+		return "", "", "", fmt.Errorf("安装扩展目录失败：%w", err)
 	}
-	_ = os.RemoveAll(backupDir)
-	return extDir, nil
+	// Keep one program-package rollback. Wallet secrets/state are never copied
+	// here: they remain inside each profile's Chrome user-data directory.
+	return extDir, previousVersion, newVersion, nil
+}
+
+func readManifestVersionFromDir(extDir string) string {
+	data, err := os.ReadFile(filepath.Join(extDir, "manifest.json"))
+	if err != nil || len(data) > 2*1024*1024 {
+		return ""
+	}
+	var manifest struct {
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(data, &manifest) != nil {
+		return ""
+	}
+	return strings.TrimSpace(manifest.Version)
 }
 
 func validateUnpackedExtensionManifest(extDir string) error {
@@ -777,7 +813,7 @@ func (a *App) InstallExtensionFromCRXURL(profileID string, crxURL string) (strin
 		sum := sha256.Sum256(payload)
 		extID = "external-" + hex.EncodeToString(sum[:])[:16]
 	}
-	extDir, err := installUnpackedExtension(a.appRoot, extID, zipPayload)
+	extDir, _, _, err := installUnpackedExtension(a.appRoot, extID, zipPayload)
 	if err != nil {
 		return extID, "", err
 	}

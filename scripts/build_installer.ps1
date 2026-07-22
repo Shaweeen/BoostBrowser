@@ -161,7 +161,9 @@ New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 
 Copy-Item -LiteralPath $BoostExe -Destination "$Stage\boost-browser.exe" -Force
 Copy-Item -LiteralPath $UpdaterExe -Destination "$Stage\updater.exe" -Force
-if (Test-Path -LiteralPath $ConfigSrc) { Copy-Item -LiteralPath $ConfigSrc -Destination "$Stage\config.yaml" -Force }
+# config.yaml is mutable user state. It is installed separately only when the
+# destination does not already exist, so a full installer can safely be used as
+# an in-place repair/upgrade.
 if (Test-Path -LiteralPath $AppIconSrc) { Copy-Item -LiteralPath $AppIconSrc -Destination $Stage -Force }
 if (Test-Path -LiteralPath $AppPngSrc) { Copy-Item -LiteralPath $AppPngSrc -Destination $Stage -Force }
 if (-not $ManagerOnly -and (Test-Path -LiteralPath $BinSrc)) { Copy-Dir $BinSrc "$Stage\bin" }
@@ -176,7 +178,8 @@ if (-not $ManagerOnly) {
         Write-Host "Optional extension-compatible Chrome fallback missing; skipped: $GoogleKernelSrc" -ForegroundColor Yellow
     }
 }
-New-Item -ItemType Directory -Force -Path "$Stage\data" | Out-Null
+# Never package a data directory. Existing browser profiles, Cookies and wallet
+# extension state must remain owned by the installed client.
 
 Get-ChildItem $Stage -Recurse -File -Force | Where-Object {
     $_.Name -in @('LOCK','LOG','LOG.old') -or $_.Name -like '*.tmp'
@@ -363,6 +366,9 @@ Section "$ProductName" SecMain
 $GoogleKernelCleanupLine
   SetOutPath "`$INSTDIR"
   !include "$NshPath"
+  IfFileExists "`$INSTDIR\config.yaml" config_present
+  File /oname=config.yaml "$ConfigSrc"
+config_present:
   CopyFiles /SILENT "`$PLUGINSDIR\activation.marker" "`$INSTDIR\.browserstudio-activation.json"
   SetOutPath "`$INSTDIR"
   WriteUninstaller "`$INSTDIR\Uninstall.exe"
@@ -386,7 +392,15 @@ Section "Uninstall"
   Delete "`$SMPROGRAMS\`${PRODUCT_NAME}\`${PRODUCT_NAME}.lnk"
   Delete "`$SMPROGRAMS\`${PRODUCT_NAME}\Uninstall `${PRODUCT_NAME}.lnk"
   RMDir "`$SMPROGRAMS\`${PRODUCT_NAME}"
-  RMDir /r "`$INSTDIR"
+  ; Preserve mutable state for accidental uninstall/reinstall recovery.
+  ; A later installer will reuse config/data/extensions/chrome in this folder.
+  Delete "`$INSTDIR\boost-browser.exe"
+  Delete "`$INSTDIR\updater.exe"
+  Delete "`$INSTDIR\app.ico"
+  Delete "`$INSTDIR\app.png"
+  Delete "`$INSTDIR\Uninstall.exe"
+  RMDir /r "`$INSTDIR\bin"
+  RMDir "`$INSTDIR"
   DeleteRegKey HKCU "`${UNINSTALL_KEY}"
 SectionEnd
 "@

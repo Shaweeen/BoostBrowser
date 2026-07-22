@@ -7,7 +7,7 @@ import { ToastContainer, Modal, Button, Loading } from './shared/components'
 import { AlertCircle } from 'lucide-react'
 import { useNotificationStore } from './store/notificationStore'
 import { useBackupStore } from './store/backupStore'
-import { ForceQuit as ForceQuitApp, IsWindowSyncPanelMode, RecordLifecycleEvent, SaveNativeMainWindowBounds } from './wailsjs/go/main/App'
+import { ForceQuit as ForceQuitApp, GetStartupDataCompatibilityStatus, IsWindowSyncPanelMode, RecordLifecycleEvent, SaveNativeMainWindowBounds } from './wailsjs/go/main/App'
 import { Environment, Quit, WindowGetPosition, WindowGetSize, WindowHide, WindowIsMaximised, WindowIsMinimised, WindowMinimise, WindowSetPosition, WindowSetSize } from './wailsjs/runtime/runtime'
 
 function lazyNamed<TModule extends Record<string, ComponentType<any>>>(
@@ -344,6 +344,51 @@ function CloseConfirmModal() {
   )
 }
 
+type StartupDataStatus = {
+  activeDataPath?: string
+  existingData?: boolean
+  autoRecovered?: number
+  message?: string
+}
+
+function StartupDataCompatibilityNotice() {
+  const [status, setStatus] = useState<StartupDataStatus | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    GetStartupDataCompatibilityStatus()
+      .then((value) => {
+        if (!cancelled && Number(value?.autoRecovered || 0) > 0) setStatus(value)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+
+  return (
+    <Modal
+      open={status !== null}
+      onClose={() => setStatus(null)}
+      title="已识别现有 data 数据"
+      width="560px"
+      footer={<Button onClick={() => setStatus(null)}>我知道了</Button>}
+    >
+      <div className="space-y-3 text-sm text-[var(--color-text-secondary)]">
+        <div className="flex items-start gap-3 rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-secondary)] p-3">
+          <AlertCircle className="mt-0.5 h-5 w-5 flex-none text-[var(--color-accent)]" />
+          <div>
+            <p className="font-medium text-[var(--color-text-primary)]">{status?.message}</p>
+            <p className="mt-1">自动恢复环境：{status?.autoRecovered || 0} 个</p>
+            <p className="mt-1 break-all text-xs text-[var(--color-text-muted)]">数据目录：{status?.activeDataPath}</p>
+          </div>
+        </div>
+        <p className="text-xs text-[var(--color-text-muted)]">
+          客户端只升级程序和最新数据读取组件，不改写环境中的 Cookies、浏览器文件、扩展与钱包本地存储。钱包扩展升级请保持相同的官方扩展 ID；扩展自身会负责其存储格式迁移。
+        </p>
+      </div>
+    </Modal>
+  )
+}
+
 function App() {
   useWailsNotifications()
   const [quickLaunchOpen, setQuickLaunchOpen] = useState(false)
@@ -503,6 +548,7 @@ function App() {
         </Layout>
         <ToastContainer />
         {!syncPanelMode && <CloseConfirmModal />}
+        {!syncPanelMode && <StartupDataCompatibilityNotice />}
         {!syncPanelMode && <UpdateChecker />}
         {!syncPanelMode && (
           <Suspense fallback={null}>
