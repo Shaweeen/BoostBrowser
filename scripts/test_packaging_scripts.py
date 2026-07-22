@@ -202,11 +202,38 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("boost-browser.exe", text)
         self.assertIn('"$MainExe.sha256"', text)
         self.assertIn("release-manifest.json", text)
+        self.assertIn("BrowserStudio-Repair-Upgrade-v$Version.ps1", text)
+        self.assertIn("scripts/repair_upgrade_windows.ps1", text)
+        self.assertIn("packagingCommit", text)
+        self.assertIn("allowedPostTagFiles", text)
+        self.assertIn("function Invoke-GhProbe", text)
+        self.assertIn("$existingProbe.ExitCode", text)
+        self.assertNotIn("$existingText = & gh release view", text)
         self.assertIn("activation-check.exe", text)
         self.assertIn("BrowserStudio-Private-Setup-v$Version.exe", text)
         assets_block = text.split("$assets = @(", 1)[1].split(")", 1)[0]
         self.assertNotIn("activation-check.exe", assets_block)
         self.assertNotIn("BrowserStudio-Private-Setup", assets_block)
+
+    def test_repair_upgrade_preserves_user_data_and_validates_release_files(self):
+        raw = (ROOT / "scripts/repair_upgrade_windows.ps1").read_bytes()
+        self.assertTrue(all(byte < 128 for byte in raw), "repair upgrader must remain ASCII-only for Windows PowerShell 5.1")
+        text = raw.decode("ascii")
+        self.assertIn("TargetVersion = 'v1.7.19'", text)
+        self.assertIn("api.github.com/repos/$Owner/$Repo/releases/tags/$Tag", text)
+        self.assertIn("Assert-TrustedAssetURL", text)
+        self.assertIn("Get-FileHash", text)
+        self.assertIn("Assert-WindowsPE", text)
+        self.assertIn("data\\repair-backups", text)
+        self.assertIn("Backup-CriticalState", text)
+        self.assertIn("CloseMainWindow", text)
+        self.assertNotIn("Stop-Process -Force", text)
+        self.assertIn("Copy-Item -LiteralPath (Join-Path $tempRoot 'boost-browser.exe')", text)
+        self.assertIn("Copy-Item -LiteralPath (Join-Path $tempRoot 'updater.exe')", text)
+        for protected in ["config.yaml", "proxies.yaml", "chrome", "extensions"]:
+            self.assertNotRegex(text, rf"Remove-Item[^\n]*{re.escape(protected)}")
+        self.assertNotIn("RMDir", text)
+        self.assertNotIn("Uninstall.exe", text)
 
     def test_no_active_script_keeps_old_machine_specific_paths(self):
         for path in (ROOT / "scripts").rglob("*"):

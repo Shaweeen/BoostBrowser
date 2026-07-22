@@ -46,6 +46,25 @@ function Write-SHA256([string]$Path) {
     return $hash
 }
 
+# A missing release is expected on the first publish. Windows PowerShell can
+# turn native stderr into a terminating NativeCommandError when the global
+# preference is Stop, so probe gh with errors temporarily silenced and inspect
+# the real process exit code ourselves.
+function Invoke-GhProbe([string[]]$Arguments) {
+    $savedPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'SilentlyContinue'
+        $output = @(& gh @Arguments 2>$null)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        Output = ($output -join [Environment]::NewLine)
+    }
+}
+
 Require-Command 'git' 'Install Git for Windows.'
 Require-Command 'gh' 'Install GitHub CLI and run: gh auth login'
 Require-Command 'powershell.exe' 'Windows PowerShell is required.'
@@ -77,7 +96,21 @@ if ($LASTEXITCODE -ne 0 -or $tagCommitOutput.Count -ne 1) {
 }
 $TagCommit = $tagCommitOutput[0].Trim()
 if ($Head -ne $TagCommit) {
-    throw "HEAD $Head does not match release tag $Tag ($TagCommit)"
+    & git merge-base --is-ancestor $Tag $Head
+    if ($LASTEXITCODE -ne 0) {
+        throw "Release tag $Tag is not an ancestor of HEAD $Head"
+    }
+    $allowedPostTagFiles = @(
+        'scripts/publish_windows_github_release.ps1',
+        'scripts/repair_upgrade_windows.ps1',
+        'scripts/test_packaging_scripts.py',
+        "RELEASE_NOTES_v$Version.md"
+    )
+    $postTagFiles = @(& git diff --name-only $Tag HEAD)
+    $unexpectedPostTagFiles = @($postTagFiles | Where-Object { $allowedPostTagFiles -notcontains $_ })
+    if ($unexpectedPostTagFiles.Count -gt 0) {
+        throw "HEAD differs from $Tag outside release-packaging files: $($unexpectedPostTagFiles -join ', ')"
+    }
 }
 
 & git ls-remote --exit-code origin "refs/tags/$Tag" | Out-Null
@@ -95,16 +128,21 @@ $SetupExe = "$ReleaseDir\BrowserStudio-Manager-Setup-v$Version.exe"
 $ZipName = "BrowserStudio-Update-v$Version-windows-x64.zip"
 $ZipPath = "$ReleaseDir\$ZipName"
 $ManifestPath = "$ReleaseDir\release-manifest.json"
+$RepairSource = "$RepoRoot\scripts\repair_upgrade_windows.ps1"
+$RepairName = "BrowserStudio-Repair-Upgrade-v$Version.ps1"
+$RepairPath = "$ReleaseDir\$RepairName"
 
 Assert-WindowsPE $MainExe
 Assert-WindowsPE $UpdaterExe
 Assert-WindowsPE $SetupExe
+Require-File $RepairSource
+Copy-Item -LiteralPath $RepairSource -Destination $RepairPath -Force
 
 Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
 Compress-Archive -LiteralPath $MainExe -DestinationPath $ZipPath -CompressionLevel Optimal
 Require-File $ZipPath
 
-$publicBinaries = @($MainExe, $UpdaterExe, $SetupExe, $ZipPath)
+$publicBinaries = @($MainExe, $UpdaterExe, $SetupExe, $ZipPath, $RepairPath)
 $manifestFiles = @()
 foreach ($path in $publicBinaries) {
     $hash = Write-SHA256 $path
@@ -117,7 +155,8 @@ foreach ($path in $publicBinaries) {
 }
 $manifest = [ordered]@{
     version = $Version
-    commit = $Head
+    commit = $TagCommit
+    packagingCommit = $Head
     generatedAt = [DateTime]::UtcNow.ToString('o')
     files = $manifestFiles
 }
@@ -132,13 +171,16 @@ $assets = @(
     "$ZipPath.sha256",
     $SetupExe,
     "$SetupExe.sha256",
+    $RepairPath,
+    "$RepairPath.sha256",
     $ManifestPath
 )
 foreach ($asset in $assets) { Require-File $asset }
 
 $existing = $null
-$existingText = & gh release view $Tag --repo $Repository --json tagName,isDraft,isPrerelease 2>$null
-if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($existingText)) {
+$existingProbe = Invoke-GhProbe -Arguments @('release', 'view', $Tag, '--repo', $Repository, '--json', 'tagName,isDraft,isPrerelease')
+$existingText = $existingProbe.Output
+if ($existingProbe.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($existingText)) {
     $existing = $existingText | ConvertFrom-Json
     if (-not $existing.isDraft) {
         throw "Release $Tag is already published and will not be overwritten"
