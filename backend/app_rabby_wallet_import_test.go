@@ -108,30 +108,30 @@ func writeRabbyImportFixture(t *testing.T, name, content string) string {
 
 func rabbyTestProfiles() map[string]RabbyWalletImportPreviewRow {
 	return map[string]RabbyWalletImportPreviewRow{
-		"profile-1": {EnvironmentNumber: 1, ProfileID: "profile-1", ProfileName: "环境一"},
-		"profile-2": {EnvironmentNumber: 2, ProfileID: "profile-2", ProfileName: "环境二", Running: true},
+		"profile-1": {EnvironmentNumber: 1, ProfileID: "profile-1", ProfileName: "环境一", StorageID: "folder-1"},
+		"profile-2": {EnvironmentNumber: 2, ProfileID: "profile-2", ProfileName: "环境二", StorageID: "folder-2", Running: true},
 	}
 }
 
-func TestValidateRunningWalletImportProfiles(t *testing.T) {
-	rows := []rabbyWalletImportSecretRow{{RowNumber: 2, ProfileID: "profile-1"}}
+func TestValidateWalletImportProfileMappingsAllowsStoppedEnvironment(t *testing.T) {
+	rows := []rabbyWalletImportSecretRow{{RowNumber: 2, ProfileID: "profile-1", ProfileName: "实例-1", EnvironmentNumber: "1", StorageID: "folder-1"}}
 	profiles := map[string]RabbyWalletImportPreviewRow{
-		"profile-1": {EnvironmentNumber: 1, ProfileID: "profile-1", ProfileName: "实例-1"},
+		"profile-1": {EnvironmentNumber: 1, ProfileID: "profile-1", ProfileName: "实例-1", StorageID: "folder-1"},
 	}
-	if err := validateRunningWalletImportProfiles(rows, profiles); err == nil || !strings.Contains(err.Error(), "尚未启动") {
-		t.Fatalf("stopped environment should be rejected: %v", err)
+	if err := validateWalletImportProfileMappings(rows, profiles); err != nil {
+		t.Fatalf("stopped environment should be accepted: %v", err)
 	}
 	profile := profiles["profile-1"]
-	profile.Running = true
+	profile.StorageID = "changed-folder"
 	profiles["profile-1"] = profile
-	if err := validateRunningWalletImportProfiles(rows, profiles); err == nil || !strings.Contains(err.Error(), "调试接口") {
-		t.Fatalf("not-ready environment should be rejected: %v", err)
+	if err := validateWalletImportProfileMappings(rows, profiles); err == nil || !strings.Contains(err.Error(), "数据文件夹 ID") {
+		t.Fatalf("changed storage mapping should be rejected: %v", err)
 	}
-	profile.DebugReady = true
-	profile.DebugPort = 9222
+	profile.StorageID = "folder-1"
+	profile.EnvironmentNumber = 3
 	profiles["profile-1"] = profile
-	if err := validateRunningWalletImportProfiles(rows, profiles); err != nil {
-		t.Fatalf("running ready environment should pass: %v", err)
+	if err := validateWalletImportProfileMappings(rows, profiles); err == nil || !strings.Contains(err.Error(), "环境编号") {
+		t.Fatalf("changed number should be rejected: %v", err)
 	}
 }
 
@@ -146,6 +146,9 @@ func TestParseRabbyWalletImportCSV(t *testing.T) {
 	if len(rows) != 1 || rows[0].ProfileID != "profile-1" || rows[0].Mnemonic != mnemonic {
 		t.Fatalf("unexpected secret rows: %#v", rows)
 	}
+	if rows[0].EnvironmentNumber != "1" || rows[0].ProfileName != "环境一" || rows[0].StorageID != "folder-1" {
+		t.Fatalf("canonical environment mapping was not retained: %#v", rows[0])
+	}
 	if len(preview) != 1 || preview[0].ProfileName != "环境一" || preview[0].WordCount != 12 || preview[0].Running {
 		t.Fatalf("unexpected preview: %#v", preview)
 	}
@@ -155,6 +158,48 @@ func TestParseRabbyWalletImportCSV(t *testing.T) {
 	}
 	if bytes.Contains(encoded, []byte("alphaa")) {
 		t.Fatal("frontend preview exposed mnemonic material")
+	}
+}
+
+func TestParseWalletImportCSVWithStorageID(t *testing.T) {
+	mnemonic := rabbyTestMnemonic("storage", 12)
+	path := writeRabbyImportFixture(t, "wallets-storage.csv", "environment_number,profile_id,profile_name,storage_id,mnemonic\n1,profile-1,环境一,folder-1,"+mnemonic+"\n")
+
+	rows, preview, err := parseRabbyWalletImportFile(path, rabbyTestProfiles())
+	if err != nil || len(rows) != 1 || len(preview) != 1 || rows[0].StorageID != "folder-1" || preview[0].StorageID != "folder-1" {
+		t.Fatalf("storage mapping failed rows=%#v preview=%#v err=%v", rows, preview, err)
+	}
+}
+
+func TestParseWalletImportTemplateSkipsBlankMnemonicRows(t *testing.T) {
+	mnemonic := rabbyTestMnemonic("selected", 12)
+	content := "environment_number,profile_id,profile_name,storage_id,mnemonic\n" +
+		"1,profile-1,环境一,folder-1,\n" +
+		"2,profile-2,环境二,folder-2," + mnemonic + "\n"
+	path := writeRabbyImportFixture(t, "wallets-partial-template.csv", content)
+
+	rows, preview, err := parseRabbyWalletImportFile(path, rabbyTestProfiles())
+	if err != nil || len(rows) != 1 || len(preview) != 1 || rows[0].ProfileID != "profile-2" {
+		t.Fatalf("blank template rows should be skipped rows=%#v preview=%#v err=%v", rows, preview, err)
+	}
+}
+
+func TestParseWalletImportRejectsConflictingStorageID(t *testing.T) {
+	mnemonic := rabbyTestMnemonic("storageconflict", 12)
+	path := writeRabbyImportFixture(t, "wallets-storage-conflict.csv", "profile_id,storage_id,mnemonic\nprofile-1,folder-2,"+mnemonic+"\n")
+
+	_, _, err := parseRabbyWalletImportFile(path, rabbyTestProfiles())
+	if err == nil || !strings.Contains(err.Error(), "指向不同环境") {
+		t.Fatalf("expected conflicting storage mapping error, got %v", err)
+	}
+}
+
+func TestWalletProfileStorageID(t *testing.T) {
+	if got := walletProfileStorageID(`D:\\BrowserStudio\\data\\profile-9`, "fallback"); got != "profile-9" {
+		t.Fatalf("unexpected Windows storage ID: %q", got)
+	}
+	if got := walletProfileStorageID("", "profile-fallback"); got != "profile-fallback" {
+		t.Fatalf("unexpected fallback storage ID: %q", got)
 	}
 }
 

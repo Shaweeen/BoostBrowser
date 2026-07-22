@@ -1,8 +1,10 @@
 export namespace backend {
 	export class RabbyWalletImportPreviewRow {
 	    rowNumber: number;
+	    environmentNumber: number;
 	    profileId: string;
 	    profileName: string;
+	    storageId: string;
 	    wordCount: number;
 	    running: boolean;
 
@@ -10,8 +12,10 @@ export namespace backend {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.rowNumber = source["rowNumber"];
+	        this.environmentNumber = source["environmentNumber"];
 	        this.profileId = source["profileId"];
 	        this.profileName = source["profileName"];
+	        this.storageId = source["storageId"];
 	        this.wordCount = source["wordCount"];
 	        this.running = source["running"];
 	    }

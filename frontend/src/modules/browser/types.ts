@@ -46,6 +46,7 @@ export interface RabbyWalletImportPreviewRow {
   environmentNumber: number
   profileId: string
   profileName: string
+  storageId: string
   wordCount: number
   running: boolean
 }

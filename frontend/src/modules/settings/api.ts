@@ -38,8 +38,13 @@ export interface LegacyDataRecoveryRow {
   profileId: string
   profileName: string
   userDataDir: string
+  sourceFolderName: string
+  targetProfileId: string
+  targetProfileName: string
+  targetNumber: number
+  overwrite: boolean
   directoryExists: boolean
-  status: 'ready' | 'conflict' | 'missing' | 'success' | 'failed'
+  status: 'ready' | 'overwrite' | 'conflict' | 'missing' | 'success' | 'failed'
   message: string
 }
 

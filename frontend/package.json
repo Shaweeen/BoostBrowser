@@ -1,7 +1,7 @@
 {
   "name": "boost-browser-frontend",
   "private": true,
-  "version": "1.7.24",
+  "version": "1.7.25",
   "type": "module",
   "scripts": {
     "ensure:native": "node ./scripts/ensure-rollup-native.mjs",

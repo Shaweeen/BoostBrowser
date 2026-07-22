@@ -4,6 +4,7 @@ import (
 	"boost-browser/backend/internal/browser"
 	"boost-browser/backend/internal/database"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -22,6 +23,11 @@ type LegacyDataRecoveryRow struct {
 	ProfileID         string `json:"profileId"`
 	ProfileName       string `json:"profileName"`
 	UserDataDir       string `json:"userDataDir"`
+	SourceFolderName  string `json:"sourceFolderName"`
+	TargetProfileID   string `json:"targetProfileId"`
+	TargetProfileName string `json:"targetProfileName"`
+	TargetNumber      int    `json:"targetNumber"`
+	Overwrite         bool   `json:"overwrite"`
 	DirectoryExists   bool   `json:"directoryExists"`
 	Status            string `json:"status"`
 	Message           string `json:"message"`
@@ -50,7 +56,10 @@ type LegacyDataRecoveryResult struct {
 
 type legacyDataRecoveryCandidate struct {
 	Profile           *browser.Profile
+	TargetProfile     *browser.Profile
 	EnvironmentNumber int
+	TargetNumber      int
+	SourceFolderName  string
 	SourceDir         string
 	DestinationDir    string
 	RegisteredDir     string
@@ -68,8 +77,8 @@ type legacyDataRecoverySession struct {
 }
 
 // LegacyDataRecoveryPrepare selects and validates a raw data directory from an
-// older installation. The source is never modified. Exact recovery requires
-// app.db because directory names alone do not contain the profile metadata.
+// older installation. The source is never modified. app.db supplies exact
+// metadata when available; otherwise Chrome data folders are mapped by name.
 func (a *App) LegacyDataRecoveryPrepare() (*LegacyDataRecoveryPreview, error) {
 	if a == nil || a.ctx == nil || a.browserMgr == nil {
 		return nil, fmt.Errorf("应用尚未初始化")
@@ -90,7 +99,7 @@ func (a *App) legacyDataRecoveryPreparePath(selected string) (*LegacyDataRecover
 		return nil, err
 	}
 	activeRoot := a.backupResolveUserDataRoot(a.config)
-	if backupSamePath(sourceRoot, activeRoot) || backupSamePath(dbPath, a.backupResolveDBPath(a.config)) {
+	if backupSamePath(sourceRoot, activeRoot) || dbPath != "" && backupSamePath(dbPath, a.backupResolveDBPath(a.config)) {
 		return nil, fmt.Errorf("所选目录是当前正在使用的 data，请选择旧版备份目录")
 	}
 
@@ -104,22 +113,30 @@ func (a *App) legacyDataRecoveryPreparePath(selected string) (*LegacyDataRecover
 			_ = os.RemoveAll(tempRoot)
 		}
 	}()
-	tempDB := filepath.Join(tempRoot, "app.db")
-	if err := legacyCopySQLiteSet(dbPath, tempDB); err != nil {
-		return nil, err
-	}
-	sourceDB, err := database.NewDB(tempDB)
-	if err != nil {
-		return nil, fmt.Errorf("旧版 app.db 无法打开: %w", err)
-	}
-	if err := sourceDB.Migrate(); err != nil {
+	profiles := make([]*browser.Profile, 0)
+	if dbPath != "" {
+		tempDB := filepath.Join(tempRoot, "app.db")
+		if err := legacyCopySQLiteSet(dbPath, tempDB); err != nil {
+			return nil, err
+		}
+		sourceDB, openErr := database.NewDB(tempDB)
+		if openErr != nil {
+			return nil, fmt.Errorf("旧版 app.db 无法打开: %w", openErr)
+		}
+		if migrateErr := sourceDB.Migrate(); migrateErr != nil {
+			_ = sourceDB.Close()
+			return nil, fmt.Errorf("旧版 app.db 结构无法升级识别: %w", migrateErr)
+		}
+		profiles, err = browser.NewSQLiteProfileDAO(sourceDB.GetConn()).List()
 		_ = sourceDB.Close()
-		return nil, fmt.Errorf("旧版 app.db 结构无法升级识别: %w", err)
-	}
-	profiles, err := browser.NewSQLiteProfileDAO(sourceDB.GetConn()).List()
-	_ = sourceDB.Close()
-	if err != nil {
-		return nil, fmt.Errorf("读取旧版环境清单失败: %w", err)
+		if err != nil {
+			return nil, fmt.Errorf("读取旧版环境清单失败: %w", err)
+		}
+	} else {
+		profiles, err = legacyProfilesFromRawFolders(sourceRoot)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if len(profiles) == 0 {
 		return nil, fmt.Errorf("旧版 app.db 中没有可恢复的浏览器环境")
@@ -133,42 +150,59 @@ func (a *App) legacyDataRecoveryPreparePath(selected string) (*LegacyDataRecover
 	}
 	a.browserMgr.Mutex.Lock()
 	currentMap := make(map[string]*browser.Profile, len(a.browserMgr.Profiles))
-	currentNumbers := make(map[int]bool, len(a.browserMgr.Profiles))
+	currentNumbers := make(map[string]int, len(a.browserMgr.Profiles))
+	currentByFolder := make(map[string][]*browser.Profile, len(a.browserMgr.Profiles))
 	currentDirs := make(map[string]bool, len(a.browserMgr.Profiles))
 	for id, profile := range a.browserMgr.Profiles {
 		if profile == nil {
 			continue
 		}
 		currentMap[id] = profile
-		currentNumbers[resolveBadgeDisplayNumber(id, profile.ProfileName, a.browserMgr.Profiles)] = true
+		currentNumbers[id] = resolveBadgeDisplayNumber(id, profile.ProfileName, a.browserMgr.Profiles)
+		folderKey := legacyDataFolderKey(profile.UserDataDir, profile.ProfileId)
+		currentByFolder[folderKey] = append(currentByFolder[folderKey], profile)
 		currentDirs[backupNormalizePath(a.browserMgr.ResolveUserDataDir(profile))] = true
 	}
 	a.browserMgr.Mutex.Unlock()
 
 	candidates := make([]*legacyDataRecoveryCandidate, 0, len(profiles))
 	reservedDestinations := make(map[string]bool, len(profiles))
-	reservedNumbers := make(map[int]bool, len(profiles))
+	reservedTargets := make(map[string]bool, len(profiles))
 	for _, profile := range profiles {
 		if profile == nil || strings.TrimSpace(profile.ProfileId) == "" {
 			continue
 		}
 		number := resolveBadgeDisplayNumber(profile.ProfileId, profile.ProfileName, sourceMap)
 		sourceDir := legacyResolveProfileSourceDir(sourceRoot, profile)
+		sourceFolderName := filepath.Base(filepath.Clean(sourceDir))
 		registeredDir, destinationDir := legacyResolveProfileDestination(activeRoot, profile)
 		candidate := &legacyDataRecoveryCandidate{
 			Profile: profile, EnvironmentNumber: number, SourceDir: sourceDir,
-			DestinationDir: destinationDir, RegisteredDir: registeredDir, Status: "ready", Message: "可恢复",
+			SourceFolderName: sourceFolderName, DestinationDir: destinationDir, RegisteredDir: registeredDir, Status: "ready", Message: "将新建恢复环境",
 		}
-		if _, exists := currentMap[profile.ProfileId]; exists {
-			candidate.Status, candidate.Message = "conflict", "相同环境 ID 已存在，已保护当前数据"
-		} else if currentNumbers[number] || reservedNumbers[number] {
-			candidate.Status, candidate.Message = "conflict", fmt.Sprintf("环境编号 %d 已被当前或待恢复环境占用", number)
+		folderMatches := currentByFolder[legacyDataFolderKey(sourceFolderName, profile.ProfileId)]
+		if info, statErr := os.Lstat(sourceDir); statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			candidate.Status, candidate.Message = "missing", "备份浏览器数据目录不存在"
+		} else if len(folderMatches) == 1 {
+			target := folderMatches[0]
+			if reservedTargets[target.ProfileId] {
+				candidate.Status, candidate.Message = "conflict", "多个备份目录指向同一当前环境，已停止覆盖"
+			} else {
+				candidate.TargetProfile = target
+				candidate.TargetNumber = currentNumbers[target.ProfileId]
+				candidate.RegisteredDir = target.UserDataDir
+				candidate.DestinationDir = a.browserMgr.ResolveUserDataDir(target)
+				candidate.Status = "overwrite"
+				candidate.Message = fmt.Sprintf("按文件夹 %s 覆盖当前环境 #%d %s", sourceFolderName, candidate.TargetNumber, target.ProfileName)
+				reservedTargets[target.ProfileId] = true
+			}
+		} else if len(folderMatches) > 1 {
+			candidate.Status, candidate.Message = "conflict", "当前多个环境使用同名数据文件夹，无法唯一判断覆盖目标"
+		} else if _, exists := currentMap[profile.ProfileId]; exists {
+			candidate.Status, candidate.Message = "conflict", "环境 ID 已存在但数据文件夹名不同，请先将当前环境数据目录设为备份文件夹名"
 		} else if currentDirs[backupNormalizePath(destinationDir)] || reservedDestinations[backupNormalizePath(destinationDir)] || backupPathExists(destinationDir) {
 			candidate.Status, candidate.Message = "conflict", "目标浏览器数据目录已存在，禁止覆盖"
-		} else if info, statErr := os.Lstat(sourceDir); statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			candidate.Status, candidate.Message = "missing", "旧版浏览器数据目录不存在"
 		} else {
-			reservedNumbers[number] = true
 			reservedDestinations[backupNormalizePath(destinationDir)] = true
 		}
 		candidates = append(candidates, candidate)
@@ -222,39 +256,47 @@ func (a *App) LegacyDataRecoveryExecute(sessionID string) (*LegacyDataRecoveryRe
 	result := &LegacyDataRecoveryResult{BackupPath: backupPath, Rows: make([]LegacyDataRecoveryRow, 0, len(session.Candidates))}
 	readyTotal := 0
 	for _, candidate := range session.Candidates {
-		if candidate.Status == "ready" {
+		if candidate.Status == "ready" || candidate.Status == "overwrite" {
 			readyTotal++
 		}
 	}
 	completed := 0
 	for _, candidate := range session.Candidates {
-		if candidate.Status != "ready" {
+		if candidate.Status != "ready" && candidate.Status != "overwrite" {
 			result.Skipped++
 			result.Rows = append(result.Rows, legacyRecoveryRow(candidate))
 			continue
 		}
 		completed++
 		a.legacyEmitRecoveryProgress(completed-1, readyTotal, fmt.Sprintf("正在复制环境 #%d：%s", candidate.EnvironmentNumber, candidate.Profile.ProfileName))
-		stats := &backupMergeStats{}
-		if err := backupSyncDir(candidate.SourceDir, candidate.DestinationDir, false, stats, legacySkipRuntimeLockFile); err != nil {
-			_ = os.RemoveAll(candidate.DestinationDir)
-			candidate.Status, candidate.Message = "failed", fmt.Sprintf("复制失败: %v", err)
+		rollbackData, restoreErr := legacyRestoreCandidateData(candidate, backupPath)
+		if restoreErr != nil {
+			candidate.Status, candidate.Message = "failed", fmt.Sprintf("复制失败: %v", restoreErr)
 			result.Failed++
 			result.Rows = append(result.Rows, legacyRecoveryRow(candidate))
 			continue
 		}
 		profile := *candidate.Profile
+		if candidate.TargetProfile != nil {
+			// Folder-name matching deliberately preserves the current environment
+			// identity and settings. Only its browser data directory is replaced.
+			profile = *candidate.TargetProfile
+		}
 		profile.UserDataDir = candidate.RegisteredDir
 		profile.Running, profile.DebugReady, profile.DebugPort, profile.Pid = false, false, 0, 0
-		if extractBadgeNumberFromName(profile.ProfileName) <= 0 {
+		if candidate.TargetProfile == nil && extractBadgeNumberFromName(profile.ProfileName) <= 0 {
 			profile.ProfileName = fmt.Sprintf("%s-%d", strings.TrimSpace(profile.ProfileName), candidate.EnvironmentNumber)
 		}
 		if err := browser.NewSQLiteProfileDAO(a.db.GetConn()).Upsert(&profile); err != nil {
-			_ = os.RemoveAll(candidate.DestinationDir)
+			rollbackData()
 			candidate.Status, candidate.Message = "failed", fmt.Sprintf("写入环境清单失败: %v", err)
 			result.Failed++
 		} else {
-			candidate.Status, candidate.Message = "success", "环境、账号与 Cookies 已恢复"
+			if candidate.TargetProfile != nil {
+				candidate.Status, candidate.Message = "success", "当前环境的浏览器数据已按文件夹名覆盖，原数据已备份"
+			} else {
+				candidate.Status, candidate.Message = "success", "环境、账号与 Cookies 已恢复"
+			}
 			result.Imported++
 		}
 		result.Rows = append(result.Rows, legacyRecoveryRow(candidate))
@@ -266,6 +308,61 @@ func (a *App) LegacyDataRecoveryExecute(sessionID string) (*LegacyDataRecoveryRe
 	result.Message = fmt.Sprintf("旧数据恢复完成：成功 %d，跳过 %d，失败 %d；新版本程序文件未被覆盖", result.Imported, result.Skipped, result.Failed)
 	a.legacyEmitRecoveryProgress(readyTotal, readyTotal, result.Message)
 	return result, nil
+}
+
+func legacyRestoreCandidateData(candidate *legacyDataRecoveryCandidate, backupRoot string) (func(), error) {
+	if candidate == nil {
+		return func() {}, fmt.Errorf("恢复项为空")
+	}
+	if backupSamePath(candidate.SourceDir, candidate.DestinationDir) {
+		return func() {}, fmt.Errorf("备份目录与当前数据目录相同，已停止覆盖")
+	}
+	rollback := func() { _ = os.RemoveAll(candidate.DestinationDir) }
+	if candidate.TargetProfile != nil && backupPathExists(candidate.DestinationDir) {
+		info, err := os.Lstat(candidate.DestinationDir)
+		if err != nil {
+			return func() {}, fmt.Errorf("检查当前数据目录失败: %w", err)
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return func() {}, fmt.Errorf("当前数据目录不是可安全覆盖的普通文件夹")
+		}
+		backupDir := filepath.Join(backupRoot, "overwritten-data", legacySafeBackupName(candidate.TargetProfile.ProfileId))
+		if err := os.MkdirAll(filepath.Dir(backupDir), 0755); err != nil {
+			return func() {}, fmt.Errorf("创建覆盖回滚目录失败: %w", err)
+		}
+		if backupPathExists(backupDir) {
+			return func() {}, fmt.Errorf("覆盖回滚目录已存在，已停止覆盖")
+		}
+		if err := os.Rename(candidate.DestinationDir, backupDir); err != nil {
+			return func() {}, fmt.Errorf("备份当前数据目录失败，未执行覆盖: %w", err)
+		}
+		rollback = func() {
+			_ = os.RemoveAll(candidate.DestinationDir)
+			_ = os.Rename(backupDir, candidate.DestinationDir)
+		}
+	}
+	stats := &backupMergeStats{}
+	if err := backupSyncDir(candidate.SourceDir, candidate.DestinationDir, false, stats, legacySkipRuntimeLockFile); err != nil {
+		rollback()
+		return func() {}, err
+	}
+	return rollback, nil
+}
+
+func legacySafeBackupName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "environment"
+	}
+	var out strings.Builder
+	for _, r := range value {
+		if r == '-' || r == '_' || r == '.' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+			out.WriteRune(r)
+		} else {
+			out.WriteRune('_')
+		}
+	}
+	return out.String()
 }
 
 func (a *App) LegacyDataRecoveryCancel(sessionID string) {
@@ -284,7 +381,52 @@ func legacyResolveDataRoot(selected string) (string, string, error) {
 			return filepath.Clean(root), dbPath, nil
 		}
 	}
-	return "", "", fmt.Errorf("所选目录中没有 app.db；请直接选择旧版 data 文件夹或其上一级安装目录")
+	for _, root := range candidates {
+		if folders, scanErr := legacyRawDataFolders(root); scanErr == nil && len(folders) > 0 {
+			return filepath.Clean(root), "", nil
+		}
+	}
+	return "", "", fmt.Errorf("所选目录中没有可识别的 app.db 或浏览器数据文件夹；请选择备份 data 或其上一级目录")
+}
+
+func legacyProfilesFromRawFolders(sourceRoot string) ([]*browser.Profile, error) {
+	folders, err := legacyRawDataFolders(sourceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("扫描备份 data 失败: %w", err)
+	}
+	profiles := make([]*browser.Profile, 0, len(folders))
+	for _, folder := range folders {
+		hash := sha256.Sum256([]byte(strings.ToLower(folder)))
+		profiles = append(profiles, &browser.Profile{
+			ProfileId:   "recovered-folder-" + hex.EncodeToString(hash[:8]),
+			ProfileName: folder,
+			UserDataDir: folder,
+		})
+	}
+	return profiles, nil
+}
+
+func legacyRawDataFolders(sourceRoot string) ([]string, error) {
+	entries, err := os.ReadDir(sourceRoot)
+	if err != nil {
+		return nil, err
+	}
+	folders := make([]string, 0)
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name())
+		if name == "" || strings.EqualFold(name, "recovery-backups") {
+			continue
+		}
+		defaultDir := filepath.Join(sourceRoot, name, "Default")
+		if info, statErr := os.Lstat(defaultDir); statErr == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			folders = append(folders, name)
+		}
+	}
+	sort.Slice(folders, func(i, j int) bool { return strings.ToLower(folders[i]) < strings.ToLower(folders[j]) })
+	return folders, nil
 }
 
 func legacyResolveProfileSourceDir(sourceRoot string, profile *browser.Profile) string {
@@ -335,6 +477,14 @@ func legacySafeRelativeDir(value, fallback string) string {
 	return clean
 }
 
+func legacyDataFolderKey(value, fallback string) string {
+	cleaned := filepath.Clean(strings.ReplaceAll(strings.TrimSpace(value), "\\", "/"))
+	if cleaned == "" || cleaned == "." || cleaned == ".." || cleaned == string(filepath.Separator) {
+		cleaned = strings.TrimSpace(fallback)
+	}
+	return strings.ToLower(strings.TrimSpace(filepath.Base(cleaned)))
+}
+
 func legacyCopySQLiteSet(srcDB, dstDB string) error {
 	if err := os.MkdirAll(filepath.Dir(dstDB), 0755); err != nil {
 		return err
@@ -377,7 +527,7 @@ func legacyRecoveryPreview(session *legacyDataRecoverySession) *LegacyDataRecove
 	for _, candidate := range session.Candidates {
 		preview.Total++
 		switch candidate.Status {
-		case "ready":
+		case "ready", "overwrite":
 			preview.Restorable++
 		case "missing":
 			preview.Missing++
@@ -386,12 +536,28 @@ func legacyRecoveryPreview(session *legacyDataRecoverySession) *LegacyDataRecove
 		}
 		preview.Rows = append(preview.Rows, legacyRecoveryRow(candidate))
 	}
-	preview.Message = fmt.Sprintf("识别到 %d 个旧环境，可安全恢复 %d 个", preview.Total, preview.Restorable)
+	preview.Message = fmt.Sprintf("识别到 %d 个备份环境，可恢复或按文件夹名覆盖 %d 个", preview.Total, preview.Restorable)
 	return preview
 }
 
 func legacyRecoveryRow(candidate *legacyDataRecoveryCandidate) LegacyDataRecoveryRow {
-	return LegacyDataRecoveryRow{EnvironmentNumber: candidate.EnvironmentNumber, ProfileID: candidate.Profile.ProfileId, ProfileName: candidate.Profile.ProfileName, UserDataDir: candidate.Profile.UserDataDir, DirectoryExists: backupPathExists(candidate.SourceDir), Status: candidate.Status, Message: candidate.Message}
+	row := LegacyDataRecoveryRow{
+		EnvironmentNumber: candidate.EnvironmentNumber,
+		ProfileID:         candidate.Profile.ProfileId,
+		ProfileName:       candidate.Profile.ProfileName,
+		UserDataDir:       candidate.Profile.UserDataDir,
+		SourceFolderName:  candidate.SourceFolderName,
+		DirectoryExists:   backupPathExists(candidate.SourceDir),
+		Status:            candidate.Status,
+		Message:           candidate.Message,
+	}
+	if candidate.TargetProfile != nil {
+		row.TargetProfileID = candidate.TargetProfile.ProfileId
+		row.TargetProfileName = candidate.TargetProfile.ProfileName
+		row.TargetNumber = candidate.TargetNumber
+		row.Overwrite = true
+	}
+	return row
 }
 
 func legacyRandomID() (string, error) {

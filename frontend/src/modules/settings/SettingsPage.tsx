@@ -346,7 +346,8 @@ export function SettingsPage() {
 
   const handleExecuteLegacyData = async () => {
     if (!legacyPreview?.sessionId || legacyPreview.restorable < 1) return
-    if (!confirm(`将恢复 ${legacyPreview.restorable} 个环境。现有环境不会被覆盖，开始前必须关闭全部浏览器环境。是否继续？`)) return
+    const overwriteCount = legacyPreview.rows.filter(row => row.overwrite).length
+    if (!confirm(`将处理 ${legacyPreview.restorable} 个备份环境，其中 ${overwriteCount} 个会按数据文件夹名覆盖已创建环境。覆盖前会创建回滚备份，开始前必须关闭全部浏览器环境。是否继续？`)) return
     setActionLoading('legacy-execute')
     setLegacyProgress({ phase: 'starting', progress: 0, message: '准备恢复旧数据...' })
     try {
@@ -744,15 +745,15 @@ export function SettingsPage() {
           <>
             <Button variant="secondary" onClick={closeLegacyModal} disabled={actionLoading === 'legacy-execute'}>取消</Button>
             <Button onClick={handleExecuteLegacyData} loading={actionLoading === 'legacy-execute'} disabled={!legacyPreview || legacyPreview.restorable < 1}>
-              恢复 {legacyPreview?.restorable || 0} 个安全环境
+              恢复/覆盖 {legacyPreview?.restorable || 0} 个环境
             </Button>
           </>
         }
       >
         <div className="space-y-3 text-sm">
           <div className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-secondary)] p-3">
-            <p className="font-medium text-[var(--color-text-primary)]">恢复只导入旧环境数据，不替换当前程序版本和功能</p>
-            <p className="mt-1 text-xs text-[var(--color-text-muted)]">完整环境目录包含浏览器账号、Cookies、Local Storage 和扩展本地数据。相同 ID、相同编号或已有目标目录一律跳过，不覆盖当前数据。恢复期间请关闭全部环境。</p>
+            <p className="font-medium text-[var(--color-text-primary)]">以 data 内的浏览器数据文件夹名作为恢复身份</p>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">同名文件夹会覆盖已创建环境的浏览器账号、Cookies、Local Storage 和扩展本地数据，同时保留当前环境的 ID、名称、内核和代理设置。环境编号不作为恢复身份，恢复后可自由调整。覆盖前会保留回滚备份。</p>
           </div>
           {legacyPreview && (
             <>
@@ -765,12 +766,12 @@ export function SettingsPage() {
               </div>
               <div className="max-h-72 overflow-auto rounded border border-[var(--color-border-default)]">
                 <table className="w-full text-xs">
-                  <thead className="sticky top-0 bg-[var(--color-bg-secondary)] text-left"><tr><th className="p-2">编号</th><th className="p-2">环境</th><th className="p-2">状态</th><th className="p-2">说明</th></tr></thead>
+                  <thead className="sticky top-0 bg-[var(--color-bg-secondary)] text-left"><tr><th className="p-2">备份文件夹</th><th className="p-2">目标环境</th><th className="p-2">状态</th><th className="p-2">说明</th></tr></thead>
                   <tbody>{legacyPreview.rows.map(row => (
                     <tr key={row.profileId} className="border-t border-[var(--color-border-muted)]">
-                      <td className="p-2">#{row.environmentNumber}</td>
-                      <td className="p-2">{row.profileName}</td>
-                      <td className={`p-2 ${row.status === 'ready' ? 'text-[var(--color-success)]' : 'text-[var(--color-warning)]'}`}>{row.status === 'ready' ? '可恢复' : row.status === 'missing' ? '缺失' : '跳过'}</td>
+                      <td className="p-2"><div className="font-mono">{row.sourceFolderName}</div><div className="text-[var(--color-text-muted)] mt-0.5">原 #{row.environmentNumber} {row.profileName}</div></td>
+                      <td className="p-2">{row.overwrite ? `#${row.targetNumber} ${row.targetProfileName}` : '新建恢复环境'}</td>
+                      <td className={`p-2 ${row.status === 'ready' ? 'text-[var(--color-success)]' : row.status === 'overwrite' ? 'text-[var(--color-warning)]' : 'text-[var(--color-warning)]'}`}>{row.status === 'ready' ? '可恢复' : row.status === 'overwrite' ? '将覆盖' : row.status === 'missing' ? '缺失' : '跳过'}</td>
                       <td className="p-2 text-[var(--color-text-muted)]">{row.message}</td>
                     </tr>
                   ))}</tbody>

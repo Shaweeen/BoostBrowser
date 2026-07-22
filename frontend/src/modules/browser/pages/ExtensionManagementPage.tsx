@@ -448,10 +448,6 @@ export function ExtensionManagementPage() {
       toast.warning('请先选择 CSV 或 TXT 文件')
       return
     }
-    if (rabbyPreview.rows.some(row => row.running)) {
-      toast.warning('文件中包含运行中的环境，请先全部关闭')
-      return
-    }
     if (rabbyPassword.length < 8) {
       toast.warning(`${walletLabels[walletType]} 本地解锁密码至少需要 8 个字符`)
       return
@@ -711,7 +707,7 @@ export function ExtensionManagementPage() {
           <>
             <Button variant="secondary" onClick={closeRabbyImport} disabled={rabbyExecuting}>取消</Button>
             <Button variant="secondary" onClick={selectRabbyImportFile} loading={rabbyPreparing} disabled={rabbyExecuting}>选择 CSV/TXT</Button>
-            <Button onClick={startRabbyImport} loading={rabbyExecuting} disabled={!rabbyPreview || rabbyPreview.rows.some(row => !row.running)}>开始导入</Button>
+            <Button onClick={startRabbyImport} loading={rabbyExecuting} disabled={!rabbyPreview}>开始导入</Button>
           </>
         )}
       >
@@ -734,8 +730,8 @@ export function ExtensionManagementPage() {
             <div className="flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
               <div>
-                <div className="font-medium">先启动 CSV 指定的环境并保持窗口打开；仅导入未初始化的 {walletLabels[walletType]}</div>
-                <div className="mt-1 text-xs leading-5">BrowserStudio 通过已启动环境的本地调试接口直接操作官方钱包扩展，完成后不会关闭环境。文件、助记词和自定义密码不写入数据库或日志，也不提供导出接口。导入时请关闭无关网页并停用不可信扩展；其中 Jupiter 为闭源第三方扩展，BrowserStudio 无法审计或保证其内部行为。</div>
+                <div className="font-medium">无需预先启动环境；客户端会自动启动模板指定的环境，导入后保持窗口打开</div>
+                <div className="mt-1 text-xs leading-5">导入前会交叉核验环境编号、Profile ID、名称和数据文件夹 ID，仅导入未初始化的官方 {walletLabels[walletType]} 扩展。助记词和自定义密码不写入数据库或日志，也不提供导出接口。Jupiter 为闭源第三方扩展，BrowserStudio 无法审计或保证其内部行为。</div>
               </div>
             </div>
           </div>
@@ -743,7 +739,7 @@ export function ExtensionManagementPage() {
           <div className="flex items-center justify-between gap-4 rounded-xl border border-[var(--color-border-default)] px-4 py-3">
             <div>
               <div className="text-sm font-medium text-[var(--color-text-primary)]">1. 准备环境映射文件</div>
-              <div className="text-xs text-[var(--color-text-muted)] mt-1">CSV：environment_number,profile_id,profile_name,mnemonic；三种环境标识任选一项，填写多项时必须指向同一环境</div>
+              <div className="text-xs text-[var(--color-text-muted)] mt-1">请使用下载的 CSV 模板；只填写 mnemonic 列，不要修改环境编号、Profile ID、名称和 storage_id</div>
             </div>
             <Button variant="secondary" size="sm" onClick={downloadRabbyTemplate} disabled={rabbyExecuting}><FileDown className="w-4 h-4" />下载 CSV 模板</Button>
           </div>
@@ -755,22 +751,22 @@ export function ExtensionManagementPage() {
                   <div className="text-sm font-medium text-[var(--color-text-primary)]">{rabbyPreview.fileName}</div>
                   <div className="text-xs text-[var(--color-text-muted)] mt-0.5">已校验 {rabbyPreview.rows.length} 条；助记词只保存在后端临时内存，15 分钟后自动失效</div>
                 </div>
-                <span className="text-xs text-[var(--color-text-muted)]">按环境编号 / profile_id / 名称精确映射</span>
+                <span className="text-xs text-[var(--color-text-muted)]">四项环境信息已交叉核验</span>
               </div>
               <div className="max-h-52 overflow-auto">
                 <table className="w-full text-sm">
                   <thead className="sticky top-0 bg-[var(--color-bg-surface)] text-xs text-[var(--color-text-muted)]">
-                    <tr><th className="px-4 py-2 text-left">行</th><th className="px-4 py-2 text-left">编号</th><th className="px-4 py-2 text-left">环境</th><th className="px-4 py-2 text-left">profile_id</th><th className="px-4 py-2 text-left">词数</th><th className="px-4 py-2 text-right">状态</th></tr>
+                    <tr><th className="px-4 py-2 text-left">行</th><th className="px-4 py-2 text-left">编号</th><th className="px-4 py-2 text-left">环境</th><th className="px-4 py-2 text-left">数据文件夹 ID</th><th className="px-4 py-2 text-left">词数</th><th className="px-4 py-2 text-right">状态</th></tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--color-border-muted)]">
                     {rabbyPreview.rows.map(row => (
                       <tr key={`${row.rowNumber}-${row.profileId}`}>
                         <td className="px-4 py-2 text-[var(--color-text-muted)]">{row.rowNumber}</td>
                         <td className="px-4 py-2 font-semibold text-[var(--color-text-primary)]">#{row.environmentNumber}</td>
-                        <td className="px-4 py-2 text-[var(--color-text-primary)]">{row.profileName || row.profileId}</td>
-                        <td className="px-4 py-2 font-mono text-xs text-[var(--color-text-muted)]">{row.profileId}</td>
+                        <td className="px-4 py-2 text-[var(--color-text-primary)]"><div>{row.profileName || row.profileId}</div><div className="font-mono text-[11px] text-[var(--color-text-muted)] mt-0.5">{row.profileId}</div></td>
+                        <td className="px-4 py-2 font-mono text-xs text-[var(--color-text-muted)]">{row.storageId}</td>
                         <td className="px-4 py-2 text-[var(--color-text-secondary)]">{row.wordCount}</td>
-                        <td className={`px-4 py-2 text-right ${row.running ? 'text-green-600' : 'text-red-600'}`}>{row.running ? '已启动，可导入' : '请先启动'}</td>
+                        <td className={`px-4 py-2 text-right ${row.running ? 'text-green-600' : 'text-blue-600'}`}>{row.running ? '已启动，将直接导入' : '待自动启动'}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -793,7 +789,7 @@ export function ExtensionManagementPage() {
               </FormItem>
               <label className="flex items-start gap-2 text-sm text-[var(--color-text-secondary)] cursor-pointer">
                 <input type="checkbox" className="mt-0.5 accent-[var(--color-accent)]" checked={rabbyConfirmed} onChange={event => setRabbyConfirmed(event.target.checked)} disabled={rabbyExecuting} />
-                <span>我确认：文件中的助记词已安全备份；CSV 目标环境已经启动并保持窗口打开；目标 {walletLabels[walletType]} 均未初始化。导入完成后环境不会自动关闭。</span>
+                <span>我确认：文件中的助记词已安全备份；未修改模板内的环境映射信息；目标 {walletLabels[walletType]} 均未初始化。客户端将自动启动环境，导入完成后保持窗口打开。</span>
               </label>
             </div>
           )}
