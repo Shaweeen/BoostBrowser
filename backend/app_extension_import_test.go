@@ -68,6 +68,36 @@ func TestInstallUnpackedExtensionUpdateKeepsProgramRollbackAndReportsVersions(t 
 	}
 }
 
+func TestFilterInvalidLoadExtensionArgsKeepsHealthyExtensionOnly(t *testing.T) {
+	root := t.TempDir()
+	healthy := filepath.Join(root, "healthy")
+	broken := filepath.Join(root, "broken")
+	if err := os.MkdirAll(healthy, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(broken, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(healthy, "manifest.json"), []byte(`{"name":"Wallet","version":"1.0","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(broken, "manifest.json"), []byte(`{"name":"Broken"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	args, rejected := filterInvalidLoadExtensionArgs([]string{
+		"--no-first-run",
+		"--load-extension=" + healthy + "," + broken,
+	})
+	want := []string{"--no-first-run", "--load-extension=" + healthy}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("unexpected filtered args\nwant: %#v\n got: %#v", want, args)
+	}
+	if len(rejected) != 1 || !strings.Contains(rejected[0], broken) {
+		t.Fatalf("expected broken extension rejection, got %#v", rejected)
+	}
+}
+
 func TestRemoveExtensionDirFromLaunchArgs(t *testing.T) {
 	target := `Z:\\Boost Browser\\extensions\\imported\\mcohilncbfahbmgdjkbpemcciiolgcge`
 	other := `Z:\\Boost Browser\\extensions\\imported\\nkbihfbeogaeaoehlefnkodbefgpgknn`

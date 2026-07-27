@@ -898,6 +898,38 @@ func normalizeLoadExtensionArgs(args []string) []string {
 	return out
 }
 
+// filterInvalidLoadExtensionArgs keeps one damaged/unpacked extension from
+// destabilising every Chromium process in a large batch launch. Stored Chrome
+// Web Store extensions are unaffected; this only validates directories passed
+// explicitly through --load-extension.
+func filterInvalidLoadExtensionArgs(args []string) ([]string, []string) {
+	out := make([]string, 0, len(args))
+	rejected := []string{}
+	for _, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		if !strings.HasPrefix(trimmed, "--load-extension=") {
+			out = append(out, arg)
+			continue
+		}
+		valid := []string{}
+		for _, part := range strings.Split(strings.TrimSpace(strings.TrimPrefix(trimmed, "--load-extension=")), ",") {
+			extDir := strings.Trim(strings.TrimSpace(part), `"`)
+			if extDir == "" {
+				continue
+			}
+			if err := validateUnpackedExtensionManifest(extDir); err != nil {
+				rejected = append(rejected, fmt.Sprintf("%s (%v)", extDir, err))
+				continue
+			}
+			valid = append(valid, extDir)
+		}
+		if len(valid) > 0 {
+			out = append(out, "--load-extension="+strings.Join(valid, ","))
+		}
+	}
+	return normalizeLoadExtensionArgs(out), rejected
+}
+
 // cleanupStaleManagedUnpackedExtensions removes stale unpacked-extension records
 // left in Chrome profile Preferences after a managed --load-extension path was
 // changed or removed. Without this, Chrome can show both the old profile copy and

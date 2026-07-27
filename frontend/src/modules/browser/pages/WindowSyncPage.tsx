@@ -65,6 +65,7 @@ export function WindowSyncPage() {
   const compactPanelLeaveTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
   const syncPanelWindowBootstrappedRef = useRef(false)
   const autoCollapseTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
+  const resumeNoticeTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
   const [syncPanelMode, setSyncPanelMode] = useState(false)
   const [panelPresentation, setPanelPresentation] = useState<'minimized' | 'compact' | 'full'>('full')
   const [showSyncControls, setShowSyncControls] = useState(false)
@@ -84,6 +85,7 @@ export function WindowSyncPage() {
   const [, setPanelFocused] = useState(false)
   const [, setPanelHovered] = useState(false)
   const [delayPreset, setDelayPreset] = useState<DelayPreset | null>(null)
+  const [resumeNoticeVisible, setResumeNoticeVisible] = useState(false)
 
   const refreshTimer = useRef<ReturnType<typeof setInterval>>()
   const loadProfilesSeq = useRef(0)
@@ -180,7 +182,14 @@ export function WindowSyncPage() {
     const offPauseChanged = EventsOn('window-sync:pause-changed', (payload: { paused?: boolean }) => {
       const paused = payload?.paused === true
       setSyncStatus(prev => prev ? { ...prev, paused } : prev)
-      if (!paused) toast.success('同步功能已恢复', 1000)
+      if (!paused) {
+        if (resumeNoticeTimerRef.current) window.clearTimeout(resumeNoticeTimerRef.current)
+        setResumeNoticeVisible(true)
+        resumeNoticeTimerRef.current = window.setTimeout(() => {
+          setResumeNoticeVisible(false)
+          resumeNoticeTimerRef.current = null
+        }, 1000)
+      }
     })
 
     window.addEventListener('focus', handleWindowFocus)
@@ -194,6 +203,10 @@ export function WindowSyncPage() {
       offStopped?.()
       offUpdated?.()
       offPauseChanged?.()
+      if (resumeNoticeTimerRef.current) {
+        window.clearTimeout(resumeNoticeTimerRef.current)
+        resumeNoticeTimerRef.current = null
+      }
     }
   }, [loadProfiles])
 
@@ -562,6 +575,11 @@ export function WindowSyncPage() {
   if (minimizedPanelMode) {
     return (
       <div className="relative flex h-11 w-[136px] items-center overflow-hidden bg-[#f8fafc] px-1.5 shadow-[0_8px_22px_rgba(30,58,110,.18)]">
+        {resumeNoticeVisible && (
+          <div className="absolute inset-1 z-20 flex items-center justify-center rounded-[8px] bg-[#16a34a] px-1 text-center text-[9px] font-bold leading-3 text-white shadow-[0_4px_12px_rgba(22,163,74,.3)]">
+            同步已恢复
+          </div>
+        )}
         <div className="flex h-9 w-9 shrink-0 cursor-move items-center justify-center" title="拖动同步工具" style={{ ['--wails-draggable' as any]: 'drag' }}>
           <span className="relative flex h-8 w-8 items-center justify-center rounded-[9px] bg-[#17263d] text-[14px] font-black text-white">
             B
@@ -743,10 +761,15 @@ export function WindowSyncPage() {
       <div className="inline-block overflow-visible bg-transparent px-0 pt-0 text-white">
         <div
           ref={compactPanelRef}
-          className="w-[400px] border border-[#26324a] bg-[#0f172a] px-3 py-3 shadow-[0_12px_28px_rgba(15,23,42,.24)]"
+          className="relative w-[400px] border border-[#26324a] bg-[#0f172a] px-3 py-3 shadow-[0_12px_28px_rgba(15,23,42,.24)]"
           onMouseEnter={handleCompactPanelMouseEnter}
           onMouseLeave={handleCompactPanelMouseLeave}
         >
+          {resumeNoticeVisible && (
+            <div className="absolute inset-x-3 top-2 z-30 flex h-9 items-center justify-center rounded-xl bg-[#16a34a] px-3 text-[12px] font-bold text-white shadow-[0_8px_20px_rgba(22,163,74,.3)]">
+              同步功能已恢复
+            </div>
+          )}
           <div className="flex min-h-[42px] items-center gap-3" style={{ ['--wails-draggable' as any]: 'drag' }}>
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/14 text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]">
               <Monitor className="h-4 w-4" />
@@ -843,6 +866,11 @@ export function WindowSyncPage() {
     <div className={`relative min-h-full overflow-hidden ${syncPanelMode ? 'bg-[linear-gradient(180deg,#eff5ff_0%,#f6f8fc_45%,#fbfcfe_100%)] px-3 py-3 sm:px-4 sm:py-4 dark:bg-[var(--color-bg-canvas)]' : 'bg-[linear-gradient(180deg,#eff5ff_0%,#f6f8fc_45%,#fbfcfe_100%)] px-6 py-8 dark:bg-[var(--color-bg-canvas)]'}`}>
       {isSyncing && (
         <div className="fixed left-1/2 top-3 z-40 w-[min(820px,calc(100vw-20px))] -translate-x-1/2 rounded-[20px] bg-[#171a22]/95 px-3 py-3 text-white shadow-[0_24px_80px_rgba(0,0,0,0.35)] backdrop-blur">
+          {resumeNoticeVisible && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center rounded-[20px] bg-[#16a34a] px-5 text-base font-bold text-white shadow-[0_16px_40px_rgba(22,163,74,.35)]">
+              同步功能已恢复
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-2.5">
             <div className="min-w-[160px] pr-2">
               <div className="text-[11px] uppercase tracking-[0.16em] text-white/50">{isSyncPaused ? '窗口同步已暂停' : '窗口同步中'}</div>

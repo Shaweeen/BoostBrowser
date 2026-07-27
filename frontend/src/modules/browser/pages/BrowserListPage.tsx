@@ -751,27 +751,37 @@ export function BrowserListPage() {
     let success = 0, pending = 0, failed = 0
     const pendingMessages: string[] = []
     const failureMessages: string[] = []
-    for (const id of ids) {
-      const profile = profiles.find(p => p.profileId === id)
-      if (!profile || profile.running) continue
-      updatePendingIds(setStartingIds, id, true)
-      try {
-        const startedProfile = await startBrowserInstance(id)
-        mergeProfileState(startedProfile)
-        success++
-      } catch (error: any) {
-        const feedback = resolveActionFeedback(error, '环境启动失败')
-        if (feedback.pendingAttach) {
-          pending++
-          pendingMessages.push(`${profile.profileName}：${feedback.message}`)
-        } else {
-          failed++
-          failureMessages.push(`${profile.profileName}：${feedback.message}`)
+    // Chromium + wallet extensions create several renderer/extension processes per
+    // environment. A small worker pool overlaps slow debug-port waits without
+    // starting every extension host at once and exhausting CPU/disk resources.
+    const logicalCores = Math.max(4, Number(window.navigator?.hardwareConcurrency) || 8)
+    const concurrency = Math.min(ids.length, Math.max(2, Math.min(4, Math.floor(logicalCores / 4))))
+    let cursor = 0
+    const launchNext = async () => {
+      while (cursor < ids.length) {
+        const id = ids[cursor++]
+        const profile = profiles.find(p => p.profileId === id)
+        if (!profile || profile.running) continue
+        updatePendingIds(setStartingIds, id, true)
+        try {
+          const startedProfile = await startBrowserInstance(id)
+          mergeProfileState(startedProfile)
+          success++
+        } catch (error: any) {
+          const feedback = resolveActionFeedback(error, '环境启动失败')
+          if (feedback.pendingAttach) {
+            pending++
+            pendingMessages.push(`${profile.profileName}：${feedback.message}`)
+          } else {
+            failed++
+            failureMessages.push(`${profile.profileName}：${feedback.message}`)
+          }
+        } finally {
+          updatePendingIds(setStartingIds, id, false)
         }
-      } finally {
-        updatePendingIds(setStartingIds, id, false)
       }
     }
+    await Promise.all(Array.from({ length: concurrency }, () => launchNext()))
     setBatchLoading(false)
     const summary = [`成功 ${success}`]
     if (pending > 0) summary.push(`待接管 ${pending}`)

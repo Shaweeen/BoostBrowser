@@ -204,24 +204,31 @@ func ensureJSONMap(parent map[string]any, key string) map[string]any {
 }
 
 // closeExtensionStartupPages suppresses extension UI and Chrome welcome/sign-in
-// UI created automatically during startup. Some wallets open onboarding/unlock
-// pages a moment after the debug port becomes ready; a single immediate pass
-// misses them. Keep this window short and synchronous before navigating to user
-// pages so later user actions are not closed.
+// UI created automatically during startup. The first pass is immediate; the
+// bounded tail runs in the background so a wallet's delayed onboarding page does
+// not add four seconds to every environment in a batch launch.
 func closeExtensionStartupPages(debugPort int, profileId string) {
-	deadline := time.Now().Add(4 * time.Second)
-	closed := 0
 	seenClosed := map[string]bool{}
-	for {
-		closed += closeExtensionStartupPagesOnce(debugPort, seenClosed)
-		if time.Now().After(deadline) {
-			break
+	closedImmediately := closeExtensionStartupPagesOnce(debugPort, seenClosed)
+	if closedImmediately > 0 {
+		logger.New("Browser").Info("已关闭启动时自动弹出的扩展/登录欢迎页面", logger.F("profile_id", profileId), logger.F("count", closedImmediately))
+	}
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				logger.New("Browser").Warn("扩展启动页后台清理异常（已隔离）", logger.F("profile_id", profileId), logger.F("error", recovered))
+			}
+		}()
+		deadline := time.Now().Add(3 * time.Second)
+		closed := 0
+		for time.Now().Before(deadline) {
+			time.Sleep(250 * time.Millisecond)
+			closed += closeExtensionStartupPagesOnce(debugPort, seenClosed)
 		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	if closed > 0 {
-		logger.New("Browser").Info("已关闭启动时自动弹出的扩展/登录欢迎页面", logger.F("profile_id", profileId), logger.F("count", closed))
-	}
+		if closed > 0 {
+			logger.New("Browser").Info("后台关闭延迟弹出的扩展/登录欢迎页面", logger.F("profile_id", profileId), logger.F("count", closed))
+		}
+	}()
 }
 
 func finalizeBrowserStartupExtensionSuppression(debugPort int, pid int, profileId string) {
@@ -254,7 +261,7 @@ func closeExtensionStartupPagesOnce(debugPort int, seenClosed map[string]bool) i
 		return 0
 	}
 	defer browserConn.Close()
-	browserConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	browserConn.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
 
 	msgID := 3000
 	closed := 0
@@ -282,7 +289,7 @@ func closeExtensionStartupPagesOnce(debugPort int, seenClosed map[string]bool) i
 }
 
 func listCDPTargets(debugPort int) ([]cdpTarget, error) {
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 1500 * time.Millisecond}
 	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/json/list", debugPort))
 	if err != nil {
 		return nil, err

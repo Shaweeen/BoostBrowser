@@ -135,7 +135,14 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		}
 	}
 	a.browserMgr.Mutex.Lock()
-	defer a.browserMgr.Mutex.Unlock()
+	managerLocked := true
+	unlockManager := func() {
+		if managerLocked {
+			a.browserMgr.Mutex.Unlock()
+			managerLocked = false
+		}
+	}
+	defer unlockManager()
 
 	normalizedExtraLaunchArgs := normalizeNonEmptyStrings(extraLaunchArgs)
 	normalizedStartURLs := normalizeNonEmptyStrings(startURLs)
@@ -495,6 +502,13 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
+	args, rejectedExtensions := filterInvalidLoadExtensionArgs(args)
+	if len(rejectedExtensions) > 0 {
+		log.Warn("已隔离损坏或不完整的解包扩展，避免浏览器扩展进程崩溃",
+			logger.F("profile_id", profileId),
+			logger.F("extensions", strings.Join(rejectedExtensions, " | ")),
+		)
+	}
 	// Final authoritative placement pass: fingerprint/profile/API arguments are
 	// already appended, so stale sizes and maximised/fullscreen flags cannot win.
 	args, removedWindowArgs := sanitizeManagedWindowPlacementArgs(args)
@@ -511,6 +525,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	// 这解决了 Chrome Web Store 首次请求时 Sec-CH-UA 仍为 "Chromium" 导致
 	// 显示「切换到 Chrome」横幅的问题。
 	targetURLs := buildTargetURLs(profile, normalizedStartURLs, skipDefaultStartURLs)
+	displayNumber := resolveBadgeDisplayNumber(profileId, profile.ProfileName, a.browserMgr.Profiles)
 	args = append(args, "about:blank")
 
 	cmd := exec.Command(chromeBinaryPath, args...)
@@ -530,15 +545,29 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 	monitor.Start()
 
+	// Register the live process before waiting for DevTools. This is the key
+	// boundary for multi-instance startup: profile preparation and process
+	// creation remain serialized, while the slow debug-port readiness window and
+	// extension cleanup can overlap across different environments.
+	a.markProfileRunningLocked(profileId, profile, cmd, cmd.Process.Pid, assignedDebugPort, false, "浏览器正在启动并等待调试接口")
+	if acquiredXrayBridgeKey != "" {
+		a.bindProfileXrayBridge(profileId, acquiredXrayBridgeKey)
+		releaseXrayBridge = false
+	}
+	acquiredStandardRelay = false
+	profile = copyBrowserProfileSnapshot(profile)
+	unlockManager()
+
 	for attempt := 1; attempt <= maxStartAttempts; attempt++ {
 		stableDebugPort, readyErr := waitBrowserDebugPortStable(assignedDebugPort, userDataDir, startReadyTimeout, startStableWindow, monitor)
 		if readyErr == nil {
-			a.markProfileRunningLocked(profileId, profile, cmd, cmd.Process.Pid, stableDebugPort, true, "")
-			if acquiredXrayBridgeKey != "" {
-				a.bindProfileXrayBridge(profileId, acquiredXrayBridgeKey)
-				releaseXrayBridge = false
+			readyProfile, _ := a.setProfileDebugReady(profileId, stableDebugPort)
+			if readyProfile == nil {
+				startErr := fmt.Errorf("实例启动已取消：环境在浏览器就绪前被关闭或删除")
+				_ = a.stopBrowserProcess(cmd)
+				return profile, startErr
 			}
-			acquiredStandardRelay = false
+			profile = readyProfile
 
 			log.Info("实例启动",
 				logger.F("profile_id", profileId),
@@ -563,8 +592,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			//   名字 "实例-11"  → badge 11
 			// 这样改名后 badge 会跟着变，不再依赖排序位置。
 			// 名字里完全没数字时按 ProfileId 固定排序，确保重启前后编号一致。
-			displayNumber := resolveBadgeDisplayNumber(profileId, profile.ProfileName, a.browserMgr.Profiles)
-
 			// 同步注入反检测隐身脚本 + UA 覆写（必须在导航到目标 URL 前完成，
 			// 否则 Chrome Web Store 的首次请求仍会携带错误的 Sec-CH-UA）
 			//
@@ -695,12 +722,14 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	if shouldKeepBrowserRunningPendingDebugReady(assignedDebugPort, monitor) {
 		runtimeWarning := browserDebugPendingWarning(totalReadyTimeout)
 		pendingStartNotice = browserDebugPendingStartNotice(totalReadyTimeout)
-		a.markProfileRunningLocked(profileId, profile, cmd, cmd.Process.Pid, assignedDebugPort, false, runtimeWarning)
-		if acquiredXrayBridgeKey != "" {
-			a.bindProfileXrayBridge(profileId, acquiredXrayBridgeKey)
-			releaseXrayBridge = false
+		a.browserMgr.Mutex.Lock()
+		if current, exists := a.browserMgr.Profiles[profileId]; exists && current != nil && current.Running && current.Pid == cmd.Process.Pid {
+			current.RuntimeWarning = runtimeWarning
+			current.LastError = pendingStartNotice
+			a.persistBrowserRuntimeSnapshotLocked()
+			profile = copyBrowserProfileSnapshot(current)
 		}
-		acquiredStandardRelay = false
+		a.browserMgr.Mutex.Unlock()
 
 		log.Warn("浏览器窗口已启动，但调试接口在等待窗口内未就绪，转入后台附着",
 			logger.F("profile_id", profileId),
@@ -735,12 +764,20 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	if pendingStartNotice != "" {
-		profile.LastError = pendingStartNotice
 		return profile, fmt.Errorf("%s", pendingStartNotice)
 	}
 
+	a.browserMgr.Mutex.Lock()
+	if current, exists := a.browserMgr.Profiles[profileId]; exists && current != nil && current.Pid == cmd.Process.Pid {
+		a.markProfileStoppedLocked(profileId, current)
+		if lastStartErr != nil {
+			current.LastError = lastStartErr.Error()
+		}
+		profile = copyBrowserProfileSnapshot(current)
+	}
+	a.browserMgr.Mutex.Unlock()
+
 	if lastStartErr != nil {
-		profile.LastError = lastStartErr.Error()
 		return profile, lastStartErr
 	}
 	return profile, fmt.Errorf("实例启动失败：浏览器在等待窗口内仍未就绪")

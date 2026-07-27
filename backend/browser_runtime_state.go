@@ -131,6 +131,7 @@ func (a *App) setProfileDebugReady(profileId string, debugPort int) (*BrowserPro
 	changed := !profile.DebugReady || profile.RuntimeWarning != ""
 	if changed {
 		a.markProfileDebugReadyLocked(profile, debugPort)
+		a.persistBrowserRuntimeSnapshotLocked()
 	}
 	snapshot := copyBrowserProfileSnapshot(profile)
 	a.browserMgr.Mutex.Unlock()
