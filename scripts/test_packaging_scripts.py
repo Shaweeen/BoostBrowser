@@ -185,6 +185,9 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("Start-Process -FilePath $setupPath -Wait -PassThru", text)
         self.assertIn('Require-MinimumVersion "Go"', text)
         self.assertIn("1.25.0", text)
+        self.assertIn("Require-SupportedNodeVersion", text)
+        self.assertIn("Node.js 22 LTS is required", text)
+        self.assertIn("UV_HANDLE_CLOSING", text)
 
     def test_release_build_emits_hashes_and_manifest(self):
         text = self.read("scripts/build_release.ps1")
@@ -198,7 +201,7 @@ class PackagingScriptsTest(unittest.TestCase):
         for package in [
             "Git.Git",
             "GoLang.Go",
-            "OpenJS.NodeJS.LTS",
+            "OpenJS.NodeJS.22",
             "NSIS.NSIS",
             "Microsoft.EdgeWebView2Runtime",
             "Microsoft.VCRedist.2015+.x64",
@@ -212,6 +215,7 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("already installed and current", text)
         self.assertIn("--source winget", text)
         self.assertIn('"-NoInstall"', text)
+        self.assertIn("[int]$nodeMatch.Groups[1].Value -ne 22", text)
 
     def test_public_manager_build_never_bundles_third_party_runtimes(self):
         wrapper = self.read("scripts/build_windows_public.ps1")

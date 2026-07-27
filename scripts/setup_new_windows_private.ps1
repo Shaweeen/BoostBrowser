@@ -54,12 +54,18 @@ Refresh-Path
 
 Install-WingetPackage "Git.Git" "git"
 Install-WingetPackage "GoLang.Go" "go"
-Install-WingetPackage "OpenJS.NodeJS.LTS" "node"
+Install-WingetPackage "OpenJS.NodeJS.22" "node"
 Install-WingetPackage "NSIS.NSIS" "makensis"
 Install-WingetPackage "Microsoft.EdgeWebView2Runtime" ""
 Install-WingetPackage "Microsoft.VCRedist.2015+.x64" ""
 
 Refresh-Path
+
+$nodeVersion = (& node -v).Trim()
+$nodeMatch = [regex]::Match($nodeVersion, 'v?(\d+)\.(\d+)\.(\d+)')
+if (-not $nodeMatch.Success -or [int]$nodeMatch.Groups[1].Value -ne 22) {
+    throw "Node.js 22 LTS is required for Windows packaging; found $nodeVersion. Replace the current Node version, restart PowerShell, and run this script again: winget uninstall --id OpenJS.NodeJS.LTS --exact --source winget; winget install --id OpenJS.NodeJS.22 --exact --source winget --accept-package-agreements --accept-source-agreements"
+}
 
 $goMod = Get-Content (Join-Path $RepoRoot "go.mod") -Raw
 $wailsMatch = [regex]::Match($goMod, 'github\.com/wailsapp/wails/v2\s+v([^\s]+)')

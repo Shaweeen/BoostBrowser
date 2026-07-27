@@ -49,6 +49,15 @@ function Require-MinimumVersion([string]$Label, [string]$Value, [version]$Minimu
     if ($actual -lt $Minimum) { throw "$Label $Minimum or newer is required; found $actual" }
 }
 
+function Require-SupportedNodeVersion([string]$Value) {
+    $match = [regex]::Match($Value, 'v?(\d+)\.(\d+)\.(\d+)')
+    if (-not $match.Success) { throw "Unable to parse Node.js version: $Value" }
+    $major = [int]$match.Groups[1].Value
+    if ($major -ne 22) {
+        throw "Node.js 22 LTS is required for deterministic Windows packaging; found $Value. Node 24 can crash after a successful Vite build with a libuv UV_HANDLE_CLOSING assertion. Install with: winget uninstall --id OpenJS.NodeJS.LTS --exact --source winget; winget install --id OpenJS.NodeJS.22 --exact --source winget --accept-package-agreements --accept-source-agreements"
+    }
+}
+
 function Run-Step([string]$Title, [scriptblock]$Block) {
     Write-Host ""
     Write-Host "================================================================" -ForegroundColor Cyan
@@ -58,8 +67,8 @@ function Run-Step([string]$Title, [scriptblock]$Block) {
 }
 
 Run-Step "Checking toolchain" {
-    Require-Command node "Install Node.js 20+ from https://nodejs.org/"
-    Require-Command npm "Install Node.js 20+ from https://nodejs.org/"
+    Require-Command node "Install Node.js 22 LTS from https://nodejs.org/"
+    Require-Command npm "Install Node.js 22 LTS from https://nodejs.org/"
     Require-Command go "Install Go 1.22+ from https://go.dev/dl/"
     Require-Command wails "Run: go install github.com/wailsapp/wails/v2/cmd/wails@latest ; then add %USERPROFILE%\go\bin to PATH"
     $makensis = Get-Command makensis -ErrorAction SilentlyContinue
@@ -68,7 +77,7 @@ Run-Step "Checking toolchain" {
         $makensis = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     }
     if (-not $makensis) { throw "Missing makensis. Install NSIS from https://nsis.sourceforge.io/Download" }
-    Require-MinimumVersion "Node.js" (node -v) ([version]'20.0.0')
+    Require-SupportedNodeVersion (node -v)
     Require-MinimumVersion "Go" (go version) ([version]'1.25.0')
     Write-Host "node:     $((node -v))" -ForegroundColor Green
     Write-Host "npm:      $((npm -v))" -ForegroundColor Green
