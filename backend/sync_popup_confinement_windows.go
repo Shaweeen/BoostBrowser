@@ -18,11 +18,11 @@ const syncPopupBoundsInset = 2
 func syncPopupBoundsIntervalForFollowers(followerCount int) time.Duration {
 	switch {
 	case followerCount >= 20:
-		return 75 * time.Millisecond
+		return 250 * time.Millisecond
 	case followerCount >= 8:
-		return 55 * time.Millisecond
+		return 180 * time.Millisecond
 	default:
-		return 40 * time.Millisecond
+		return 120 * time.Millisecond
 	}
 }
 
@@ -68,7 +68,7 @@ var syncPopupBoundsEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lP
 		return 1
 	}
 
-	x, y, width, height, shouldMove := constrainSyncPopupRect(popupRect, owner.rect, syncPopupBoundsInset)
+	x, y, width, height, shouldMove := constrainSyncPopupRectForTitle(title, popupRect, owner.rect, syncPopupBoundsInset)
 	if !shouldMove {
 		return 1
 	}
@@ -83,6 +83,58 @@ var syncPopupBoundsEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lP
 	)
 	return 1
 })
+
+func constrainSyncPopupRectForTitle(title string, popup, owner winRect, inset int) (x, y, width, height int, changed bool) {
+	x, y, width, height, changed = constrainSyncPopupRect(popup, owner, inset)
+	lowerTitle := strings.ToLower(strings.TrimSpace(title))
+	if !looksLikeWalletExtensionPopup(lowerTitle) && !isStrongExtensionPopupTitle(lowerTitle) && !isKnownWalletPopupProductTitle(lowerTitle) {
+		return
+	}
+
+	availableWidth := int(owner.Right-owner.Left) - inset*2
+	availableHeight := int(owner.Bottom-owner.Top) - inset*2
+	if availableWidth <= 0 || availableHeight <= 0 {
+		return
+	}
+	targetWidth := extensionPopupTargetWidth
+	targetHeight := extensionPopupTargetHeight
+	if targetWidth > availableWidth {
+		targetWidth = availableWidth
+	}
+	if targetHeight > availableHeight {
+		targetHeight = availableHeight
+	}
+	if width > targetWidth {
+		width = targetWidth
+		changed = true
+	}
+	if height > targetHeight {
+		height = targetHeight
+		changed = true
+	}
+
+	left := int(owner.Left) + inset
+	top := int(owner.Top) + inset
+	right := int(owner.Right) - inset
+	bottom := int(owner.Bottom) - inset
+	if x < left {
+		x = left
+		changed = true
+	}
+	if y < top {
+		y = top
+		changed = true
+	}
+	if x+width > right {
+		x = right - width
+		changed = true
+	}
+	if y+height > bottom {
+		y = bottom - height
+		changed = true
+	}
+	return
+}
 
 func (s *InputSyncer) syncPopupBoundsLoop(stop <-chan struct{}) {
 	defer func() {

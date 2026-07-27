@@ -269,6 +269,10 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 		logger.F("master", masterProfileId),
 		logger.F("followers", fmt.Sprintf("%v", validFollowerIds)),
 	)
+	// Keep the management client out of the tiled workspace as soon as sync is
+	// enabled, even when the user has not pressed a separate layout button yet.
+	// The dedicated sync assistant remains visible because it uses another title.
+	minimizeMainClientWindow()
 
 	return nil
 }

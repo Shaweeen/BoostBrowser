@@ -10,6 +10,37 @@ func TestNeedsExtensionPopupResizeStrongPromptLargeWindow(t *testing.T) {
 	}
 }
 
+func TestConstrainSyncWalletPopupUsesCompactResponsiveBounds(t *testing.T) {
+	x, y, width, height, changed := constrainSyncPopupRectForTitle(
+		"Rabby Wallet Notification",
+		winRect{Left: 20, Top: 20, Right: 1460, Bottom: 920},
+		winRect{Left: 0, Top: 0, Right: 820, Bottom: 560},
+		2,
+	)
+	if !changed {
+		t.Fatal("oversized wallet popup should be constrained")
+	}
+	if width != extensionPopupTargetWidth || height != 556 {
+		t.Fatalf("unexpected responsive popup size: %dx%d", width, height)
+	}
+	if x < 2 || y < 2 || x+width > 818 || y+height > 558 {
+		t.Fatalf("popup escaped owner bounds: x=%d y=%d width=%d height=%d", x, y, width, height)
+	}
+}
+
+func TestMainClientWindowTitleExcludesSyncAssistant(t *testing.T) {
+	for _, title := range []string{"BrowserStudio", "BrowserStudio Manager"} {
+		if !isMainClientWindowTitle(title) {
+			t.Fatalf("manager title should be recognized: %q", title)
+		}
+	}
+	for _, title := range []string{"BrowserStudio · 同步工具", "MetaMask - BrowserStudio", "BrowserStudio Window Sync"} {
+		if isMainClientWindowTitle(title) {
+			t.Fatalf("non-manager title must not be minimized: %q", title)
+		}
+	}
+}
+
 func TestNeedsExtensionPopupResizeOKXProductPopupIsClamped(t *testing.T) {
 	if !needsExtensionPopupResize("okx wallet - boost browser", 1920, 1032) {
 		t.Fatalf("oversized OKX extension popup with Boost Browser suffix should be clamped")

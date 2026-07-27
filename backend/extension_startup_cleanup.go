@@ -15,10 +15,9 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// sanitizeChromeStartupPreferences prevents Chrome from restoring extension
-// welcome/options tabs that were left open when the previous browser session was
-// closed. Browser profiles in Boost Browser should start from the app-provided
-// URL/default page, not from Chrome's last-session restore list.
+// sanitizeChromeStartupPreferences selects one fixed blank startup page without
+// deleting session files or extension data. Extensions remain free to open their
+// own onboarding, unlock, connect and permission surfaces.
 func sanitizeChromeStartupPreferences(userDataDir string) {
 	if strings.TrimSpace(userDataDir) == "" {
 		return
@@ -32,7 +31,6 @@ func sanitizeChromeStartupPreferences(userDataDir string) {
 		path := filepath.Join(userDataDir, rel)
 		_ = patchChromePreferencesFile(path)
 	}
-	removeChromeSessionRestoreFiles(userDataDir)
 }
 
 func ensureChromePreferencesFile(path string) error {
@@ -48,53 +46,6 @@ func ensureChromePreferencesFile(path string) error {
 		return err
 	}
 	return os.WriteFile(path, []byte("{}"), 0644)
-}
-
-func removeChromeSessionRestoreFiles(userDataDir string) {
-	// Chrome 的实际 profile 目录通常是 Default，但用户/内核也可能通过
-	// profile-directory 或迁移数据生成 Profile 1/Guest Profile 等目录。逐个清理
-	// user-data-dir 下的 profile 会话文件，避免遗漏已恢复的扩展登录/欢迎页。
-	profileDirs := []string{userDataDir, filepath.Join(userDataDir, "Default")}
-	if entries, err := os.ReadDir(userDataDir); err == nil {
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			name := strings.ToLower(strings.TrimSpace(entry.Name()))
-			if name == "default" || strings.HasPrefix(name, "profile ") || strings.Contains(name, "profile") {
-				profileDirs = append(profileDirs, filepath.Join(userDataDir, entry.Name()))
-			}
-		}
-	}
-
-	seen := map[string]bool{}
-	for _, dir := range profileDirs {
-		if dir == "" || seen[dir] {
-			continue
-		}
-		seen[dir] = true
-		_ = removeSessionFilesInDir(filepath.Join(dir, "Sessions"))
-		for _, name := range []string{"Current Session", "Current Tabs", "Last Session", "Last Tabs"} {
-			_ = os.Remove(filepath.Join(dir, name))
-		}
-	}
-}
-
-func removeSessionFilesInDir(dir string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := strings.ToLower(entry.Name())
-		if strings.HasPrefix(name, "session_") || strings.HasPrefix(name, "tabs_") {
-			_ = os.Remove(filepath.Join(dir, entry.Name()))
-		}
-	}
-	return nil
 }
 
 func patchChromePreferencesFile(path string) error {
@@ -203,39 +154,23 @@ func ensureJSONMap(parent map[string]any, key string) map[string]any {
 	return created
 }
 
-// closeExtensionStartupPages suppresses extension UI and Chrome welcome/sign-in
-// UI created automatically during startup. The first pass is immediate; the
-// bounded tail runs in the background so a wallet's delayed onboarding page does
-// not add four seconds to every environment in a batch launch.
-func closeExtensionStartupPages(debugPort int, profileId string) {
-	seenClosed := map[string]bool{}
-	closedImmediately := closeExtensionStartupPagesOnce(debugPort, seenClosed)
-	if closedImmediately > 0 {
-		logger.New("Browser").Info("已关闭启动时自动弹出的扩展/登录欢迎页面", logger.F("profile_id", profileId), logger.F("count", closedImmediately))
-	}
-	go func() {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				logger.New("Browser").Warn("扩展启动页后台清理异常（已隔离）", logger.F("profile_id", profileId), logger.F("error", recovered))
-			}
-		}()
-		deadline := time.Now().Add(3 * time.Second)
-		closed := 0
-		for time.Now().Before(deadline) {
-			time.Sleep(250 * time.Millisecond)
-			closed += closeExtensionStartupPagesOnce(debugPort, seenClosed)
-		}
-		if closed > 0 {
-			logger.New("Browser").Info("后台关闭延迟弹出的扩展/登录欢迎页面", logger.F("profile_id", profileId), logger.F("count", closed))
-		}
-	}()
-}
-
-func finalizeBrowserStartupExtensionSuppression(debugPort int, pid int, profileId string) {
+func finalizeBrowserStartupTabs(debugPort int, pid int, profileId string) {
 	if debugPort <= 0 {
 		return
 	}
-	closeExtensionStartupPages(debugPort, profileId)
+	// Extension onboarding, unlock, connect and permission pages belong to the
+	// user's installed software and must remain visible. Only remove the empty
+	// bootstrap tab when an extension page is already present, so tiled windows
+	// show the useful wallet interface without an extra about:blank tab.
+	if closed := closeRedundantBlankStartupPages(debugPort); closed > 0 {
+		logger.New("Browser").Info("已移除扩展页面旁的空白启动页", logger.F("profile_id", profileId), logger.F("count", closed))
+	}
+	time.AfterFunc(1200*time.Millisecond, func() {
+		defer func() { _ = recover() }()
+		if closed := closeRedundantBlankStartupPages(debugPort); closed > 0 {
+			logger.New("Browser").Info("已移除延迟扩展页面旁的空白启动页", logger.F("profile_id", profileId), logger.F("count", closed))
+		}
+	})
 	// Browser windows are launched at their real onscreen position now.  Do not
 	// run the legacy restore pass here: it walks the whole Chromium process tree
 	// and calls ShowWindow/SetForegroundWindow for every titled top-level HWND.
@@ -246,9 +181,19 @@ func finalizeBrowserStartupExtensionSuppression(debugPort int, pid int, profileI
 	_ = pid
 }
 
-func closeExtensionStartupPagesOnce(debugPort int, seenClosed map[string]bool) int {
+func closeRedundantBlankStartupPages(debugPort int) int {
 	targets, err := listCDPTargets(debugPort)
 	if err != nil {
+		return 0
+	}
+	hasExtensionPage := false
+	for _, target := range targets {
+		if strings.EqualFold(strings.TrimSpace(target.Type), "page") && isExtensionStartupURL(target.URL) {
+			hasExtensionPage = true
+			break
+		}
+	}
+	if !hasExtensionPage {
 		return 0
 	}
 
@@ -266,7 +211,7 @@ func closeExtensionStartupPagesOnce(debugPort int, seenClosed map[string]bool) i
 	msgID := 3000
 	closed := 0
 	for _, target := range targets {
-		if target.ID == "" || seenClosed[target.ID] || !isAutoExtensionStartupTarget(target) {
+		if target.ID == "" || !shouldCloseRedundantBlankStartupTarget(target, hasExtensionPage) {
 			continue
 		}
 		msgID++
@@ -281,11 +226,22 @@ func closeExtensionStartupPagesOnce(debugPort int, seenClosed map[string]bool) i
 		var resp cdpResponse
 		_ = browserConn.ReadJSON(&resp)
 		if resp.Error == nil {
-			seenClosed[target.ID] = true
 			closed++
 		}
 	}
 	return closed
+}
+
+func shouldCloseRedundantBlankStartupTarget(target cdpTarget, hasExtensionPage bool) bool {
+	if !hasExtensionPage || !strings.EqualFold(strings.TrimSpace(target.Type), "page") {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(target.URL)) {
+	case "about:blank", "chrome://newtab/", "chrome://new-tab-page/":
+		return true
+	default:
+		return false
+	}
 }
 
 func listCDPTargets(debugPort int) ([]cdpTarget, error) {
@@ -312,38 +268,4 @@ func isExtensionStartupURL(rawURL string) bool {
 		return false
 	}
 	return strings.HasPrefix(u, "chrome-extension://") || strings.HasPrefix(u, "chrome://extensions")
-}
-
-func isSuppressedBrowserStartupURL(rawURL string) bool {
-	u := strings.TrimSpace(strings.ToLower(rawURL))
-	if isExtensionStartupURL(u) {
-		return true
-	}
-	for _, prefix := range []string{
-		"chrome://welcome",
-		"chrome://intro",
-		"chrome://profile-picker",
-		"chrome://chrome-signin",
-		"chrome://sync-confirmation",
-		"chrome://signin-email-confirmation",
-		"chrome://enterprise-profile-welcome",
-		"chrome://profile-customization",
-	} {
-		if strings.HasPrefix(u, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func isAutoExtensionStartupTarget(target cdpTarget) bool {
-	typeName := strings.TrimSpace(strings.ToLower(target.Type))
-	// During the bounded startup suppression window, close both main extension or
-	// sign-in tabs (type=page) and automatically-created targets (often type=other).
-	// The caller only runs this before normal navigation/interaction, so later user
-	// clicks on wallet extensions are unaffected.
-	if typeName != "page" && typeName != "other" {
-		return false
-	}
-	return isSuppressedBrowserStartupURL(target.URL)
 }

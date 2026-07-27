@@ -128,77 +128,20 @@ func TestIsExtensionStartupURL(t *testing.T) {
 	}
 }
 
-func TestIsSuppressedBrowserStartupURL(t *testing.T) {
-	cases := []struct {
-		url  string
-		want bool
-	}{
-		{"chrome://welcome/", true},
-		{"chrome://profile-picker/", true},
-		{"chrome://chrome-signin/", true},
-		{"chrome://sync-confirmation/", true},
-		{"chrome-extension://abcdef/options.html", true},
-		{"https://accounts.google.com/", false},
-		{"https://mail.google.com/", false},
-		{"about:blank", false},
+func TestRedundantBlankCleanupPreservesExtensionAndWebPages(t *testing.T) {
+	if !shouldCloseRedundantBlankStartupTarget(cdpTarget{Type: "page", URL: "about:blank"}, true) {
+		t.Fatal("blank bootstrap tab should close when an extension page exists")
 	}
-	for _, tc := range cases {
-		if got := isSuppressedBrowserStartupURL(tc.url); got != tc.want {
-			t.Fatalf("isSuppressedBrowserStartupURL(%q)=%v, want %v", tc.url, got, tc.want)
+	for _, target := range []cdpTarget{
+		{Type: "page", URL: "chrome-extension://wallet/onboarding.html"},
+		{Type: "page", URL: "https://example.com/"},
+		{Type: "service_worker", URL: "chrome-extension://wallet/background.js"},
+	} {
+		if shouldCloseRedundantBlankStartupTarget(target, true) {
+			t.Fatalf("user extension/web target must be preserved: %#v", target)
 		}
 	}
-}
-
-func TestRemoveChromeSessionRestoreFiles(t *testing.T) {
-	dir := t.TempDir()
-	sessionsDir := filepath.Join(dir, "Default", "Sessions")
-	profileSessionsDir := filepath.Join(dir, "Profile 1", "Sessions")
-	if err := os.MkdirAll(sessionsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(profileSessionsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	files := []string{
-		filepath.Join(sessionsDir, "Session_123"),
-		filepath.Join(sessionsDir, "Tabs_123"),
-		filepath.Join(sessionsDir, "keep.txt"),
-		filepath.Join(dir, "Default", "Last Session"),
-		filepath.Join(dir, "Default", "Last Tabs"),
-		filepath.Join(profileSessionsDir, "Session_456"),
-		filepath.Join(profileSessionsDir, "Tabs_456"),
-		filepath.Join(dir, "Profile 1", "Current Session"),
-		filepath.Join(dir, "Profile 1", "Current Tabs"),
-	}
-	for _, file := range files {
-		if err := os.WriteFile(file, []byte("x"), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	removeChromeSessionRestoreFiles(dir)
-	for _, file := range []string{files[0], files[1], files[3], files[4], files[5], files[6], files[7], files[8]} {
-		if _, err := os.Stat(file); !os.IsNotExist(err) {
-			t.Fatalf("session restore file should be removed: %s", file)
-		}
-	}
-	if _, err := os.Stat(files[2]); err != nil {
-		t.Fatalf("unrelated session dir file should stay: %v", err)
-	}
-}
-
-func TestIsAutoExtensionStartupTarget(t *testing.T) {
-	cases := []struct {
-		target cdpTarget
-		want   bool
-	}{
-		{cdpTarget{Type: "page", URL: "chrome-extension://ekaiemolceheaedaknpealhgfjljmica/home.html#/unlock"}, true},
-		{cdpTarget{Type: "other", URL: "chrome-extension://mcohilncbfahbmgdjkbpemcciiolgcge/popup.html"}, true},
-		{cdpTarget{Type: "iframe", URL: "chrome-extension://abcdef/home.html"}, false},
-		{cdpTarget{Type: "page", URL: "https://metamask.io/"}, false},
-	}
-	for _, tc := range cases {
-		if got := isAutoExtensionStartupTarget(tc.target); got != tc.want {
-			t.Fatalf("isAutoExtensionStartupTarget(%#v)=%v, want %v", tc.target, got, tc.want)
-		}
+	if shouldCloseRedundantBlankStartupTarget(cdpTarget{Type: "page", URL: "about:blank"}, false) {
+		t.Fatal("the only blank startup tab must remain when no extension page exists")
 	}
 }

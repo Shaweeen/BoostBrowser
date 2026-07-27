@@ -83,7 +83,7 @@ func TestLargeFollowerSchedulingUsesStableCadence(t *testing.T) {
 	if got := syncMouseMoveThrottle(20); got != 32*time.Millisecond {
 		t.Fatalf("20 follower throttle=%v", got)
 	}
-	if got := syncPopupBoundsIntervalForFollowers(20); got != 75*time.Millisecond {
+	if got := syncPopupBoundsIntervalForFollowers(20); got != 250*time.Millisecond {
 		t.Fatalf("20 follower popup interval=%v", got)
 	}
 }

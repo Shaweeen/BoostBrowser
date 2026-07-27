@@ -188,7 +188,7 @@ func (a *App) waitBrowserDebugReadyAsync(profileId string, debugPort int, timeou
 		logger.F("debug_port", debugPort),
 	)
 	if snapshot.Pid > 0 {
-		finalizeBrowserStartupExtensionSuppression(debugPort, snapshot.Pid, profileId)
+		finalizeBrowserStartupTabs(debugPort, snapshot.Pid, profileId)
 	}
 
 	// 延迟就绪后也注入反检测脚本 + 启动 Turnstile 自动点击

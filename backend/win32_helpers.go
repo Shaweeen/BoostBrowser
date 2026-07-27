@@ -319,12 +319,35 @@ var exactTitleWindowEnumCallback = windows.NewCallback(func(hwnd windows.HWND, l
 	return 0
 })
 
+var mainClientWindowEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lParam uintptr) uintptr {
+	defer func() { _ = recover() }()
+	search := (*exactTitleWindowSearch)(unsafe.Pointer(lParam))
+	if search == nil || !isWindowVisible(hwnd) {
+		return 1
+	}
+	if !isMainClientWindowTitle(getWindowTitle(hwnd)) {
+		return 1
+	}
+	search.target = hwnd
+	return 0
+})
+
+func isMainClientWindowTitle(title string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(title))
+	if strings.Contains(normalized, "同步工具") || strings.Contains(normalized, "window sync") {
+		return false
+	}
+	return normalized == "browserstudio" ||
+		normalized == "browserstudio manager" ||
+		strings.HasPrefix(normalized, "browserstudio manager ")
+}
+
 // minimizeMainClientWindow hides only the normal BrowserStudio management
 // window. The dedicated sync assistant has a different title and remains on
 // top while browser environments are tiled.
 func minimizeMainClientWindow() bool {
-	search := &exactTitleWindowSearch{title: "BrowserStudio"}
-	procEnumWindows.Call(exactTitleWindowEnumCallback, uintptr(unsafe.Pointer(search)))
+	search := &exactTitleWindowSearch{}
+	procEnumWindows.Call(mainClientWindowEnumCallback, uintptr(unsafe.Pointer(search)))
 	runtime.KeepAlive(search)
 	if search.target == 0 {
 		return false
