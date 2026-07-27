@@ -18,10 +18,11 @@ import (
 
 // TestResult 代理测试结果
 type TestResult struct {
-	ProxyId   string
-	Ok        bool
-	LatencyMs int64
-	Error     string
+	ProxyId        string
+	Ok             bool
+	LatencyMs      int64
+	Error          string
+	ResolvedConfig string
 }
 
 // proxyEndpoint 从代理配置中提取 server:port，用于 TCP ping

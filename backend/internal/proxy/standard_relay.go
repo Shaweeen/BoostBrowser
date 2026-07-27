@@ -73,9 +73,16 @@ func (m *StandardRelayManager) Acquire(profileID, src string) (string, string, e
 	m.mu.Unlock()
 
 	if key == "" {
-		working, err := DetectWorkingStandardProxyConfig(src, nil)
+		// Protocol-labelled provider lists are frequently wrong. Probe the
+		// three standard protocols concurrently with a short bounded timeout;
+		// serial 30-second probes multiplied startup time across 20 profiles.
+		working, err := DetectWorkingStandardProxyConfig(src, &SpeedTestConfig{
+			Timeout:    5 * time.Second,
+			TCPTimeout: 3 * time.Second,
+			URLs:       []string{defaultTestURL},
+		})
 		if err != nil {
-			return "", "", err
+			return "", "", fmt.Errorf("代理协议/认证验证失败；若已开启 VPN TUN，请将代理服务器 IP 加入 TUN 路由排除后重试: %w", err)
 		}
 		key = strings.TrimSpace(working)
 		m.mu.Lock()

@@ -490,6 +490,10 @@ export function TestProxyConnectivity(arg1, arg2) {
   return window['go']['main']['App']['TestProxyConnectivity'](arg1, arg2);
 }
 
+export function TestProxyConfigRealConnectivity(arg1) {
+  return window['go']['main']['App']['TestProxyConfigRealConnectivity'](arg1);
+}
+
 export function TestProxyRealConnectivity(arg1) {
   return window['go']['main']['App']['TestProxyRealConnectivity'](arg1);
 }

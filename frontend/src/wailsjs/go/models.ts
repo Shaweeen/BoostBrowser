@@ -226,6 +226,7 @@ export namespace backend {
 	    ok: boolean;
 	    latencyMs: number;
 	    error: string;
+	    resolvedConfig: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ProxyTestResult(source);
@@ -237,6 +238,7 @@ export namespace backend {
 	        this.ok = source["ok"];
 	        this.latencyMs = source["latencyMs"];
 	        this.error = source["error"];
+	        this.resolvedConfig = source["resolvedConfig"];
 	    }
 	}
 	export class ProxyValidationResult {

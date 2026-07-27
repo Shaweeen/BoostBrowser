@@ -937,10 +937,11 @@ func (a *App) ValidateProxyConfig(proxyConfig string, proxyId string) ProxyValid
 
 // ProxyTestResult 代理测试结果
 type ProxyTestResult struct {
-	ProxyId   string `json:"proxyId"`
-	Ok        bool   `json:"ok"`
-	LatencyMs int64  `json:"latencyMs"`
-	Error     string `json:"error"`
+	ProxyId        string `json:"proxyId"`
+	Ok             bool   `json:"ok"`
+	LatencyMs      int64  `json:"latencyMs"`
+	Error          string `json:"error"`
+	ResolvedConfig string `json:"resolvedConfig"`
 }
 
 // ProxyIPHealthResult 代理出口 IP 健康信息（透传第三方接口结果）
@@ -965,7 +966,7 @@ type ProxyIPHealthResult struct {
 func (a *App) TestProxyConnectivity(proxyId string, proxyConfig string) ProxyTestResult {
 	proxies := a.getLatestProxies()
 	r := proxy.TestConnectivity(proxyId, proxyConfig, proxies, nil)
-	return ProxyTestResult{ProxyId: r.ProxyId, Ok: r.Ok, LatencyMs: r.LatencyMs, Error: r.Error}
+	return proxyTestResultFromInternal(r)
 }
 
 // TestProxyRealConnectivity 通过真实 HTTP 请求测试代理连通性（Wails 绑定）
@@ -973,7 +974,28 @@ func (a *App) TestProxyConnectivity(proxyId string, proxyConfig string) ProxyTes
 func (a *App) TestProxyRealConnectivity(proxyId string) ProxyTestResult {
 	proxies := a.getLatestProxies()
 	r := proxy.SpeedTest(proxyId, proxies, a.xrayMgr, a.singboxMgr, nil)
-	return ProxyTestResult{ProxyId: r.ProxyId, Ok: r.Ok, LatencyMs: r.LatencyMs, Error: r.Error}
+	return proxyTestResultFromInternal(r)
+}
+
+// TestProxyConfigRealConnectivity validates an unsaved edit through a real
+// authenticated HTTP request. It also returns the protocol that actually
+// worked, allowing the editor to correct provider lists labelled with the
+// wrong HTTP/SOCKS5 scheme before the browser is launched.
+func (a *App) TestProxyConfigRealConnectivity(proxyConfig string) ProxyTestResult {
+	const previewID = "__proxy_edit_preview__"
+	candidate := config.BrowserProxy{ProxyId: previewID, ProxyName: previewID, ProxyConfig: strings.TrimSpace(proxyConfig)}
+	r := proxy.SpeedTest(previewID, []config.BrowserProxy{candidate}, a.xrayMgr, a.singboxMgr, nil)
+	return proxyTestResultFromInternal(r)
+}
+
+func proxyTestResultFromInternal(r proxy.TestResult) ProxyTestResult {
+	return ProxyTestResult{
+		ProxyId:        r.ProxyId,
+		Ok:             r.Ok,
+		LatencyMs:      r.LatencyMs,
+		Error:          r.Error,
+		ResolvedConfig: r.ResolvedConfig,
+	}
 }
 
 // BrowserProxyTestSpeed 手动触发单个代理测速并持久化结果
@@ -984,7 +1006,7 @@ func (a *App) BrowserProxyTestSpeed(proxyId string) ProxyTestResult {
 		testedAt := time.Now().Format(time.RFC3339)
 		_ = a.browserMgr.ProxyDAO.UpdateSpeedResult(proxyId, r.Ok, r.LatencyMs, testedAt)
 	}
-	return ProxyTestResult{ProxyId: r.ProxyId, Ok: r.Ok, LatencyMs: r.LatencyMs, Error: r.Error}
+	return proxyTestResultFromInternal(r)
 }
 
 // BrowserProxyBatchTestSpeed 批量并发测速，concurrency 控制并发数（默认 20）
@@ -1028,7 +1050,7 @@ func (a *App) BrowserProxyBatchTestSpeed(proxyIds []string, concurrency int) []P
 					testedAt := time.Now().Format(time.RFC3339)
 					_ = a.browserMgr.ProxyDAO.UpdateSpeedResult(job.ProxyId, r.Ok, r.LatencyMs, testedAt)
 				}
-				result := ProxyTestResult{ProxyId: r.ProxyId, Ok: r.Ok, LatencyMs: r.LatencyMs, Error: r.Error}
+				result := proxyTestResultFromInternal(r)
 				results[job.Idx] = result
 
 				// 实时推送单个结果到前端

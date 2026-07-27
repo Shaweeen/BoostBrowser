@@ -248,6 +248,8 @@ export function SyncTileWindows(arg1:Array<string>,arg2:string,arg3:string):Prom
 
 export function TestProxyConnectivity(arg1:string,arg2:string):Promise<backend.ProxyTestResult>;
 
+export function TestProxyConfigRealConnectivity(arg1:string):Promise<backend.ProxyTestResult>;
+
 export function TestProxyRealConnectivity(arg1:string):Promise<backend.ProxyTestResult>;
 
 export function TriggerGC():Promise<void>;

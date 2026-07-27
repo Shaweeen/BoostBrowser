@@ -535,7 +535,27 @@ export async function testProxyRealConnectivity(proxyId: string): Promise<{ prox
   return { proxyId, ok: true, latencyMs: Math.floor(100 + Math.random() * 400), error: '' }
 }
 
-export async function browserProxyTestSpeed(proxyId: string): Promise<{ proxyId: string; ok: boolean; latencyMs: number; error: string }> {
+export interface ProxyConnectivityTestResult {
+  proxyId: string
+  ok: boolean
+  latencyMs: number
+  error: string
+  resolvedConfig?: string
+}
+
+export async function testProxyConfigRealConnectivity(proxyConfig: string): Promise<ProxyConnectivityTestResult> {
+  const bindings: any = await getBindings()
+  if (bindings?.TestProxyConfigRealConnectivity) {
+    return (await bindings.TestProxyConfigRealConnectivity(proxyConfig)) || { proxyId: '', ok: false, latencyMs: 0, error: '调用失败' }
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.TestProxyConfigRealConnectivity) {
+    return (await goApp.TestProxyConfigRealConnectivity(proxyConfig)) || { proxyId: '', ok: false, latencyMs: 0, error: '调用失败' }
+  }
+  return { proxyId: '', ok: false, latencyMs: 0, error: 'Wails 绑定不可用，请重新打包客户端' }
+}
+
+export async function browserProxyTestSpeed(proxyId: string): Promise<ProxyConnectivityTestResult> {
   const bindings: any = await getBindings()
   if (bindings?.BrowserProxyTestSpeed) {
     return (await bindings.BrowserProxyTestSpeed(proxyId)) || { proxyId, ok: false, latencyMs: 0, error: '调用失败' }

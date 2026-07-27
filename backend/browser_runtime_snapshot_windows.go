@@ -84,6 +84,16 @@ func (a *App) applyBrowserRuntimeSnapshot() (int, int) {
 		if profile == nil || entry.PID <= 0 || !isProcessAlive(entry.PID) {
 			continue
 		}
+		// The independent sync assistant can reconcile Chrome's real browser
+		// process after the launcher hands its top-level frame to a sibling.
+		// Do not let a still-alive but stale launcher PID from the main-client
+		// snapshot overwrite that locally confirmed runtime on every one-second
+		// panel refresh. A dead/missing local runtime can still be recovered
+		// from the shared snapshot as before.
+		if keepLocalRuntimeInsteadOfSnapshot(profile, entry) {
+			live++
+			continue
+		}
 		profile.Running = true
 		profile.Pid = entry.PID
 		profile.DebugPort = entry.DebugPort
@@ -93,4 +103,11 @@ func (a *App) applyBrowserRuntimeSnapshot() (int, int) {
 		live++
 	}
 	return live, len(snapshot.Entries)
+}
+
+func keepLocalRuntimeInsteadOfSnapshot(profile *BrowserProfile, entry browserRuntimeSnapshotEntry) bool {
+	if profile == nil || !profile.Running || profile.Pid <= 0 || profile.Pid == entry.PID {
+		return false
+	}
+	return isProcessAlive(profile.Pid)
 }

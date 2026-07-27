@@ -76,7 +76,7 @@ func SpeedTest(
 	}
 
 	if strings.ToLower(src) == "direct://" {
-		return TestResult{ProxyId: proxyId, Ok: true, LatencyMs: 0}
+		return TestResult{ProxyId: proxyId, Ok: true, LatencyMs: 0, ResolvedConfig: src}
 	}
 	if LooksLikeStandardProxyConfig(src) {
 		normalized, err := NormalizeStandardProxyConfig(src, "http")
@@ -116,6 +116,7 @@ func SpeedTest(
 	// 原来固定 HEAD gstatic + 复用同一 TCP 连接，部分代理会偶发关闭连接，导致同一个代理一会失败一会成功。
 	result := robustHTTPProxyTest(proxyId, proxyInstance, testURLs, cfg.Timeout)
 	if result.Ok {
+		result.ResolvedConfig = src
 		return result
 	}
 
@@ -133,6 +134,7 @@ func SpeedTest(
 		}
 		altResult := robustHTTPProxyTest(proxyId, altProxy, testURLs, cfg.Timeout)
 		if altResult.Ok {
+			altResult.ResolvedConfig = altSrc
 			return altResult
 		}
 		if altResult.Error != "" {
@@ -479,24 +481,38 @@ func DetectWorkingStandardProxyConfig(src string, cfg *SpeedTestConfig) (string,
 		testURLs = defaultSpeedTestURLs
 	}
 	candidates := append([]string{src}, alternateStandardProxyConfigs(src)...)
-	lastErr := ""
+	type detectionResult struct {
+		candidate string
+		err       string
+		ok        bool
+	}
+	results := make(chan detectionResult, len(candidates))
 	for _, candidate := range candidates {
-		mapping, err := proxyConfigToMapping(candidate)
-		if err != nil {
-			lastErr = err.Error()
-			continue
+		candidate := candidate
+		go func() {
+			mapping, err := proxyConfigToMapping(candidate)
+			if err != nil {
+				results <- detectionResult{candidate: candidate, err: err.Error()}
+				return
+			}
+			px, err := adapter.ParseProxy(mapping)
+			if err != nil {
+				results <- detectionResult{candidate: candidate, err: err.Error()}
+				return
+			}
+			result := robustHTTPProxyTest("detect", px, testURLs, cfg.Timeout)
+			results <- detectionResult{candidate: candidate, err: result.Error, ok: result.Ok}
+		}()
+	}
+
+	lastErr := ""
+	for range candidates {
+		result := <-results
+		if result.ok {
+			return result.candidate, nil
 		}
-		px, err := adapter.ParseProxy(mapping)
-		if err != nil {
-			lastErr = err.Error()
-			continue
-		}
-		result := robustHTTPProxyTest("detect", px, testURLs, cfg.Timeout)
-		if result.Ok {
-			return candidate, nil
-		}
-		if result.Error != "" {
-			lastErr = result.Error
+		if result.err != "" {
+			lastErr = result.err
 		}
 	}
 	if lastErr == "" {

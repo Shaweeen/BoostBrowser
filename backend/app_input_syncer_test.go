@@ -304,3 +304,16 @@ func TestMainProcessPersistsBrowserRuntimeSnapshot(t *testing.T) {
 		t.Fatalf("unexpected runtime snapshot: %+v", snapshot)
 	}
 }
+
+func TestRuntimeSnapshotKeepsLocallyReconciledLivePID(t *testing.T) {
+	currentPID := os.Getpid()
+	profile := &BrowserProfile{Running: true, Pid: currentPID, DebugPort: 32123}
+	stale := browserRuntimeSnapshotEntry{ProfileID: "profile-1", PID: currentPID + 100000, DebugPort: 32124}
+	if !keepLocalRuntimeInsteadOfSnapshot(profile, stale) {
+		t.Fatal("a live locally reconciled PID must not be overwritten by a stale shared snapshot")
+	}
+	stale.PID = currentPID
+	if keepLocalRuntimeInsteadOfSnapshot(profile, stale) {
+		t.Fatal("the same PID should accept current shared snapshot metadata")
+	}
+}

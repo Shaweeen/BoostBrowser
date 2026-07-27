@@ -282,8 +282,8 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	log.Info("代理配置检查",
 		logger.F("profile_id", profileId),
 		logger.F("proxy_id", profile.ProxyId),
-		logger.F("profile_proxy_config", profile.ProxyConfig),
-		logger.F("resolved_proxy_config", resolvedProxyConfig),
+		logger.F("config_present", resolvedProxyConfig != ""),
+		logger.F("standard_proxy", proxy.IsStandardProxyURL(resolvedProxyConfig)),
 	)
 	if supported, errorMsg := proxy.ValidateProxyConfig(resolvedProxyConfig, proxies, profile.ProxyId); !supported {
 		startErr := fmt.Errorf("实例启动失败：%s", errorMsg)
@@ -341,7 +341,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		if relayKey != "" {
 			acquiredStandardRelay = true
 			effectiveProxy = localProxy
-			log.Info("标准代理已切换为本地转发", logger.F("profile_id", profileId), logger.F("local_proxy", localProxy), logger.F("upstream", relayKey))
+			log.Info("标准代理已切换为本地转发", logger.F("profile_id", profileId), logger.F("local_proxy", localProxy))
 		}
 	}
 

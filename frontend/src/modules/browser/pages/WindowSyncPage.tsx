@@ -123,15 +123,19 @@ export function WindowSyncPage() {
         return
       }
 
-      const runningIds = new Set(sorted.filter(item => item.status === 'running').map(item => item.profileId))
+      // A Chrome top-level window can move from its launcher PID to a sibling
+      // while many instances start together. Keep the user's selection during
+      // the brief "no_window" reconciliation state; only remove IDs that are
+      // actually absent from the runtime list.
+      const knownIds = new Set(sorted.map(item => item.profileId))
       setSelectedIds(prev => {
         const next = new Set<string>()
         prev.forEach(id => {
-          if (runningIds.has(id)) next.add(id)
+          if (knownIds.has(id)) next.add(id)
         })
         return next
       })
-      setMasterId(prev => (prev && runningIds.has(prev) ? prev : null))
+      setMasterId(prev => (prev && knownIds.has(prev) ? prev : null))
     } finally {
       if (silent) silentRefreshInFlight.current = false
       if (!silent) {

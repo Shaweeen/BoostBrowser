@@ -67,6 +67,23 @@ func TestProxyEndpointExcludesCredentials(t *testing.T) {
 	}
 }
 
+func TestAlternateStandardProxyConfigsPreserveEndpointAndCredentials(t *testing.T) {
+	source := "socks5://buyer:p%40ss%3Aword@198.105.119.245:5494"
+	got := alternateStandardProxyConfigs(source)
+	want := []string{
+		"http://buyer:p%40ss%3Aword@198.105.119.245:5494",
+		"https://buyer:p%40ss%3Aword@198.105.119.245:5494",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("alternate count = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("alternate[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestAcquireExistingRelayDoesNotDoubleCountSameProfile(t *testing.T) {
 	manager := NewStandardRelayManager()
 	relay := &standardRelay{localURL: "http://127.0.0.1:12345", refCount: 1}

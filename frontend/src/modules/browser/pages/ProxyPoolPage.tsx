@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Card, ConfirmModal, FormItem, Input, Modal, Select, Switch, Table, Textarea, toast } from '../../../shared/components'
 import type { SortOrder, TableColumn } from '../../../shared/components/Table'
 import type { BrowserProxy, ProxyIPHealthResult } from '../types'
-import { fetchBrowserProxies, fetchBrowserProxyGroups, saveBrowserProxies, browserProxyTestSpeed, browserProxyBatchTestSpeed, browserProxyCheckIPHealth, browserProxyBatchCheckIPHealth, fetchClashImportFromURL } from '../api'
+import { fetchBrowserProxies, fetchBrowserProxyGroups, saveBrowserProxies, browserProxyTestSpeed, browserProxyBatchTestSpeed, browserProxyCheckIPHealth, browserProxyBatchCheckIPHealth, fetchClashImportFromURL, testProxyConfigRealConnectivity } from '../api'
 import { EventsOn } from '../../../wailsjs/runtime/runtime'
 import { SmartAssignProxyModal } from '../components/SmartAssignProxyModal'
 import yaml from 'js-yaml'
@@ -52,6 +52,13 @@ interface DirectImportForm {
   password: string
 }
 
+interface EditProxyForm extends DirectImportForm {
+  groupName: string
+  dnsServers: string
+  mode: 'direct' | 'raw'
+  proxyConfig: string
+}
+
 const DIRECT_PROXY_PROTOCOL_OPTIONS = [
   { value: 'http', label: 'HTTP' },
   { value: 'https', label: 'HTTPS' },
@@ -65,6 +72,14 @@ const INITIAL_DIRECT_IMPORT_FORM: DirectImportForm = {
   port: '',
   username: '',
   password: '',
+}
+
+const INITIAL_EDIT_PROXY_FORM: EditProxyForm = {
+  ...INITIAL_DIRECT_IMPORT_FORM,
+  groupName: '',
+  dnsServers: '',
+  mode: 'direct',
+  proxyConfig: '',
 }
 
 interface ImportCandidate {
@@ -435,6 +450,47 @@ function normalizeDirectProxyLine(raw: string, defaultProtocol: DirectImportForm
   }
 
   return normalizeDirectProxyConfig(`${protocol}://${line}`)
+}
+
+function decodeProxyCredential(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+function parseEditableDirectProxyConfig(proxyConfig: string): DirectImportForm | null {
+  const raw = proxyConfig.trim()
+  if (!/^(?:https?|socks5?|socket):\/\//i.test(raw)) return null
+  try {
+    const normalized = normalizeDirectProxyLine(raw, 'http')
+    const parsed = new URL(normalized)
+    const protocol = normalizeDirectProxyProtocol(parsed.protocol.replace(':', ''))
+    if (!protocol || !parsed.hostname || !parsed.port) return null
+    return {
+      proxyName: '',
+      protocol,
+      server: parsed.hostname,
+      port: parsed.port,
+      username: decodeProxyCredential(parsed.username || ''),
+      password: decodeProxyCredential(parsed.password || ''),
+    }
+  } catch {
+    return null
+  }
+}
+
+function buildEditedProxyConfig(form: EditProxyForm): string {
+  if (form.mode === 'raw') {
+    const raw = form.proxyConfig.trim()
+    if (!raw) throw new Error('代理配置不能为空')
+    return raw
+  }
+  if (!form.server.trim()) throw new Error('请输入代理地址')
+  if (!isValidDirectProxyPort(form.port)) throw new Error('代理端口必须在 1-65535 之间')
+  if (form.password && !form.username.trim()) throw new Error('填写密码时必须同时填写账号')
+  return buildLooseDirectProxyURL(form.protocol, form.server, form.port, form.username, form.password)
 }
 
 function parseDirectProxyLine(
@@ -971,8 +1027,10 @@ export function ProxyPoolPage() {
 
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [editingProxy, setEditingProxy] = useState<BrowserProxy | null>(null)
-  const [editForm, setEditForm] = useState({ proxyName: '', proxyConfig: '', dnsServers: '', groupName: '' })
+  const [editForm, setEditForm] = useState<EditProxyForm>(() => ({ ...INITIAL_EDIT_PROXY_FORM }))
   const [saving, setSaving] = useState(false)
+  const [testingEditProxy, setTestingEditProxy] = useState(false)
+  const [editTestResult, setEditTestResult] = useState<{ ok: boolean; message: string } | null>(null)
 
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -1701,8 +1759,18 @@ export function ProxyPoolPage() {
   const handleEdit = (record: ProxyDisplayInfo) => {
     const proxy = proxies.find(p => p.proxyId === record.proxyId)
     if (proxy) {
+      const direct = parseEditableDirectProxyConfig(proxy.proxyConfig)
       setEditingProxy(proxy)
-      setEditForm({ proxyName: proxy.proxyName, proxyConfig: proxy.proxyConfig, dnsServers: proxy.dnsServers || '', groupName: proxy.groupName || '' })
+      setEditForm({
+        ...INITIAL_EDIT_PROXY_FORM,
+        ...(direct || {}),
+        proxyName: proxy.proxyName,
+        proxyConfig: proxy.proxyConfig,
+        dnsServers: proxy.dnsServers || '',
+        groupName: proxy.groupName || '',
+        mode: direct ? 'direct' : 'raw',
+      })
+      setEditTestResult(null)
       setEditModalOpen(true)
     }
   }
@@ -1710,11 +1778,18 @@ export function ProxyPoolPage() {
   const handleSaveProxy = async () => {
     if (!editForm.proxyName.trim()) { toast.error('请输入代理名称'); return }
     if (!editingProxy) return
+    let proxyConfig = ''
+    try {
+      proxyConfig = buildEditedProxyConfig(editForm)
+    } catch (error: any) {
+      toast.error(error?.message || '代理配置无效')
+      return
+    }
     setSaving(true)
     try {
       const newProxies = proxies.map(p =>
         p.proxyId === editingProxy.proxyId
-          ? { ...p, proxyName: editForm.proxyName, proxyConfig: editForm.proxyConfig, dnsServers: editForm.dnsServers, groupName: editForm.groupName }
+          ? { ...p, proxyName: editForm.proxyName.trim(), proxyConfig, dnsServers: editForm.dnsServers.trim(), groupName: editForm.groupName.trim() }
           : p
       )
       await saveProxies(newProxies)
@@ -1724,6 +1799,40 @@ export function ProxyPoolPage() {
       toast.error(error?.message || '保存失败')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleTestEditedProxy = async () => {
+    let proxyConfig = ''
+    try {
+      proxyConfig = buildEditedProxyConfig(editForm)
+    } catch (error: any) {
+      toast.error(error?.message || '代理配置无效')
+      return
+    }
+    setTestingEditProxy(true)
+    setEditTestResult(null)
+    try {
+      const result = await testProxyConfigRealConnectivity(proxyConfig)
+      if (!result.ok) {
+        const message = result.error || '无法通过该代理访问互联网'
+        setEditTestResult({ ok: false, message })
+        return
+      }
+      const resolved = (result.resolvedConfig || proxyConfig).trim()
+      const direct = parseEditableDirectProxyConfig(resolved)
+      if (direct && editForm.mode === 'direct') {
+        setEditForm(prev => ({ ...prev, ...direct }))
+      }
+      const protocol = direct?.protocol?.toUpperCase() || parseProxyInfo(resolved).type.toUpperCase()
+      setEditTestResult({
+        ok: true,
+        message: `${protocol || '代理'} 验证成功，真实互联网延时 ${result.latencyMs} ms${resolved !== proxyConfig ? '；已自动采用可用协议' : ''}`,
+      })
+    } catch (error: any) {
+      setEditTestResult({ ok: false, message: error?.message || '代理验证失败' })
+    } finally {
+      setTestingEditProxy(false)
     }
   }
 
@@ -2271,8 +2380,8 @@ export function ProxyPoolPage() {
         </div>
       </Modal>
 
-      <Modal open={editModalOpen} onClose={() => setEditModalOpen(false)} title="编辑代理" width="500px"
-        footer={<><Button variant="secondary" onClick={() => setEditModalOpen(false)}>取消</Button><Button onClick={handleSaveProxy} loading={saving}>保存</Button></>}>
+      <Modal open={editModalOpen} onClose={() => setEditModalOpen(false)} title="编辑代理" width="620px"
+        footer={<><Button variant="secondary" onClick={() => void handleTestEditedProxy()} loading={testingEditProxy}>验证并识别协议</Button><Button variant="secondary" onClick={() => setEditModalOpen(false)}>取消</Button><Button onClick={handleSaveProxy} loading={saving}>保存</Button></>}>
         <div className="space-y-4">
           <FormItem label="代理名称" required>
             <Input value={editForm.proxyName} onChange={e => setEditForm(prev => ({ ...prev, proxyName: e.target.value }))} placeholder="例如：香港节点" />
@@ -2283,14 +2392,75 @@ export function ProxyPoolPage() {
               {groups.map(g => <option key={g} value={g} />)}
             </datalist>
           </FormItem>
-          <FormItem label="代理配置">
-            <Textarea value={editForm.proxyConfig} onChange={e => setEditForm(prev => ({ ...prev, proxyConfig: e.target.value }))} rows={10} placeholder="支持 Clash YAML、http://、https://、socks5:// 代理配置" />
+          <FormItem label="配置方式">
+            <Select
+              value={editForm.mode}
+              onChange={e => {
+                const mode = e.target.value as EditProxyForm['mode']
+                setEditForm(prev => ({ ...prev, mode }))
+                setEditTestResult(null)
+              }}
+              options={[
+                { value: 'direct', label: 'HTTP / HTTPS / SOCKS5 独立代理' },
+                { value: 'raw', label: 'Clash / 隧道原始配置' },
+              ]}
+            />
           </FormItem>
-          <FormItem label="DNS 服务器（可选）">
-            <Textarea value={editForm.dnsServers} onChange={e => setEditForm(prev => ({ ...prev, dnsServers: e.target.value }))} rows={6}
-              placeholder={`dns:\n  enable: true\n  nameserver:\n    - 119.29.29.29\n    - 223.5.5.5`} />
-            <p className="text-xs text-[var(--color-text-muted)] mt-1">支持 Clash dns: YAML 格式，主要用于 Clash / 桥接代理；直连 HTTP/SOCKS5 通常不会使用这里的 DNS 配置</p>
-          </FormItem>
+          {editForm.mode === 'direct' ? (
+            <>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <FormItem label="代理协议" required>
+                  <Select
+                    value={editForm.protocol}
+                    onChange={e => {
+                      setEditForm(prev => ({ ...prev, protocol: e.target.value as DirectImportForm['protocol'] }))
+                      setEditTestResult(null)
+                    }}
+                    options={[...DIRECT_PROXY_PROTOCOL_OPTIONS]}
+                  />
+                </FormItem>
+                <FormItem label="地址" required>
+                  <Input value={editForm.server} onChange={e => { setEditForm(prev => ({ ...prev, server: e.target.value })); setEditTestResult(null) }} placeholder="例如：198.105.119.245" />
+                </FormItem>
+                <FormItem label="端口" required>
+                  <Input type="number" min={1} max={65535} value={editForm.port} onChange={e => { setEditForm(prev => ({ ...prev, port: e.target.value })); setEditTestResult(null) }} placeholder="例如：5494" />
+                </FormItem>
+                <FormItem label="用户名（可选）">
+                  <Input value={editForm.username} onChange={e => { setEditForm(prev => ({ ...prev, username: e.target.value })); setEditTestResult(null) }} placeholder="代理账号" />
+                </FormItem>
+                <FormItem label="密码（可选）">
+                  <Input type="password" value={editForm.password} onChange={e => { setEditForm(prev => ({ ...prev, password: e.target.value })); setEditTestResult(null) }} placeholder="代理密码" />
+                </FormItem>
+                <FormItem label="标准配置预览">
+                  <Input value={(() => { try { return buildEditedProxyConfig(editForm) } catch { return '请补全地址和端口' } })()} readOnly />
+                </FormItem>
+              </div>
+              <div className="rounded-xl border border-[#f0d58a] bg-[#fff9e8] px-3 py-2 text-xs leading-5 text-[#8a5a00]">
+                独立环境代理不要求开启本地 VPN/TUN。若必须同时使用 Clash Verge TUN，请在 TUN 路由排除中加入代理服务器 IP，避免代理连接再次被 TUN 捕获形成双重代理或回环。
+              </div>
+            </>
+          ) : (
+            <>
+              <FormItem label="代理原始配置">
+                <Textarea value={editForm.proxyConfig} onChange={e => { setEditForm(prev => ({ ...prev, proxyConfig: e.target.value })); setEditTestResult(null) }} rows={10} placeholder="支持 Clash YAML、vmess://、vless://、trojan:// 等配置" />
+              </FormItem>
+              <FormItem label="DNS 服务器（可选）">
+                <Textarea value={editForm.dnsServers} onChange={e => setEditForm(prev => ({ ...prev, dnsServers: e.target.value }))} rows={5}
+                  placeholder={`dns:\n  enable: true\n  nameserver:\n    - 119.29.29.29\n    - 223.5.5.5`} />
+                <p className="text-xs text-[var(--color-text-muted)] mt-1">仅用于 Clash / 隧道配置；HTTP、HTTPS、SOCKS5 独立代理不需要填写这里。</p>
+              </FormItem>
+            </>
+          )}
+          {editTestResult && (
+            <div className={`rounded-xl border px-3 py-2 text-sm ${editTestResult.ok ? 'border-green-200 bg-green-50 text-green-700' : 'border-red-200 bg-red-50 text-red-700'}`}>
+              {editTestResult.message}
+              {!editTestResult.ok && (
+                <div className="mt-1 text-xs">
+                  端口能 ping/TCP 连接不代表代理认证成功；请核对协议、账号密码，并在 Clash Verge TUN 中排除该代理服务器 IP 后重试。
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </Modal>
 
