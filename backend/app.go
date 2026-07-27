@@ -1261,6 +1261,13 @@ func (a *App) SaveBrowserProxies(proxies []BrowserProxy) error {
 		if proxyName == "" || proxyConfig == "" {
 			continue
 		}
+		if proxy.LooksLikeStandardProxyConfig(proxyConfig) {
+			standardConfig, err := proxy.NormalizeStandardProxyConfig(proxyConfig, "http")
+			if err != nil {
+				return fmt.Errorf("代理 %q 格式无效: %w", proxyName, err)
+			}
+			proxyConfig = standardConfig
+		}
 		proxyId := strings.TrimSpace(item.ProxyId)
 		if proxyId == "" {
 			proxyId = generateUUID()

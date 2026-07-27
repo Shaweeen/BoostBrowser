@@ -262,6 +262,15 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			}
 		}
 	}
+	if proxy.LooksLikeStandardProxyConfig(resolvedProxyConfig) {
+		normalizedProxy, normalizeErr := proxy.NormalizeStandardProxyConfig(resolvedProxyConfig, "http")
+		if normalizeErr != nil {
+			startErr := fmt.Errorf("实例启动失败：代理格式无效。原因：%v", normalizeErr)
+			profile.LastError = startErr.Error()
+			return profile, startErr
+		}
+		resolvedProxyConfig = normalizedProxy
+	}
 	effectiveProxy := resolvedProxyConfig
 	log.Info("代理配置检查",
 		logger.F("profile_id", profileId),

@@ -16,9 +16,15 @@ import (
 )
 
 type StandardRelayManager struct {
-	mu     sync.Mutex
-	relays map[string]*standardRelay
-	refs   map[string]string
+	mu       sync.Mutex
+	relays   map[string]*standardRelay
+	refs     map[string]string
+	detected map[string]detectedStandardProxy
+}
+
+type detectedStandardProxy struct {
+	working   string
+	expiresAt time.Time
 }
 
 type standardRelay struct {
@@ -32,8 +38,9 @@ type standardRelay struct {
 
 func NewStandardRelayManager() *StandardRelayManager {
 	return &StandardRelayManager{
-		relays: make(map[string]*standardRelay),
-		refs:   make(map[string]string),
+		relays:   make(map[string]*standardRelay),
+		refs:     make(map[string]string),
+		detected: make(map[string]detectedStandardProxy),
 	}
 }
 
@@ -43,28 +50,42 @@ func (m *StandardRelayManager) Acquire(profileID, src string) (string, string, e
 	if profileID == "" {
 		return "", "", fmt.Errorf("profile id is empty")
 	}
-	if !IsStandardProxyURL(src) || isLocalProxyURL(src) || !standardProxyNeedsRelay(src) {
+	if !IsStandardProxyURL(src) || !standardProxyNeedsRelay(src) {
 		return src, "", nil
 	}
 
-	working, err := DetectWorkingStandardProxyConfig(src, nil)
-	if err != nil {
-		return "", "", err
-	}
-	key := strings.TrimSpace(working)
-
+	key := ""
+	now := time.Now()
 	m.mu.Lock()
-	if oldKey := m.refs[profileID]; oldKey != "" && oldKey != key {
-		m.releaseLocked(profileID)
+	if cached, ok := m.detected[src]; ok {
+		if now.Before(cached.expiresAt) {
+			key = cached.working
+		} else {
+			delete(m.detected, src)
+		}
 	}
-	if r := m.relays[key]; r != nil {
-		r.refCount++
-		m.refs[profileID] = key
-		localURL := r.localURL
-		m.mu.Unlock()
-		return localURL, key, nil
+	if key != "" {
+		if localURL, ok := m.acquireExistingLocked(profileID, key); ok {
+			m.mu.Unlock()
+			return localURL, key, nil
+		}
 	}
 	m.mu.Unlock()
+
+	if key == "" {
+		working, err := DetectWorkingStandardProxyConfig(src, nil)
+		if err != nil {
+			return "", "", err
+		}
+		key = strings.TrimSpace(working)
+		m.mu.Lock()
+		m.detected[src] = detectedStandardProxy{working: key, expiresAt: now.Add(10 * time.Minute)}
+		if localURL, ok := m.acquireExistingLocked(profileID, key); ok {
+			m.mu.Unlock()
+			return localURL, key, nil
+		}
+		m.mu.Unlock()
+	}
 
 	r, err := startStandardRelay(key)
 	if err != nil {
@@ -76,11 +97,24 @@ func (m *StandardRelayManager) Acquire(profileID, src string) (string, string, e
 		m.mu.Unlock()
 		_ = r.Close()
 		m.mu.Lock()
+		if oldKey := m.refs[profileID]; oldKey == key {
+			localURL := existing.localURL
+			m.mu.Unlock()
+			return localURL, key, nil
+		} else if oldKey != "" {
+			m.releaseLocked(profileID)
+		}
 		existing.refCount++
 		m.refs[profileID] = key
 		localURL := existing.localURL
 		m.mu.Unlock()
 		return localURL, key, nil
+	}
+	if oldKey := m.refs[profileID]; oldKey != "" && oldKey != key {
+		m.releaseLocked(profileID)
+	} else if oldKey == key {
+		// A stale reference without a live relay must not inflate refCount.
+		delete(m.refs, profileID)
 	}
 	r.refCount = 1
 	m.relays[key] = r
@@ -88,6 +122,21 @@ func (m *StandardRelayManager) Acquire(profileID, src string) (string, string, e
 	localURL := r.localURL
 	m.mu.Unlock()
 	return localURL, key, nil
+}
+
+func (m *StandardRelayManager) acquireExistingLocked(profileID, key string) (string, bool) {
+	r := m.relays[key]
+	if r == nil {
+		return "", false
+	}
+	if oldKey := m.refs[profileID]; oldKey == key {
+		return r.localURL, true
+	} else if oldKey != "" {
+		m.releaseLocked(profileID)
+	}
+	r.refCount++
+	m.refs[profileID] = key
+	return r.localURL, true
 }
 
 func (m *StandardRelayManager) Release(profileID string) {
@@ -128,6 +177,7 @@ func (m *StandardRelayManager) StopAll() {
 	}
 	m.relays = make(map[string]*standardRelay)
 	m.refs = make(map[string]string)
+	m.detected = make(map[string]detectedStandardProxy)
 	m.mu.Unlock()
 	for _, r := range relays {
 		_ = r.Close()

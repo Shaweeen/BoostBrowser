@@ -77,6 +77,13 @@ func ValidateProxyConfig(proxyConfig string, proxies []config.BrowserProxy, prox
 	if strings.EqualFold(src, "direct://") {
 		return true, ""
 	}
+	if LooksLikeStandardProxyConfig(src) {
+		normalized, err := NormalizeStandardProxyConfig(src, "http")
+		if err != nil {
+			return false, fmt.Sprintf("代理配置解析失败: %v", err)
+		}
+		src = normalized
+	}
 	l := strings.ToLower(src)
 	// 标准代理格式，支持
 	if strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://") || strings.HasPrefix(l, "socks5://") {
@@ -116,6 +123,11 @@ func RequiresBridge(proxyConfig string, proxies []config.BrowserProxy, proxyId s
 	}
 	if src == "" {
 		return false
+	}
+	if LooksLikeStandardProxyConfig(src) {
+		if normalized, err := NormalizeStandardProxyConfig(src, "http"); err == nil {
+			src = normalized
+		}
 	}
 	l := strings.ToLower(src)
 	// 标准代理格式，不需要桥接

@@ -78,6 +78,13 @@ func SpeedTest(
 	if strings.ToLower(src) == "direct://" {
 		return TestResult{ProxyId: proxyId, Ok: true, LatencyMs: 0}
 	}
+	if LooksLikeStandardProxyConfig(src) {
+		normalized, err := NormalizeStandardProxyConfig(src, "http")
+		if err != nil {
+			return TestResult{ProxyId: proxyId, Ok: false, Error: fmt.Sprintf("代理格式无效: %v", err)}
+		}
+		src = normalized
+	}
 
 	testURLs := cfg.URLs
 	if len(testURLs) == 0 {
@@ -133,10 +140,15 @@ func SpeedTest(
 		}
 	}
 
-	// 如果目标测试站/线路偶发超时，但代理服务端口本身能连通，按端口连通给出延迟。
-	// 这样不会把“测试站慢/被限流”误显示成代理完全失败。
+	// TCP 端口开放不等于代理可以访问互联网。旧逻辑在 HTTP/SOCKS
+	// 认证失败时仍显示绿色延迟，用户随后启动浏览器才发现没有网络。
 	if fallback := tcpPingFallback(proxyId, src, cfg.TCPTimeout, log); fallback.Ok {
-		return fallback
+		result.LatencyMs = fallback.LatencyMs
+		if result.Error == "" {
+			result.Error = "代理端口可连接，但无法验证互联网访问"
+		} else {
+			result.Error = "代理端口可连接，但无法通过代理访问互联网: " + result.Error
+		}
 	}
 	return result
 }
@@ -151,10 +163,26 @@ func robustHTTPProxyTest(proxyId string, px C.Proxy, testURLs []string, timeout 
 
 	lastErr := ""
 	methods := []string{http.MethodHead, http.MethodGet}
+	totalBudget := timeout * 2
+	if totalBudget > 30*time.Second {
+		totalBudget = 30 * time.Second
+	}
+	if totalBudget < 8*time.Second {
+		totalBudget = 8 * time.Second
+	}
+	deadline := time.Now().Add(totalBudget)
 	for attempt := 0; attempt < 2; attempt++ {
 		for _, testURL := range testURLs {
 			for _, method := range methods {
-				result := singleHTTPProxyTest(proxyId, px, testURL, method, timeout)
+				remaining := time.Until(deadline)
+				if remaining <= 0 {
+					return TestResult{ProxyId: proxyId, Ok: false, Error: lastErr}
+				}
+				requestTimeout := timeout
+				if remaining < requestTimeout {
+					requestTimeout = remaining
+				}
+				result := singleHTTPProxyTest(proxyId, px, testURL, method, requestTimeout)
 				if result.Ok {
 					return result
 				}
@@ -341,6 +369,12 @@ func proxyConfigToMapping(src string) (map[string]any, error) {
 
 	// http/https 直连代理
 	if strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://") {
+		normalized, err := NormalizeStandardProxyConfig(src, "http")
+		if err != nil {
+			return nil, err
+		}
+		src = normalized
+		l = strings.ToLower(src)
 		mapping, err := parseStandardProxy(src, "http")
 		if err != nil {
 			return nil, err
@@ -352,8 +386,12 @@ func proxyConfigToMapping(src string) (map[string]any, error) {
 		return mapping, nil
 	}
 	// socks5 直连代理
-	if strings.HasPrefix(l, "socks5://") {
-		return parseStandardProxy(src, "socks5")
+	if strings.HasPrefix(l, "socks5://") || strings.HasPrefix(l, "socks://") || strings.HasPrefix(l, "socket://") {
+		normalized, err := NormalizeStandardProxyConfig(src, "socks5")
+		if err != nil {
+			return nil, err
+		}
+		return parseStandardProxy(normalized, "socks5")
 	}
 
 	// URI 格式（vmess:// vless:// 等）暂不支持直接转 mapping，降级
@@ -366,35 +404,24 @@ func proxyConfigToMapping(src string) (map[string]any, error) {
 }
 
 func parseStandardProxy(src string, proxyType string) (map[string]any, error) {
-	rest := src[strings.Index(src, "://")+3:]
-
-	var username, password, hostport string
-	if atIdx := strings.LastIndex(rest, "@"); atIdx >= 0 {
-		userInfo := rest[:atIdx]
-		hostport = rest[atIdx+1:]
-		parts := strings.SplitN(userInfo, ":", 2)
-		username = parts[0]
-		if len(parts) > 1 {
-			password = parts[1]
-		}
-	} else {
-		hostport = rest
-	}
-	hostport = strings.SplitN(hostport, "/", 2)[0]
-
-	host, port := splitHostPort(hostport)
-	if host == "" || port == 0 {
+	u, err := url.Parse(src)
+	if err != nil || u.Hostname() == "" || u.Port() == "" {
 		return nil, fmt.Errorf("无法解析地址: %s", src)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return nil, fmt.Errorf("无法解析端口: %s", src)
 	}
 
 	mapping := map[string]any{
 		"name":   "speedtest-proxy",
 		"type":   proxyType,
-		"server": host,
+		"server": u.Hostname(),
 		"port":   port,
 	}
-	if username != "" {
-		mapping["username"] = username
+	if u.User != nil && u.User.Username() != "" {
+		password, _ := u.User.Password()
+		mapping["username"] = u.User.Username()
 		mapping["password"] = password
 	}
 	return mapping, nil

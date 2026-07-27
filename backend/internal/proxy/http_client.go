@@ -28,6 +28,14 @@ func buildProxyHTTPClient(
 	if l == "" || l == "direct://" {
 		return &http.Client{Timeout: timeout}, nil
 	}
+	if LooksLikeStandardProxyConfig(src) {
+		normalized, err := NormalizeStandardProxyConfig(src, "http")
+		if err != nil {
+			return nil, fmt.Errorf("代理格式无效: %w", err)
+		}
+		src = normalized
+		l = strings.ToLower(src)
+	}
 
 	if IsSingBoxProtocol(src) {
 		if singboxMgr == nil {

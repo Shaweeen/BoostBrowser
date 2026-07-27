@@ -344,31 +344,106 @@ function buildDirectImportCandidate(form: DirectImportForm): ImportCandidate {
   }
 }
 
-function normalizeDirectProxyLine(raw: string): string {
-  let line = raw.trim()
-  if (!line || line.startsWith('#')) return ''
-  line = normalizeDirectProxyConfig(line)
-  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(line)) {
-    // 常见代理商文本格式：host:port:username:password。密码允许继续包含冒号。
-    // IPv6 地址必须使用标准 URL（例如 http://user:pass@[::1]:8080），避免歧义。
-    const parts = line.split(':')
-    if (parts.length >= 4 && parts[0] && /^\d+$/.test(parts[1])) {
-      const [host, port, username, ...passwordParts] = parts
-      if (!host.includes('[') && !host.includes(']') && username) {
-        const password = passwordParts.join(':')
-        const auth = `${encodeURIComponent(username)}${password ? `:${encodeURIComponent(password)}` : ''}@`
-        line = `http://${auth}${host}:${port}`
-      }
-    }
+function normalizeDirectProxyProtocol(raw: string): DirectImportForm['protocol'] | '' {
+  switch (raw.trim().toLowerCase()) {
+    case 'http': return 'http'
+    case 'https': return 'https'
+    case 'socks':
+    case 'socks5':
+    case 'socket':
+      return 'socks5'
+    default:
+      return ''
   }
-  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(line)) {
-    line = `http://${line}`
-  }
-  return line
 }
 
-function parseDirectProxyLine(raw: string, index: number, prefix: string): ImportCandidate | null {
-  const normalized = normalizeDirectProxyLine(raw)
+function splitLooseDirectProxyFields(raw: string): string[] {
+  return raw.trim().split(/[\s,|;]+/).filter(Boolean)
+}
+
+function isValidDirectProxyPort(raw: string): boolean {
+  if (!/^\d+$/.test(raw.trim())) return false
+  const port = Number(raw)
+  return port >= 1 && port <= 65535
+}
+
+function buildLooseDirectProxyURL(
+  protocol: DirectImportForm['protocol'],
+  host: string,
+  port: string,
+  username = '',
+  password = '',
+): string {
+  const cleanHost = host.trim().replace(/^\[(.*)\]$/, '$1')
+  const auth = username.trim()
+    ? `${encodeURIComponent(username.trim())}${password ? `:${encodeURIComponent(password)}` : ''}@`
+    : ''
+  return `${protocol}://${auth}${formatDirectProxyHost(cleanHost)}:${port.trim()}`
+}
+
+function normalizeDirectProxyLine(raw: string, defaultProtocol: DirectImportForm['protocol'] = 'http'): string {
+  let line = raw.trim().replace(/^["']|["']$/g, '')
+  if (!line || line.startsWith('#')) return ''
+
+  let protocol = defaultProtocol
+  const schemeMatch = line.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/(.*)$/)
+  if (schemeMatch) {
+    const detected = normalizeDirectProxyProtocol(schemeMatch[1])
+    if (detected) {
+      protocol = detected
+      line = schemeMatch[2].trim()
+    }
+  }
+
+  let fields = splitLooseDirectProxyFields(line)
+  const leadingProtocol = fields.length >= 3 ? normalizeDirectProxyProtocol(fields[0]) : ''
+  if (!schemeMatch && leadingProtocol) {
+    protocol = leadingProtocol
+    fields = fields.slice(1)
+    line = fields.join(' ')
+  }
+
+  // Providers commonly export four columns separated by spaces, tabs, commas,
+  // pipes or semicolons. Password text after the fourth column is retained.
+  if (fields.length >= 2 && isValidDirectProxyPort(fields[1])) {
+    return buildLooseDirectProxyURL(protocol, fields[0], fields[1], fields[2] || '', fields.slice(3).join(' '))
+  }
+
+  // host:port:username:password; extra colons belong to the password.
+  // Bracketed IPv6 and username:password@host:port continue through URL parsing.
+  if (!line.startsWith('[')) {
+    const colonParts = line.split(':')
+    if (colonParts.length >= 2 && isValidDirectProxyPort(colonParts[1])) {
+      return buildLooseDirectProxyURL(protocol, colonParts[0], colonParts[1], colonParts[2] || '', colonParts.slice(3).join(':'))
+    }
+  }
+
+  // Use the last @ as the endpoint separator. This also accepts provider URLs
+  // whose raw password contains @, #, ':' or '/' without percent encoding.
+  const authSeparator = line.lastIndexOf('@')
+  if (authSeparator > 0) {
+    const userInfo = line.slice(0, authSeparator)
+    const endpoint = line.slice(authSeparator + 1)
+    const passwordSeparator = userInfo.indexOf(':')
+    const decodeCredential = (value: string) => {
+      try { return decodeURIComponent(value) } catch { return value }
+    }
+    const username = decodeCredential(passwordSeparator >= 0 ? userInfo.slice(0, passwordSeparator) : userInfo)
+    const password = decodeCredential(passwordSeparator >= 0 ? userInfo.slice(passwordSeparator + 1) : '')
+    const auth = `${encodeURIComponent(username)}${passwordSeparator >= 0 ? `:${encodeURIComponent(password)}` : ''}@`
+    return `${protocol}://${auth}${endpoint}`
+  }
+
+  return normalizeDirectProxyConfig(`${protocol}://${line}`)
+}
+
+function parseDirectProxyLine(
+  raw: string,
+  index: number,
+  prefix: string,
+  defaultProtocol: DirectImportForm['protocol'] = 'http',
+): ImportCandidate | null {
+  const normalized = normalizeDirectProxyLine(raw, defaultProtocol)
   if (!normalized) return null
 
   let parsedURL: URL
@@ -402,11 +477,15 @@ function parseDirectProxyLine(raw: string, index: number, prefix: string): Impor
   }
 }
 
-function buildDirectImportCandidatesFromText(raw: string, prefix: string): ImportCandidate[] {
+function buildDirectImportCandidatesFromText(
+  raw: string,
+  prefix: string,
+  defaultProtocol: DirectImportForm['protocol'],
+): ImportCandidate[] {
   const lines = raw.split(/\r?\n/)
   const result: ImportCandidate[] = []
   lines.forEach((line, index) => {
-    const item = parseDirectProxyLine(line, index, prefix)
+    const item = parseDirectProxyLine(line, index, prefix, defaultProtocol)
     if (item) result.push(item)
   })
   return result
@@ -1723,7 +1802,7 @@ export function ProxyPoolPage() {
       const candidates = importMode === 'clash'
         ? buildImportCandidatesFromClash(parseClashImportText(importText), prefix)
         : directImportBatchText.trim()
-          ? buildDirectImportCandidatesFromText(directImportBatchText, prefix)
+          ? buildDirectImportCandidatesFromText(directImportBatchText, prefix, directImportForm.protocol)
           : [buildDirectImportCandidate(directImportForm)]
       if (!candidates.length) {
         toast.error('未解析到可导入代理')
@@ -2044,10 +2123,10 @@ export function ProxyPoolPage() {
                   value={directImportBatchText}
                   onChange={e => setDirectImportBatchText(e.target.value)}
                   rows={7}
-                  placeholder={`一行一个代理，例如：\n127.0.0.1:443:username:password\nsocks5://user:pass@116.212.124.13:28513\nhttp://user:pass@1.2.3.4:8080\n127.0.0.1:7890`}
+                  placeholder={`一行一个代理，例如：\n98.105.119.245 5494 username password\n127.0.0.1:443:username:password\nsocks5://user:pass@116.212.124.13:28513\n127.0.0.1|7890|user|pass`}
                 />
                 <p className="text-xs text-[var(--color-text-muted)] mt-1">
-                  支持 IP:端口:账号:密码、IP:端口、http://、https://、socks5://、socks://、socket://；未写协议时默认按 HTTP 导入。填写批量内容后，下方单条表单会被忽略。
+                  自动识别冒号、空格、Tab、逗号、竖线和分号分隔；支持 IP/域名、端口、账号、密码及 http://、https://、socks5://。未写协议时使用下方选择的“代理协议”。
                 </p>
               </FormItem>
               <FormItem label="粘贴单条代理链接（自动识别）">
@@ -2059,7 +2138,7 @@ export function ProxyPoolPage() {
                     setDirectImportUrl(url)
                     if (!url.trim()) return
                     try {
-                      const normalized = normalizeDirectProxyLine(url)
+                      const normalized = normalizeDirectProxyLine(url, directImportForm.protocol)
                       if (!normalized) return
                       const parsed = new URL(normalized)
                       const protocol = parsed.protocol.replace(':', '').toLowerCase()

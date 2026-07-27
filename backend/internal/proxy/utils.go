@@ -27,13 +27,22 @@ type TestResult struct {
 // proxyEndpoint 从代理配置中提取 server:port，用于 TCP ping
 func proxyEndpoint(src string) (string, error) {
 	src = strings.TrimSpace(src)
+	if LooksLikeStandardProxyConfig(src) {
+		normalized, err := NormalizeStandardProxyConfig(src, "http")
+		if err != nil {
+			return "", err
+		}
+		src = normalized
+	}
 	l := strings.ToLower(src)
 
 	// 标准 URL 格式: socks5://host:port, http://host:port
 	if strings.HasPrefix(l, "socks5://") || strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://") {
-		hostport := src[strings.Index(src, "//")+2:]
-		hostport = strings.SplitN(hostport, "/", 2)[0]
-		return hostport, nil
+		u, err := url.Parse(src)
+		if err != nil || u.Hostname() == "" || u.Port() == "" {
+			return "", fmt.Errorf("标准代理 URL 无效")
+		}
+		return net.JoinHostPort(u.Hostname(), u.Port()), nil
 	}
 
 	// vmess:// URL (base64 encoded JSON)
