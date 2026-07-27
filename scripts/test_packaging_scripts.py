@@ -113,6 +113,12 @@ class PackagingScriptsTest(unittest.TestCase):
             "external-network proxy debug tests must not run in release builds",
         )
 
+    def test_publish_script_hydrates_shallow_tag_history(self):
+        publisher = self.read("scripts/publish_windows_github_release.ps1")
+        self.assertIn("git rev-parse --is-shallow-repository", publisher)
+        self.assertIn("git fetch --unshallow origin --tags --force", publisher)
+        self.assertIn('"$Tag^{}^"', publisher)
+
     def test_go_mod_does_not_replace_modules_with_missing_local_third_party_dirs(self):
         text = self.read("go.mod")
         self.assertNotRegex(text, r"replace\s+github\.com/energye/systray\s+=>\s+\./third_party/systray")
@@ -232,7 +238,7 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("function Invoke-GhProbe", text)
         self.assertIn("$existingProbe.ExitCode", text)
         self.assertIn("scripts\\check_code_health.ps1", text)
-        self.assertIn("git describe --tags --abbrev=0 --match 'v[0-9]*' \"$Tag^\"", text)
+        self.assertIn("git describe --tags --abbrev=0 --match 'v[0-9]*' \"$Tag^{}^\"", text)
         self.assertIn("-BaseRef $PreviousTag", text)
         self.assertNotIn("$existingText = & gh release view", text)
         self.assertIn("activation-check.exe", text)

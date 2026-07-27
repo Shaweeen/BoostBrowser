@@ -116,7 +116,22 @@ if ($Head -ne $TagCommit) {
 & git ls-remote --exit-code origin "refs/tags/$Tag" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Release tag $Tag is not available on origin" }
 
-$previousTagOutput = @(& git describe --tags --abbrev=0 --match 'v[0-9]*' "$Tag^")
+# A clone made with --branch <annotated-tag> --depth 1 can contain the release
+# commit without the tag's parent history (and some Git versions leave only a
+# dangling local annotated-tag ref). Hydrate the history before comparing this
+# release with its predecessor.
+$isShallowOutput = @(& git rev-parse --is-shallow-repository)
+if ($LASTEXITCODE -ne 0 -or $isShallowOutput.Count -ne 1) {
+    throw 'Unable to inspect repository history depth'
+}
+if ($isShallowOutput[0].Trim() -eq 'true') {
+    & git fetch --unshallow origin --tags --force
+} else {
+    & git fetch origin --tags --force
+}
+if ($LASTEXITCODE -ne 0) { throw 'Unable to fetch complete release tag history' }
+
+$previousTagOutput = @(& git describe --tags --abbrev=0 --match 'v[0-9]*' "$Tag^{}^")
 if ($LASTEXITCODE -ne 0 -or $previousTagOutput.Count -ne 1) {
     throw "Unable to resolve the release preceding $Tag"
 }
