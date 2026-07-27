@@ -117,6 +117,8 @@ type BrowserConfig struct {
 	DefaultFingerprintArgs     []string               `yaml:"default_fingerprint_args"`
 	DefaultLaunchArgs          []string               `yaml:"default_launch_args"`
 	DefaultProxy               string                 `yaml:"default_proxy"`
+	ProxyNetworkMode           string                 `yaml:"proxy_network_mode,omitempty"`
+	LocalVPNProxy              string                 `yaml:"local_vpn_proxy,omitempty"`
 	StartReadyTimeoutMs        int                    `yaml:"start_ready_timeout_ms,omitempty"`
 	StartStableWindowMs        int                    `yaml:"start_stable_window_ms,omitempty"`
 	CacheAutoCleanEnabled      bool                   `yaml:"cache_auto_clean_enabled,omitempty"`

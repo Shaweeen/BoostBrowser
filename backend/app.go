@@ -797,6 +797,8 @@ func (a *App) GetBrowserSettings() BrowserSettings {
 		DefaultFingerprintArgs: append([]string{}, a.config.Browser.DefaultFingerprintArgs...),
 		DefaultLaunchArgs:      append([]string{}, a.config.Browser.DefaultLaunchArgs...),
 		DefaultProxy:           a.config.Browser.DefaultProxy,
+		ProxyNetworkMode:       proxy.NormalizeProxyNetworkMode(a.config.Browser.ProxyNetworkMode),
+		LocalVPNProxy:          a.config.Browser.LocalVPNProxy,
 		StartReadyTimeoutMs:    browserStartReadyTimeoutMillis(a.config),
 		StartStableWindowMs:    browserStartStableWindowMillis(a.config),
 	}
@@ -808,6 +810,16 @@ func (a *App) SaveBrowserSettings(settings BrowserSettings) error {
 	a.config.Browser.DefaultFingerprintArgs = append([]string{}, settings.DefaultFingerprintArgs...)
 	a.config.Browser.DefaultLaunchArgs = append([]string{}, settings.DefaultLaunchArgs...)
 	a.config.Browser.DefaultProxy = strings.TrimSpace(settings.DefaultProxy)
+	a.config.Browser.ProxyNetworkMode = proxy.NormalizeProxyNetworkMode(settings.ProxyNetworkMode)
+	localVPNProxy := strings.TrimSpace(settings.LocalVPNProxy)
+	if localVPNProxy != "" {
+		normalized, err := proxy.NormalizeLocalGatewayURL(localVPNProxy)
+		if err != nil {
+			return fmt.Errorf("本地 VPN 网关格式无效，请使用 http://127.0.0.1:端口 或 socks5://127.0.0.1:端口")
+		}
+		localVPNProxy = normalized
+	}
+	a.config.Browser.LocalVPNProxy = localVPNProxy
 	if settings.StartReadyTimeoutMs > 0 {
 		a.config.Browser.StartReadyTimeoutMs = settings.StartReadyTimeoutMs
 	} else if a.config.Browser.StartReadyTimeoutMs <= 0 {

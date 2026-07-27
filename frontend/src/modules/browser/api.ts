@@ -334,9 +334,9 @@ export async function fetchBrowserTabs(profileId: string): Promise<BrowserTab[]>
 export async function fetchBrowserSettings(): Promise<BrowserSettings> {
   const bindings: any = await getBindings()
   if (bindings?.GetBrowserSettings) {
-    return (await bindings.GetBrowserSettings()) || { userDataRoot: 'data', defaultFingerprintArgs: [], defaultLaunchArgs: [], defaultProxy: '', startReadyTimeoutMs: 3000, startStableWindowMs: 1200 }
+    return (await bindings.GetBrowserSettings()) || { userDataRoot: 'data', defaultFingerprintArgs: [], defaultLaunchArgs: [], defaultProxy: '', proxyNetworkMode: 'auto', localVpnProxy: '', startReadyTimeoutMs: 3000, startStableWindowMs: 1200 }
   }
-  return { userDataRoot: 'data', defaultFingerprintArgs: [], defaultLaunchArgs: [], defaultProxy: '', startReadyTimeoutMs: 3000, startStableWindowMs: 1200 }
+  return { userDataRoot: 'data', defaultFingerprintArgs: [], defaultLaunchArgs: [], defaultProxy: '', proxyNetworkMode: 'auto', localVpnProxy: '', startReadyTimeoutMs: 3000, startStableWindowMs: 1200 }
 }
 
 export async function saveBrowserSettings(settings: BrowserSettings): Promise<boolean> {

@@ -74,3 +74,35 @@ func TestSaveBrowserSettingsAppliesExplicitStartTiming(t *testing.T) {
 		t.Fatalf("expected stable window 3000ms, got %d", app.config.Browser.StartStableWindowMs)
 	}
 }
+
+func TestSaveBrowserSettingsNormalizesLocalVPNGateway(t *testing.T) {
+	app := NewApp(t.TempDir())
+	app.config = config.DefaultConfig()
+
+	if err := app.SaveBrowserSettings(BrowserSettings{
+		UserDataRoot:     app.config.Browser.UserDataRoot,
+		ProxyNetworkMode: "LOCAL_GATEWAY",
+		LocalVPNProxy:    "127.0.0.1:7897",
+	}); err != nil {
+		t.Fatalf("SaveBrowserSettings returned error: %v", err)
+	}
+	if app.config.Browser.ProxyNetworkMode != "local_gateway" {
+		t.Fatalf("unexpected proxy network mode: %q", app.config.Browser.ProxyNetworkMode)
+	}
+	if app.config.Browser.LocalVPNProxy != "http://127.0.0.1:7897" {
+		t.Fatalf("unexpected local VPN gateway: %q", app.config.Browser.LocalVPNProxy)
+	}
+}
+
+func TestSaveBrowserSettingsRejectsRemoteVPNGateway(t *testing.T) {
+	app := NewApp(t.TempDir())
+	app.config = config.DefaultConfig()
+
+	err := app.SaveBrowserSettings(BrowserSettings{
+		UserDataRoot:  app.config.Browser.UserDataRoot,
+		LocalVPNProxy: "http://203.0.113.10:7897",
+	})
+	if err == nil {
+		t.Fatal("remote endpoint must not be accepted as a local VPN gateway")
+	}
+}

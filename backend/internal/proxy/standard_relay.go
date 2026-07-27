@@ -16,14 +16,22 @@ import (
 )
 
 type StandardRelayManager struct {
-	mu       sync.Mutex
-	relays   map[string]*standardRelay
-	refs     map[string]string
-	detected map[string]detectedStandardProxy
+	mu                sync.Mutex
+	gatewayDiscoverMu sync.Mutex
+	relays            map[string]*standardRelay
+	refs              map[string]string
+	detected          map[string]detectedStandardProxy
+	detectedGateways  map[string]detectedLocalGateway
 }
 
 type detectedStandardProxy struct {
 	working   string
+	gateway   string
+	expiresAt time.Time
+}
+
+type detectedLocalGateway struct {
+	url       string
 	expiresAt time.Time
 }
 
@@ -38,13 +46,14 @@ type standardRelay struct {
 
 func NewStandardRelayManager() *StandardRelayManager {
 	return &StandardRelayManager{
-		relays:   make(map[string]*standardRelay),
-		refs:     make(map[string]string),
-		detected: make(map[string]detectedStandardProxy),
+		relays:           make(map[string]*standardRelay),
+		refs:             make(map[string]string),
+		detected:         make(map[string]detectedStandardProxy),
+		detectedGateways: make(map[string]detectedLocalGateway),
 	}
 }
 
-func (m *StandardRelayManager) Acquire(profileID, src string) (string, string, error) {
+func (m *StandardRelayManager) Acquire(profileID, src string, routeOptions ...StandardProxyRouteOptions) (string, string, error) {
 	profileID = strings.TrimSpace(profileID)
 	src = strings.TrimSpace(src)
 	if profileID == "" {
@@ -54,81 +63,147 @@ func (m *StandardRelayManager) Acquire(profileID, src string) (string, string, e
 		return src, "", nil
 	}
 
-	key := ""
+	options := StandardProxyRouteOptions{Mode: ProxyNetworkModeAuto}
+	if len(routeOptions) > 0 {
+		options = routeOptions[0]
+	}
+	options.Mode = NormalizeProxyNetworkMode(options.Mode)
+	options.LocalGatewayURL = strings.TrimSpace(options.LocalGatewayURL)
+	detectionKey := src + "\x00" + options.Mode + "\x00" + options.LocalGatewayURL
+	working := ""
+	gateway := ""
 	now := time.Now()
 	m.mu.Lock()
-	if cached, ok := m.detected[src]; ok {
+	if cached, ok := m.detected[detectionKey]; ok {
 		if now.Before(cached.expiresAt) {
-			key = cached.working
+			working = cached.working
+			gateway = cached.gateway
 		} else {
-			delete(m.detected, src)
+			delete(m.detected, detectionKey)
 		}
 	}
-	if key != "" {
-		if localURL, ok := m.acquireExistingLocked(profileID, key); ok {
+	relayKey := standardRelayKey(working, gateway)
+	if working != "" {
+		if localURL, ok := m.acquireExistingLocked(profileID, relayKey); ok {
 			m.mu.Unlock()
-			return localURL, key, nil
+			return localURL, working, nil
 		}
 	}
 	m.mu.Unlock()
 
-	if key == "" {
+	if working == "" {
 		// Protocol-labelled provider lists are frequently wrong. Probe the
 		// three standard protocols concurrently with a short bounded timeout;
 		// serial 30-second probes multiplied startup time across 20 profiles.
-		working, err := DetectWorkingStandardProxyConfig(src, &SpeedTestConfig{
+		var upstreamDialer C.Dialer
+		if options.Mode == ProxyNetworkModeAuto || options.Mode == ProxyNetworkModeLocalGateway {
+			gateway = m.discoverLocalGatewayCached(options.LocalGatewayURL)
+			if gateway != "" {
+				upstreamDialer, _ = newUpstreamGatewayDialer(gateway)
+			}
+			if options.Mode == ProxyNetworkModeLocalGateway && upstreamDialer == nil {
+				return "", "", fmt.Errorf("未检测到可用的本地 VPN HTTP/SOCKS 网关；请确认非 TUN 模式端口并填写本地 VPN 网关")
+			}
+		}
+		var err error
+		working, err = detectWorkingStandardProxyConfigWithDialer(src, &SpeedTestConfig{
 			Timeout:    5 * time.Second,
 			TCPTimeout: 3 * time.Second,
 			URLs:       []string{defaultTestURL},
-		})
-		if err != nil {
-			return "", "", fmt.Errorf("代理协议/认证验证失败；若已开启 VPN TUN，请将代理服务器 IP 加入 TUN 路由排除后重试: %w", err)
+		}, upstreamDialer)
+		if err != nil && options.Mode == ProxyNetworkModeAuto && upstreamDialer != nil {
+			// Local gateway may be alive while blocking this particular
+			// provider endpoint. Auto mode falls back to direct/TUN routing.
+			gateway = ""
+			working, err = DetectWorkingStandardProxyConfig(src, &SpeedTestConfig{
+				Timeout:    5 * time.Second,
+				TCPTimeout: 3 * time.Second,
+				URLs:       []string{defaultTestURL},
+			})
 		}
-		key = strings.TrimSpace(working)
+		if err != nil {
+			return "", "", fmt.Errorf("代理协议/认证验证失败；非 TUN 请填写本地 VPN 网关，TUN 请确认代理服务器连接已由 VPN 正常转发且未形成代理回环: %w", err)
+		}
+		working = strings.TrimSpace(working)
+		relayKey = standardRelayKey(working, gateway)
 		m.mu.Lock()
-		m.detected[src] = detectedStandardProxy{working: key, expiresAt: now.Add(10 * time.Minute)}
-		if localURL, ok := m.acquireExistingLocked(profileID, key); ok {
+		m.detected[detectionKey] = detectedStandardProxy{working: working, gateway: gateway, expiresAt: now.Add(10 * time.Minute)}
+		if localURL, ok := m.acquireExistingLocked(profileID, relayKey); ok {
 			m.mu.Unlock()
-			return localURL, key, nil
+			return localURL, working, nil
 		}
 		m.mu.Unlock()
 	}
 
-	r, err := startStandardRelay(key)
+	r, err := startStandardRelay(working, gateway)
 	if err != nil {
 		return "", "", err
 	}
 
 	m.mu.Lock()
-	if existing := m.relays[key]; existing != nil {
+	if existing := m.relays[relayKey]; existing != nil {
 		m.mu.Unlock()
 		_ = r.Close()
 		m.mu.Lock()
-		if oldKey := m.refs[profileID]; oldKey == key {
+		if oldKey := m.refs[profileID]; oldKey == relayKey {
 			localURL := existing.localURL
 			m.mu.Unlock()
-			return localURL, key, nil
+			return localURL, working, nil
 		} else if oldKey != "" {
 			m.releaseLocked(profileID)
 		}
 		existing.refCount++
-		m.refs[profileID] = key
+		m.refs[profileID] = relayKey
 		localURL := existing.localURL
 		m.mu.Unlock()
-		return localURL, key, nil
+		return localURL, working, nil
 	}
-	if oldKey := m.refs[profileID]; oldKey != "" && oldKey != key {
+	if oldKey := m.refs[profileID]; oldKey != "" && oldKey != relayKey {
 		m.releaseLocked(profileID)
-	} else if oldKey == key {
+	} else if oldKey == relayKey {
 		// A stale reference without a live relay must not inflate refCount.
 		delete(m.refs, profileID)
 	}
 	r.refCount = 1
-	m.relays[key] = r
-	m.refs[profileID] = key
+	m.relays[relayKey] = r
+	m.refs[profileID] = relayKey
 	localURL := r.localURL
 	m.mu.Unlock()
-	return localURL, key, nil
+	return localURL, working, nil
+}
+
+func standardRelayKey(working, gateway string) string {
+	if strings.TrimSpace(working) == "" {
+		return ""
+	}
+	return strings.TrimSpace(working) + "\x00" + strings.TrimSpace(gateway)
+}
+
+func (m *StandardRelayManager) discoverLocalGatewayCached(explicit string) string {
+	cacheKey := strings.TrimSpace(explicit)
+	now := time.Now()
+	m.mu.Lock()
+	if cached, ok := m.detectedGateways[cacheKey]; ok && now.Before(cached.expiresAt) {
+		m.mu.Unlock()
+		return cached.url
+	}
+	m.mu.Unlock()
+
+	m.gatewayDiscoverMu.Lock()
+	defer m.gatewayDiscoverMu.Unlock()
+	now = time.Now()
+	m.mu.Lock()
+	if cached, ok := m.detectedGateways[cacheKey]; ok && now.Before(cached.expiresAt) {
+		m.mu.Unlock()
+		return cached.url
+	}
+	m.mu.Unlock()
+
+	gateway := DiscoverLocalGateway(explicit, 1800*time.Millisecond)
+	m.mu.Lock()
+	m.detectedGateways[cacheKey] = detectedLocalGateway{url: gateway, expiresAt: now.Add(5 * time.Minute)}
+	m.mu.Unlock()
+	return gateway
 }
 
 func (m *StandardRelayManager) acquireExistingLocked(profileID, key string) (string, bool) {
@@ -185,18 +260,27 @@ func (m *StandardRelayManager) StopAll() {
 	m.relays = make(map[string]*standardRelay)
 	m.refs = make(map[string]string)
 	m.detected = make(map[string]detectedStandardProxy)
+	m.detectedGateways = make(map[string]detectedLocalGateway)
 	m.mu.Unlock()
 	for _, r := range relays {
 		_ = r.Close()
 	}
 }
 
-func startStandardRelay(src string) (*standardRelay, error) {
+func startStandardRelay(src string, gateway string) (*standardRelay, error) {
 	mapping, err := proxyConfigToMapping(src)
 	if err != nil {
 		return nil, err
 	}
-	px, err := adapter.ParseProxy(mapping)
+	options := make([]adapter.ProxyOption, 0, 1)
+	if strings.TrimSpace(gateway) != "" {
+		upstreamDialer, err := newUpstreamGatewayDialer(gateway)
+		if err != nil {
+			return nil, err
+		}
+		options = append(options, adapter.WithDialerForAPI(upstreamDialer))
+	}
+	px, err := adapter.ParseProxy(mapping, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +289,7 @@ func startStandardRelay(src string) (*standardRelay, error) {
 		return nil, err
 	}
 	r := &standardRelay{
-		key:      src,
+		key:      standardRelayKey(src, gateway),
 		proxyURL: src,
 		listen:   ln,
 		localURL: "http://" + ln.Addr().String(),

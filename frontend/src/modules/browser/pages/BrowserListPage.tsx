@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Activity, CheckCircle, ChevronDown, ChevronRight, ChevronUp, Copy, Download, Edit2, FileText, FolderInput, Key, Layers, Pencil, Play, Plus, RefreshCw, RotateCcw, Settings, Sliders, Square, Star, Trash2, Wand2, XCircle, LayoutGrid, List } from 'lucide-react'
-import { Badge, Button, Card, FormItem, Input, Modal, StatCard, Table, Textarea, toast } from '../../../shared/components'
+import { Badge, Button, Card, FormItem, Input, Modal, Select, StatCard, Table, Textarea, toast } from '../../../shared/components'
 import { reloadConfig } from '../../dashboard/api'
 import type { TableColumn } from '../../../shared/components/Table'
 import type { BrowserCore, BrowserCoreInput, BrowserProfile, BrowserProxy, BrowserSettings, BrowserGroupWithCount } from '../types'
@@ -342,6 +342,8 @@ export function BrowserListPage() {
     defaultFingerprintArgs: [],
     defaultLaunchArgs: [],
     defaultProxy: '',
+    proxyNetworkMode: 'auto',
+    localVpnProxy: '',
     startReadyTimeoutMs: 3000,
     startStableWindowMs: 1200,
   })
@@ -1536,6 +1538,28 @@ export function BrowserListPage() {
           <FormItem label="默认代理">
             <Input value={settings.defaultProxy} onChange={e => setSettings(prev => ({ ...prev, defaultProxy: e.target.value }))} placeholder="http://127.0.0.1:7890" />
           </FormItem>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <FormItem label="IP 代理网络链路">
+              <Select
+                value={settings.proxyNetworkMode || 'auto'}
+                onChange={e => setSettings(prev => ({ ...prev, proxyNetworkMode: e.target.value as BrowserSettings['proxyNetworkMode'] }))}
+                options={[
+                  { value: 'auto', label: '自动' },
+                  { value: 'local_gateway', label: '本地 VPN 网关（非 TUN）' },
+                  { value: 'tun', label: 'TUN 接管' },
+                  { value: 'direct', label: '直接连接' },
+                ]}
+              />
+            </FormItem>
+            <FormItem label="本地 VPN 网关（可选）">
+              <Input
+                value={settings.localVpnProxy || ''}
+                onChange={e => setSettings(prev => ({ ...prev, localVpnProxy: e.target.value }))}
+                placeholder="http://127.0.0.1:7897"
+              />
+            </FormItem>
+          </div>
+          <p className="-mt-4 text-xs text-[var(--color-text-muted)]">非 TUN 时 VPN 只负责第一跳传输，网站最终看到环境选择的代理池 IP。</p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <FormItem label="启动就绪超时（毫秒）" hint="默认 3000，慢机器可调到 5000-10000">
               <Input

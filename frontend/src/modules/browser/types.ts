@@ -123,6 +123,8 @@ export interface BrowserSettings {
   defaultFingerprintArgs: string[]
   defaultLaunchArgs: string[]
   defaultProxy: string
+  proxyNetworkMode?: 'auto' | 'direct' | 'local_gateway' | 'tun'
+  localVpnProxy?: string
   startReadyTimeoutMs: number
   startStableWindowMs: number
 }

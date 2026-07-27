@@ -331,7 +331,10 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		effectiveProxy = socksURL
 		log.Info("xray 桥接成功", logger.F("socks_url", socksURL))
 	} else if proxy.IsStandardProxyURL(resolvedProxyConfig) && a.standardRelayMgr != nil {
-		localProxy, relayKey, relayErr := a.standardRelayMgr.Acquire(profileId, resolvedProxyConfig)
+		localProxy, relayKey, relayErr := a.standardRelayMgr.Acquire(profileId, resolvedProxyConfig, proxy.StandardProxyRouteOptions{
+			Mode:            a.config.Browser.ProxyNetworkMode,
+			LocalGatewayURL: a.config.Browser.LocalVPNProxy,
+		})
 		if relayErr != nil {
 			startErr := fmt.Errorf("实例启动失败：标准代理本地转发启动失败。原因：%v。请检查代理协议、账号密码和节点可用性。", relayErr)
 			log.Error("标准代理本地转发失败", logger.F("profile_id", profileId), logger.F("proxy_id", profile.ProxyId), logger.F("error", relayErr.Error()), logger.F("reason", startErr.Error()))

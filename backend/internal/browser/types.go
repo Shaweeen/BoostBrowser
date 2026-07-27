@@ -74,6 +74,8 @@ type Settings struct {
 	DefaultFingerprintArgs []string `json:"defaultFingerprintArgs"`
 	DefaultLaunchArgs      []string `json:"defaultLaunchArgs"`
 	DefaultProxy           string   `json:"defaultProxy"`
+	ProxyNetworkMode       string   `json:"proxyNetworkMode"`
+	LocalVPNProxy          string   `json:"localVpnProxy"`
 	StartReadyTimeoutMs    int      `json:"startReadyTimeoutMs"`
 	StartStableWindowMs    int      `json:"startStableWindowMs"`
 }

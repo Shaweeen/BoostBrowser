@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { CheckCircle, Edit2, Plus, Star, Trash2, XCircle } from 'lucide-react'
-import { Button, Card, FormItem, Input, Modal, Table, Textarea, toast } from '../../../shared/components'
+import { Button, Card, FormItem, Input, Modal, Select, Table, Textarea, toast } from '../../../shared/components'
 import type { TableColumn } from '../../../shared/components/Table'
 import type { BrowserCore, BrowserCoreInput, BrowserSettings } from '../types'
 import {
@@ -131,6 +131,26 @@ export function BrowserSettingsModal({ open, onClose, settings: initSettings, co
           </FormItem>
           <FormItem label="默认代理">
             <Input value={settings.defaultProxy} onChange={e => setSettings(p => ({ ...p, defaultProxy: e.target.value }))} placeholder="http://127.0.0.1:7890" />
+          </FormItem>
+          <FormItem label="IP 代理网络链路">
+            <Select
+              value={settings.proxyNetworkMode || 'auto'}
+              onChange={e => setSettings(p => ({ ...p, proxyNetworkMode: e.target.value as BrowserSettings['proxyNetworkMode'] }))}
+              options={[
+                { value: 'auto', label: '自动（本地 VPN 网关优先，失败后直连/TUN）' },
+                { value: 'local_gateway', label: '本地 VPN 网关（非 TUN 双层代理）' },
+                { value: 'tun', label: 'TUN 接管第一跳' },
+                { value: 'direct', label: '直接连接 IP 代理服务器' },
+              ]}
+            />
+          </FormItem>
+          <FormItem label="本地 VPN 网关（可选）">
+            <Input
+              value={settings.localVpnProxy || ''}
+              onChange={e => setSettings(p => ({ ...p, localVpnProxy: e.target.value }))}
+              placeholder="例如：http://127.0.0.1:7897 或 socks5://127.0.0.1:7891"
+            />
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">非 TUN 模式下作为第一跳；最终网站出口仍是环境选择的 IP 代理。</p>
           </FormItem>
         </div>
       </Modal>

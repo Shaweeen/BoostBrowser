@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { FolderOpen, Settings, Edit2 } from 'lucide-react'
-import { Badge, Button, Card, ConfirmModal, FormItem, Input, Modal, Table, Textarea, toast } from '../../../shared/components'
+import { Badge, Button, Card, ConfirmModal, FormItem, Input, Modal, Select, Table, Textarea, toast } from '../../../shared/components'
 import type { TableColumn } from '../../../shared/components/Table'
 import type { BrowserCore, BrowserCoreInput, BrowserCoreValidateResult, BrowserSettings, BrowserCoreExtended, BrowserProxy } from '../types'
 import { fetchBrowserCores, saveBrowserCore, deleteBrowserCore, setDefaultBrowserCore, validateBrowserCorePath, openCorePath, fetchBrowserSettings, saveBrowserSettings, fetchCoreExtendedInfo, scanBrowserCores, BrowserCoreDownload, fetchBrowserProxies } from '../api'
@@ -29,6 +29,8 @@ export function CoreManagementPage() {
     defaultFingerprintArgs: [],
     defaultLaunchArgs: [],
     defaultProxy: '',
+    proxyNetworkMode: 'auto',
+    localVpnProxy: '',
     startReadyTimeoutMs: 3000,
     startStableWindowMs: 1200,
   })
@@ -36,6 +38,8 @@ export function CoreManagementPage() {
   const [settingsForm, setSettingsForm] = useState({
     userDataRoot: '',
     defaultProxy: '',
+    proxyNetworkMode: 'auto' as BrowserSettings['proxyNetworkMode'],
+    localVpnProxy: '',
     defaultFingerprintArgs: '',
     defaultLaunchArgs: '',
     startReadyTimeoutMs: 3000,
@@ -352,6 +356,8 @@ export function CoreManagementPage() {
     setSettingsForm({
       userDataRoot: settings.userDataRoot,
       defaultProxy: settings.defaultProxy,
+      proxyNetworkMode: settings.proxyNetworkMode || 'auto',
+      localVpnProxy: settings.localVpnProxy || '',
       defaultFingerprintArgs: settings.defaultFingerprintArgs.join('\n'),
       defaultLaunchArgs: settings.defaultLaunchArgs.join('\n'),
       startReadyTimeoutMs: settings.startReadyTimeoutMs,
@@ -367,6 +373,8 @@ export function CoreManagementPage() {
       const newSettings: BrowserSettings = {
         userDataRoot: settingsForm.userDataRoot.trim(),
         defaultProxy: settingsForm.defaultProxy.trim(),
+        proxyNetworkMode: settingsForm.proxyNetworkMode || 'auto',
+        localVpnProxy: settingsForm.localVpnProxy.trim(),
         defaultFingerprintArgs: settingsForm.defaultFingerprintArgs.split('\n').map(s => s.trim()).filter(Boolean),
         defaultLaunchArgs: settingsForm.defaultLaunchArgs.split('\n').map(s => s.trim()).filter(Boolean),
         startReadyTimeoutMs: Math.max(1000, Number(settingsForm.startReadyTimeoutMs) || 3000),
@@ -487,6 +495,25 @@ export function CoreManagementPage() {
               value={settingsForm.defaultProxy}
               onChange={e => setSettingsForm(prev => ({ ...prev, defaultProxy: e.target.value }))}
               placeholder="例如：http://127.0.0.1:7890"
+            />
+          </FormItem>
+          <FormItem label="IP 代理网络链路">
+            <Select
+              value={settingsForm.proxyNetworkMode || 'auto'}
+              onChange={e => setSettingsForm(prev => ({ ...prev, proxyNetworkMode: e.target.value as BrowserSettings['proxyNetworkMode'] }))}
+              options={[
+                { value: 'auto', label: '自动（本地 VPN 网关优先）' },
+                { value: 'local_gateway', label: '本地 VPN 网关（非 TUN）' },
+                { value: 'tun', label: 'TUN 接管第一跳' },
+                { value: 'direct', label: '直接连接' },
+              ]}
+            />
+          </FormItem>
+          <FormItem label="本地 VPN 网关（可选）">
+            <Input
+              value={settingsForm.localVpnProxy}
+              onChange={e => setSettingsForm(prev => ({ ...prev, localVpnProxy: e.target.value }))}
+              placeholder="http://127.0.0.1:7897 或 socks5://127.0.0.1:7891"
             />
           </FormItem>
           <FormItem label="默认指纹参数">

@@ -465,6 +465,10 @@ func splitHostPort(hostport string) (string, int) {
 }
 
 func DetectWorkingStandardProxyConfig(src string, cfg *SpeedTestConfig) (string, error) {
+	return detectWorkingStandardProxyConfigWithDialer(src, cfg, nil)
+}
+
+func detectWorkingStandardProxyConfigWithDialer(src string, cfg *SpeedTestConfig, upstreamDialer C.Dialer) (string, error) {
 	src = strings.TrimSpace(src)
 	if src == "" {
 		return "", fmt.Errorf("代理配置为空")
@@ -477,7 +481,7 @@ func DetectWorkingStandardProxyConfig(src string, cfg *SpeedTestConfig) (string,
 	if len(testURLs) == 0 {
 		testURLs = defaultSpeedTestURLs
 	}
-	detected, result, ok := detectWorkingStandardProxy(src, testURLs, cfg.Timeout)
+	detected, result, ok := detectWorkingStandardProxyWithDialer(src, testURLs, cfg.Timeout, upstreamDialer)
 	if ok {
 		return detected, nil
 	}
@@ -488,6 +492,10 @@ func DetectWorkingStandardProxyConfig(src string, cfg *SpeedTestConfig) (string,
 }
 
 func detectWorkingStandardProxy(src string, testURLs []string, timeout time.Duration) (string, TestResult, bool) {
+	return detectWorkingStandardProxyWithDialer(src, testURLs, timeout, nil)
+}
+
+func detectWorkingStandardProxyWithDialer(src string, testURLs []string, timeout time.Duration, upstreamDialer C.Dialer) (string, TestResult, bool) {
 	candidates := append([]string{src}, alternateStandardProxyConfigs(src)...)
 	type detectionResult struct {
 		candidate string
@@ -502,7 +510,11 @@ func detectWorkingStandardProxy(src string, testURLs []string, timeout time.Dura
 				results <- detectionResult{candidate: candidate, result: TestResult{Error: err.Error()}}
 				return
 			}
-			px, err := adapter.ParseProxy(mapping)
+			options := make([]adapter.ProxyOption, 0, 1)
+			if upstreamDialer != nil {
+				options = append(options, adapter.WithDialerForAPI(upstreamDialer))
+			}
+			px, err := adapter.ParseProxy(mapping, options...)
 			if err != nil {
 				results <- detectionResult{candidate: candidate, result: TestResult{Error: err.Error()}}
 				return

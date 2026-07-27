@@ -708,6 +708,8 @@ export namespace browser {
 	    defaultFingerprintArgs: string[];
 	    defaultLaunchArgs: string[];
 	    defaultProxy: string;
+	    proxyNetworkMode: string;
+	    localVpnProxy: string;
 	    startReadyTimeoutMs: number;
 	    startStableWindowMs: number;
 	
@@ -721,6 +723,8 @@ export namespace browser {
 	        this.defaultFingerprintArgs = source["defaultFingerprintArgs"];
 	        this.defaultLaunchArgs = source["defaultLaunchArgs"];
 	        this.defaultProxy = source["defaultProxy"];
+	        this.proxyNetworkMode = source["proxyNetworkMode"];
+	        this.localVpnProxy = source["localVpnProxy"];
 	        this.startReadyTimeoutMs = source["startReadyTimeoutMs"];
 	        this.startStableWindowMs = source["startStableWindowMs"];
 	    }
