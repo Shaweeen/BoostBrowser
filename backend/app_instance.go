@@ -341,6 +341,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		if relayKey != "" {
 			acquiredStandardRelay = true
 			effectiveProxy = localProxy
+			a.persistDetectedStandardProxy(profile.ProxyId, resolvedProxyConfig, relayKey)
 			log.Info("标准代理已切换为本地转发", logger.F("profile_id", profileId), logger.F("local_proxy", localProxy))
 		}
 	}

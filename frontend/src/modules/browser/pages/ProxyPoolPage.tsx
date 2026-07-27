@@ -1165,6 +1165,26 @@ export function ProxyPoolPage() {
     )).sort((a, b) => a.localeCompare(b, 'zh-CN')))
   }, [])
 
+  const applyResolvedProxyConfigs = useCallback((results: Array<{ proxyId: string; resolvedConfig?: string }>) => {
+    const resolvedByID = new Map(
+      results
+        .filter(item => !!item.proxyId && !!item.resolvedConfig?.trim())
+        .map(item => [item.proxyId, item.resolvedConfig!.trim()]),
+    )
+    if (resolvedByID.size === 0) return
+    setProxies(previous => {
+      let changed = false
+      const next = previous.map(item => {
+        const resolved = resolvedByID.get(item.proxyId)
+        if (!resolved || resolved === item.proxyConfig) return item
+        changed = true
+        return { ...item, proxyConfig: resolved }
+      })
+      if (changed) setDisplayList(toDisplayList(next))
+      return changed ? next : previous
+    })
+  }, [])
+
   // 完整替换只用于导入/订阅刷新；后端以单事务完成，不执行网络验证。
   const saveProxies = useCallback(async (list: BrowserProxy[]) => {
     await saveBrowserProxies(list)
@@ -1446,6 +1466,7 @@ export function ProxyPoolPage() {
     }
     setLatencyMap(prev => ({ ...prev, [record.proxyId]: -1 }))
     const result = await browserProxyTestSpeed(record.proxyId)
+    applyResolvedProxyConfigs([result])
     const val = toLatencyValue(result.ok, result.latencyMs, result.error)
     setLatencyMap(prev => ({ ...prev, [record.proxyId]: val }))
   }
@@ -1467,6 +1488,7 @@ export function ProxyPoolPage() {
     try {
       const proxyIds = testable.map(p => p.proxyId)
       const results = await browserProxyBatchTestSpeed(proxyIds, 4)
+      applyResolvedProxyConfigs(results)
       setLatencyMap(prev => {
         const next = { ...prev }
         results.forEach(result => {
@@ -2029,6 +2051,7 @@ export function ProxyPoolPage() {
       const importedIds = newProxies.map(item => item.proxyId)
       setLatencyMap(prev => ({ ...prev, ...Object.fromEntries(importedIds.map(id => [id, -1])) }))
       void browserProxyBatchTestSpeed(importedIds, 4).then(results => {
+        applyResolvedProxyConfigs(results)
         setLatencyMap(prev => {
           const next = { ...prev }
           results.forEach(result => { next[result.proxyId] = toLatencyValue(result.ok, result.latencyMs, result.error) })

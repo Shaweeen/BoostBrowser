@@ -341,14 +341,12 @@ func standardProxyNeedsRelay(src string) bool {
 	if trimmed == "" {
 		return false
 	}
-	l := strings.ToLower(trimmed)
-	if strings.HasPrefix(l, "https://") || strings.HasPrefix(l, "socks://") {
-		return true
-	}
-	if u, err := parseProxyURLCompat(trimmed); err == nil && u != nil && u.User != nil {
-		return true
-	}
-	return false
+	// Chromium ignores credentials embedded in manual proxy settings and does
+	// not support SOCKS5 username/password authentication. Route every external
+	// standard proxy through the same local HTTP relay so protocol detection,
+	// authentication and proxy-side DNS are identical in testing and browsing.
+	// Localhost proxies (Clash/VPN clients) stay direct to avoid relay loops.
+	return IsStandardProxyURL(trimmed) && !isLocalProxyURL(trimmed)
 }
 
 func isLocalProxyURL(src string) bool {

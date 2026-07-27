@@ -595,7 +595,7 @@ export async function browserProxyTestSpeed(proxyId: string): Promise<ProxyConne
   return { proxyId, ok: true, latencyMs: Math.floor(100 + Math.random() * 400), error: '' }
 }
 
-export async function browserProxyBatchTestSpeed(proxyIds: string[], concurrency: number = 8): Promise<{ proxyId: string; ok: boolean; latencyMs: number; error: string }[]> {
+export async function browserProxyBatchTestSpeed(proxyIds: string[], concurrency: number = 8): Promise<ProxyConnectivityTestResult[]> {
   const bindings: any = await getBindings()
   if (bindings?.BrowserProxyBatchTestSpeed) {
     return (await bindings.BrowserProxyBatchTestSpeed(proxyIds, concurrency)) || []

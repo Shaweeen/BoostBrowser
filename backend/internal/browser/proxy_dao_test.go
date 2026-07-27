@@ -82,3 +82,23 @@ func TestSQLiteProxyDAOUpsertTouchesOnlyTarget(t *testing.T) {
 		t.Fatalf("upsert rewrote unrelated rows: %+v", got)
 	}
 }
+
+func TestSQLiteProxyDAOResolvedProtocolWriteIsCompareAndSwap(t *testing.T) {
+	_, dao := newProxyDAOTestDB(t)
+	original := "socks5://user:pass@198.51.100.10:8080"
+	resolved := "http://user:pass@198.51.100.10:8080"
+	if err := dao.Upsert(Proxy{ProxyId: "p1", ProxyName: "one", ProxyConfig: original}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := dao.UpdateProxyConfigIfCurrent("p1", original, resolved)
+	if err != nil || !updated {
+		t.Fatalf("expected protocol writeback, updated=%v err=%v", updated, err)
+	}
+	updated, err = dao.UpdateProxyConfigIfCurrent("p1", original, "https://198.51.100.10:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated {
+		t.Fatal("stale speed test overwrote a newer proxy config")
+	}
+}

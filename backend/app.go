@@ -988,6 +988,47 @@ func (a *App) TestProxyConfigRealConnectivity(proxyConfig string) ProxyTestResul
 	return proxyTestResultFromInternal(r)
 }
 
+func (a *App) persistDetectedStandardProxy(proxyID, currentConfig, resolvedConfig string) {
+	proxyID = strings.TrimSpace(proxyID)
+	currentConfig = strings.TrimSpace(currentConfig)
+	resolvedConfig = strings.TrimSpace(resolvedConfig)
+	if proxyID == "" || resolvedConfig == "" ||
+		strings.EqualFold(currentConfig, resolvedConfig) ||
+		!proxy.IsStandardProxyURL(resolvedConfig) {
+		return
+	}
+
+	if dao, ok := a.browserMgr.ProxyDAO.(interface {
+		UpdateProxyConfigIfCurrent(string, string, string) (bool, error)
+	}); ok {
+		updated, err := dao.UpdateProxyConfigIfCurrent(proxyID, currentConfig, resolvedConfig)
+		if err != nil {
+			logger.New("Browser").Warn("代理协议识别结果保存失败",
+				logger.F("proxy_id", proxyID),
+				logger.F("error", err.Error()),
+			)
+		} else if updated {
+			logger.New("Browser").Info("代理协议已自动修正",
+				logger.F("proxy_id", proxyID),
+				logger.F("resolved_protocol", strings.SplitN(resolvedConfig, "://", 2)[0]),
+			)
+		}
+		return
+	}
+
+	if a.config == nil {
+		return
+	}
+	for i := range a.config.Browser.Proxies {
+		item := &a.config.Browser.Proxies[i]
+		if item.ProxyId == proxyID && strings.EqualFold(strings.TrimSpace(item.ProxyConfig), currentConfig) {
+			item.ProxyConfig = resolvedConfig
+			_ = config.SaveProxies(a.resolveAppPath("proxies.yaml"), a.config.Browser.Proxies)
+			return
+		}
+	}
+}
+
 func proxyTestResultFromInternal(r proxy.TestResult) ProxyTestResult {
 	return ProxyTestResult{
 		ProxyId:        r.ProxyId,
@@ -1002,6 +1043,12 @@ func proxyTestResultFromInternal(r proxy.TestResult) ProxyTestResult {
 func (a *App) BrowserProxyTestSpeed(proxyId string) ProxyTestResult {
 	proxies := a.getLatestProxies()
 	r := proxy.SpeedTest(proxyId, proxies, a.xrayMgr, a.singboxMgr, nil)
+	for _, item := range proxies {
+		if strings.EqualFold(item.ProxyId, proxyId) {
+			a.persistDetectedStandardProxy(proxyId, item.ProxyConfig, r.ResolvedConfig)
+			break
+		}
+	}
 	if a.browserMgr.ProxyDAO != nil {
 		testedAt := time.Now().Format(time.RFC3339)
 		_ = a.browserMgr.ProxyDAO.UpdateSpeedResult(proxyId, r.Ok, r.LatencyMs, testedAt)
@@ -1046,6 +1093,12 @@ func (a *App) BrowserProxyBatchTestSpeed(proxyIds []string, concurrency int) []P
 			}()
 			for job := range jobs {
 				r := proxy.SpeedTest(job.ProxyId, proxies, a.xrayMgr, a.singboxMgr, nil)
+				for _, item := range proxies {
+					if strings.EqualFold(item.ProxyId, job.ProxyId) {
+						a.persistDetectedStandardProxy(job.ProxyId, item.ProxyConfig, r.ResolvedConfig)
+						break
+					}
+				}
 				if a.browserMgr.ProxyDAO != nil {
 					testedAt := time.Now().Format(time.RFC3339)
 					_ = a.browserMgr.ProxyDAO.UpdateSpeedResult(job.ProxyId, r.Ok, r.LatencyMs, testedAt)

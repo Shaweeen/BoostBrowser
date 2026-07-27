@@ -97,3 +97,25 @@ func TestAcquireExistingRelayDoesNotDoubleCountSameProfile(t *testing.T) {
 		t.Fatalf("same profile inflated relay refCount to %d", relay.refCount)
 	}
 }
+
+func TestExternalStandardProxiesAlwaysUseCompatibleRelay(t *testing.T) {
+	for _, src := range []string{
+		"http://198.51.100.10:8080",
+		"https://198.51.100.10:8443",
+		"socks5://198.51.100.10:1080",
+		"http://user:pass@198.51.100.10:8080",
+	} {
+		if !standardProxyNeedsRelay(src) {
+			t.Fatalf("external proxy should use relay: %s", src)
+		}
+	}
+	for _, src := range []string{
+		"http://127.0.0.1:7890",
+		"socks5://localhost:1080",
+		"http://[::1]:7890",
+	} {
+		if standardProxyNeedsRelay(src) {
+			t.Fatalf("local proxy must not be relayed: %s", src)
+		}
+	}
+}

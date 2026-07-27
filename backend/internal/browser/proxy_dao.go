@@ -202,6 +202,23 @@ func (d *SQLiteProxyDAO) UpdateSpeedResult(proxyId string, ok bool, latencyMs in
 	return nil
 }
 
+// UpdateProxyConfigIfCurrent 仅当代理仍是本次检测使用的原配置时写回协议识别结果。
+// 这样后台测速不会覆盖用户在检测期间完成的新编辑。
+func (d *SQLiteProxyDAO) UpdateProxyConfigIfCurrent(proxyID, currentConfig, resolvedConfig string) (bool, error) {
+	result, err := d.db.Exec(`
+		UPDATE browser_proxies SET proxy_config=?
+		WHERE proxy_id=? AND proxy_config=?`,
+		resolvedConfig, proxyID, currentConfig)
+	if err != nil {
+		return false, fmt.Errorf("保存代理协议识别结果失败: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
 // UpdateIPHealthResult 更新单个代理的 IP 健康检测结果（JSON 字符串）
 func (d *SQLiteProxyDAO) UpdateIPHealthResult(proxyId string, healthJSON string) error {
 	_, err := d.db.Exec(`
