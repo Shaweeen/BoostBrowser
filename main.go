@@ -63,10 +63,6 @@ func envFlagEnabled(name string) bool {
 	}
 }
 
-func shouldEnableGlobalWindowWatchers() bool {
-	return envFlagEnabled("BOOST_BROWSER_ENABLE_GLOBAL_WINDOW_WATCHERS")
-}
-
 func shouldEnableTray() bool {
 	return envFlagEnabled("BOOST_BROWSER_ENABLE_TRAY")
 }
@@ -436,12 +432,6 @@ func main() {
 			} else {
 				runtime.WindowSetAlwaysOnTop(wailsCtx, false)
 				restoreNativeMainWindowBounds(wailsCtx, app)
-				if shouldEnableGlobalWindowWatchers() {
-					app.RecordLifecycleEvent("global-window-watchers", []string{"state=enabled", "source=env:BOOST_BROWSER_ENABLE_GLOBAL_WINDOW_WATCHERS"})
-					backend.StartGlobalSerializedWindowWatchers(appRoot)
-				} else {
-					app.RecordLifecycleEvent("global-window-watchers", []string{"state=disabled", "reason=default-off-crashprobe"})
-				}
 				if shouldEnableTray() {
 					app.RecordLifecycleEvent("tray", []string{"state=enabled", "source=env:BOOST_BROWSER_ENABLE_TRAY"})
 					// 启动系统托盘（非阻塞）

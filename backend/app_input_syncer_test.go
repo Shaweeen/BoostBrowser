@@ -125,18 +125,17 @@ func TestMainProcessCannotOwnInputSyncHooks(t *testing.T) {
 }
 
 func TestWindowEnumerationCallbacksAreProcessReusable(t *testing.T) {
-	if processWindowEnumCallback == 0 || chromeRenderChildEnumCallback == 0 || syncInputSurfaceEnumCallback == 0 || syncPopupBoundsEnumCallback == 0 || browserWindowRestoreEnumCallback == 0 || processMouseHookCallback == 0 || processKeyHookCallback == 0 {
+	if processWindowEnumCallback == 0 || chromeRenderChildEnumCallback == 0 || syncInputSurfaceEnumCallback == 0 || syncPopupBoundsEnumCallback == 0 || processMouseHookCallback == 0 || processKeyHookCallback == 0 {
 		t.Fatal("expected reusable Win32 enumeration callbacks")
 	}
 	processCallback := processWindowEnumCallback
 	renderCallback := chromeRenderChildEnumCallback
 	surfaceCallback := syncInputSurfaceEnumCallback
 	popupBoundsCallback := syncPopupBoundsEnumCallback
-	restoreCallback := browserWindowRestoreEnumCallback
 	mouseCallback := processMouseHookCallback
 	keyCallback := processKeyHookCallback
 	for i := 0; i < 10000; i++ {
-		if processWindowEnumCallback != processCallback || chromeRenderChildEnumCallback != renderCallback || syncInputSurfaceEnumCallback != surfaceCallback || syncPopupBoundsEnumCallback != popupBoundsCallback || browserWindowRestoreEnumCallback != restoreCallback || processMouseHookCallback != mouseCallback || processKeyHookCallback != keyCallback {
+		if processWindowEnumCallback != processCallback || chromeRenderChildEnumCallback != renderCallback || syncInputSurfaceEnumCallback != surfaceCallback || syncPopupBoundsEnumCallback != popupBoundsCallback || processMouseHookCallback != mouseCallback || processKeyHookCallback != keyCallback {
 			t.Fatal("Win32 callback address changed; repeated lookup would exhaust the callback table")
 		}
 	}

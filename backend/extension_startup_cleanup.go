@@ -130,21 +130,6 @@ func patchChromePreferencesFile(path string) error {
 	return os.WriteFile(path, out, 0644)
 }
 
-// ensureDefaultSearchProvider 已废弃。改用 seedDefaultSearchEngine
-// （chrome_search_engine_seed.go）—— 那条路径会同时写 Web Data 和
-// Preferences 的 mirrored_template_url_data，与 cloak 内核 UI 操作
-// 一致。保留空实现避免历史调用方编译失败。
-func ensureDefaultSearchProvider(prefs map[string]any) bool {
-	return false
-}
-
-func asJSONString(value any) string {
-	if s, ok := value.(string); ok {
-		return s
-	}
-	return ""
-}
-
 func ensureJSONMap(parent map[string]any, key string) map[string]any {
 	if existing, ok := parent[key].(map[string]any); ok {
 		return existing

@@ -221,12 +221,27 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("allowedPostTagFiles", text)
         self.assertIn("function Invoke-GhProbe", text)
         self.assertIn("$existingProbe.ExitCode", text)
+        self.assertIn("scripts\\check_code_health.ps1", text)
+        self.assertIn("-BaseRef \"$Tag^\"", text)
         self.assertNotIn("$existingText = & gh release view", text)
         self.assertIn("activation-check.exe", text)
         self.assertIn("BrowserStudio-Private-Setup-v$Version.exe", text)
         assets_block = text.split("$assets = @(", 1)[1].split(")", 1)[0]
         self.assertNotIn("activation-check.exe", assets_block)
         self.assertNotIn("BrowserStudio-Private-Setup", assets_block)
+
+    def test_code_health_guard_requires_a_reversible_deletion_ledger(self):
+        raw = (ROOT / "scripts/check_code_health.ps1").read_bytes()
+        self.assertTrue(all(byte < 128 for byte in raw), "code health guard must remain ASCII-only")
+        text = raw.decode("ascii")
+        self.assertIn("docs/DELETION_LEDGER.md", text)
+        self.assertIn("LedgerDeletionThreshold", text)
+        self.assertIn("MaxNetGrowth", text)
+        self.assertIn("Retired window-watcher code was reintroduced", text)
+
+        ledger = self.read("docs/DELETION_LEDGER.md")
+        for field in ["Last known revision", "Reason", "Replacement", "Verification", "Precise recovery"]:
+            self.assertIn(field, ledger)
 
     def test_repair_upgrade_preserves_user_data_and_validates_release_files(self):
         raw = (ROOT / "scripts/repair_upgrade_windows.ps1").read_bytes()

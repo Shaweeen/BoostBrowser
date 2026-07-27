@@ -581,9 +581,8 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			enforceBrowserWindowBounds(profile.Pid, 1400, 600)
 
 			// 调试接口一就绪，仅移除扩展页面旁边多余的空白启动标签；用户安装扩展的
-			// onboarding、解锁、连接及授权页面全部保留。浏览器现在直接在正常屏幕位置启动，不能再
-			// 调用旧的 restoreBrowserWindowsAfterStartup：它会把 Chromium 子进程的
-			// 隐藏辅助 HWND 恢复并置前，表现为覆盖网页的巨大无边框白色窗口。
+			// onboarding、解锁、连接及授权页面全部保留。浏览器直接在正常屏幕位置启动，
+			// 不再遍历或恢复 Chromium 子进程的隐藏辅助 HWND。
 			finalizeBrowserStartupTabs(stableDebugPort, profile.Pid, profileId)
 
 			// 任务栏 badge 数字直接来自实例名字里的数字段：
@@ -643,14 +642,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			// if !isCloakSelectedCore {
 			// 	go startTurnstileMonitor(stableDebugPort, profileId)
 			// }
-
-			// crashprobe: 先停用每实例 popup/devtools 长驻巡检。
-			// 最近 1.7.2 的 packaged 日志已证明：global-window-watchers 与 tray 都是 disabled，
-			// 但宿主仍出现 watchdog-restart | unexpected-parent-exit | exit_code=2。
-			// 当前更高嫌疑是 startExtensionPopupSizer 在多实例下各起长期 ticker，且共享
-			// clampPidSet / restoreDevToolsPidSet 这类全局可变状态；先关掉验证稳定性，后续若
-			// 要恢复弹窗修复，再改成串行 worker 或启动期短时巡检。
-			// startExtensionPopupSizer(profile.Pid)
 
 			// 恢复实例数字 badge，但只走一次性异步设置；底层 setBadgeForInstance 已改成
 			// 启动阶段有限重试，不再持有长期 watchdog。

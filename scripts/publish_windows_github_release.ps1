@@ -116,6 +116,9 @@ if ($Head -ne $TagCommit) {
 & git ls-remote --exit-code origin "refs/tags/$Tag" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Release tag $Tag is not available on origin" }
 
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$RepoRoot\scripts\check_code_health.ps1" -BaseRef "$Tag^"
+if ($LASTEXITCODE -ne 0) { throw 'Code health review failed' }
+
 $buildArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$RepoRoot\scripts\build_windows_public.ps1")
 if (-not $SkipGoTests) { $buildArgs += '-RunGoTests' }
 & powershell.exe @buildArgs
