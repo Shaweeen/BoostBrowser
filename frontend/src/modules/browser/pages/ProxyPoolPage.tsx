@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Card, ConfirmModal, FormItem, Input, Modal, Select, Switch, Table, Textarea, toast } from '../../../shared/components'
 import type { SortOrder, TableColumn } from '../../../shared/components/Table'
 import type { BrowserProxy, ProxyIPHealthResult } from '../types'
-import { fetchBrowserProxies, fetchBrowserProxyGroups, saveBrowserProxies, browserProxyTestSpeed, browserProxyBatchTestSpeed, browserProxyCheckIPHealth, browserProxyBatchCheckIPHealth, fetchClashImportFromURL, testProxyConfigRealConnectivity } from '../api'
+import { fetchBrowserProxies, fetchBrowserProxyGroups, saveBrowserProxies, upsertBrowserProxy, deleteBrowserProxies, browserProxyTestSpeed, browserProxyBatchTestSpeed, browserProxyCheckIPHealth, browserProxyBatchCheckIPHealth, fetchClashImportFromURL, testProxyConfigRealConnectivity } from '../api'
 import { EventsOn } from '../../../wailsjs/runtime/runtime'
 import { SmartAssignProxyModal } from '../components/SmartAssignProxyModal'
 import yaml from 'js-yaml'
@@ -1157,15 +1157,19 @@ export function ProxyPoolPage() {
     }
   }
 
-  // 直接保存完整列表，内置代理保护由后端负责
-  const saveProxies = useCallback(async (list: BrowserProxy[]) => {
-    await saveBrowserProxies(list)
+  const applyProxyList = useCallback((list: BrowserProxy[]) => {
     setProxies(list)
     setDisplayList(toDisplayList(list))
-    // 刷新分组列表（可能有新分组加入）
-    const grps = await fetchBrowserProxyGroups()
-    setGroups(grps)
+    setGroups(Array.from(new Set(
+      list.map(item => (item.groupName || '').trim()).filter(Boolean),
+    )).sort((a, b) => a.localeCompare(b, 'zh-CN')))
   }, [])
+
+  // 完整替换只用于导入/订阅刷新；后端以单事务完成，不执行网络验证。
+  const saveProxies = useCallback(async (list: BrowserProxy[]) => {
+    await saveBrowserProxies(list)
+    applyProxyList(list)
+  }, [applyProxyList])
 
   const sourceMetas = useMemo(() => collectURLImportSources(proxies), [proxies])
   const hasURLImportSources = sourceMetas.length > 0
@@ -1417,12 +1421,20 @@ export function ProxyPoolPage() {
   }
 
   const handleBatchDeleteConfirm = async () => {
+    const deleting = Array.from(selectedIds).filter(id => !BUILTIN_PROXY_IDS.has(id))
+    if (deleting.length === 0) return
+    const previous = proxies
+    const deleteSet = new Set(deleting)
+    const next = proxies.filter(p => !deleteSet.has(p.proxyId))
+    applyProxyList(next)
+    setSelectedIds(new Set())
+    setBatchDeleteConfirmOpen(false)
     try {
-      const newProxies = proxies.filter(p => !selectedIds.has(p.proxyId))
-      await saveProxies(newProxies)
-      toast.success(`已删除 ${selectedIds.size} 个代理`)
-      setSelectedIds(new Set())
+      await deleteBrowserProxies(deleting)
+      toast.success(`已删除 ${deleting.length} 个代理`)
     } catch (error: any) {
+      applyProxyList(previous)
+      setSelectedIds(new Set(deleting))
       toast.error(error?.message || '删除失败')
     }
   }
@@ -1787,12 +1799,15 @@ export function ProxyPoolPage() {
     }
     setSaving(true)
     try {
-      const newProxies = proxies.map(p =>
-        p.proxyId === editingProxy.proxyId
-          ? { ...p, proxyName: editForm.proxyName.trim(), proxyConfig, dnsServers: editForm.dnsServers.trim(), groupName: editForm.groupName.trim() }
-          : p
-      )
-      await saveProxies(newProxies)
+      const changed = {
+        ...editingProxy,
+        proxyName: editForm.proxyName.trim(),
+        proxyConfig,
+        dnsServers: editForm.dnsServers.trim(),
+        groupName: editForm.groupName.trim(),
+      }
+      const saved = await upsertBrowserProxy(changed)
+      applyProxyList(proxies.map(p => p.proxyId === editingProxy.proxyId ? saved : p))
       setEditModalOpen(false)
       toast.success('代理已更新')
     } catch (error: any) {
@@ -1843,15 +1858,20 @@ export function ProxyPoolPage() {
 
   const handleDeleteConfirm = async () => {
     if (!deletingId) return
+    const proxyID = deletingId
+    const previous = proxies
+    const next = proxies.filter(p => p.proxyId !== proxyID)
+    applyProxyList(next)
+    setSelectedIds(prev => { const updated = new Set(prev); updated.delete(proxyID); return updated })
+    setDeleteConfirmOpen(false)
+    setDeletingId(null)
     try {
-      const newProxies = proxies.filter(p => p.proxyId !== deletingId)
-      await saveProxies(newProxies)
-      setSelectedIds(prev => { const next = new Set(prev); next.delete(deletingId); return next })
+      await deleteBrowserProxies([proxyID])
       toast.success('代理已删除')
     } catch (error: any) {
+      applyProxyList(previous)
       toast.error(error?.message || '删除失败')
     }
-    setDeletingId(null)
   }
 
   const handleImportModeChange = (nextMode: ProxyImportMode) => {

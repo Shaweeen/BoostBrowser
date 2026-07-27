@@ -1274,65 +1274,182 @@ func (a *App) getLatestProxies() []BrowserProxy {
 	return a.config.Browser.Proxies
 }
 
+func normalizeBrowserProxy(item BrowserProxy, sortOrder int) (BrowserProxy, error) {
+	proxyName := strings.TrimSpace(item.ProxyName)
+	proxyConfig := strings.TrimSpace(item.ProxyConfig)
+	if proxyName == "" || proxyConfig == "" {
+		return BrowserProxy{}, fmt.Errorf("代理名称和代理配置不能为空")
+	}
+	if proxy.LooksLikeStandardProxyConfig(proxyConfig) {
+		standardConfig, err := proxy.NormalizeStandardProxyConfig(proxyConfig, "http")
+		if err != nil {
+			return BrowserProxy{}, fmt.Errorf("代理 %q 格式无效: %w", proxyName, err)
+		}
+		proxyConfig = standardConfig
+	}
+	proxyID := strings.TrimSpace(item.ProxyId)
+	if proxyID == "" {
+		proxyID = generateUUID()
+	}
+	sourceURL := strings.TrimSpace(item.SourceURL)
+	sourceID := strings.TrimSpace(item.SourceID)
+	sourceNamePrefix := strings.TrimSpace(item.SourceNamePrefix)
+	sourceLastRefreshAt := strings.TrimSpace(item.SourceLastRefreshAt)
+	sourceRefreshIntervalM := item.SourceRefreshIntervalM
+	if sourceRefreshIntervalM < 0 {
+		sourceRefreshIntervalM = 0
+	}
+	if sourceRefreshIntervalM > 24*60 {
+		sourceRefreshIntervalM = 24 * 60
+	}
+	sourceAutoRefresh := item.SourceAutoRefresh && sourceURL != ""
+	if sourceAutoRefresh && sourceRefreshIntervalM <= 0 {
+		sourceRefreshIntervalM = 60
+	}
+	if !sourceAutoRefresh {
+		sourceRefreshIntervalM = 0
+	}
+	if sourceURL == "" {
+		sourceID = ""
+		sourceNamePrefix = ""
+		sourceLastRefreshAt = ""
+		sourceAutoRefresh = false
+		sourceRefreshIntervalM = 0
+	}
+	return BrowserProxy{
+		ProxyId:                proxyID,
+		ProxyName:              proxyName,
+		ProxyConfig:            proxyConfig,
+		DnsServers:             strings.TrimSpace(item.DnsServers),
+		GroupName:              strings.TrimSpace(item.GroupName),
+		SourceID:               sourceID,
+		SourceURL:              sourceURL,
+		SourceNamePrefix:       sourceNamePrefix,
+		SourceAutoRefresh:      sourceAutoRefresh,
+		SourceRefreshIntervalM: sourceRefreshIntervalM,
+		SourceLastRefreshAt:    sourceLastRefreshAt,
+		SortOrder:              sortOrder,
+	}, nil
+}
+
+// UpsertBrowserProxy 只写入发生变化的一条代理。保存不触发网络验证，也不扫描全部实例。
+func (a *App) UpsertBrowserProxy(item BrowserProxy) (BrowserProxy, error) {
+	latest := a.getLatestProxies()
+	sortOrder := len(latest)
+	for _, existing := range latest {
+		if existing.ProxyId == item.ProxyId {
+			sortOrder = existing.SortOrder
+			break
+		}
+	}
+	normalized, err := normalizeBrowserProxy(item, sortOrder)
+	if err != nil {
+		return BrowserProxy{}, err
+	}
+	if a.browserMgr.ProxyDAO != nil {
+		if err := a.browserMgr.ProxyDAO.Upsert(normalized); err != nil {
+			return BrowserProxy{}, err
+		}
+	} else {
+		replaced := false
+		for i := range latest {
+			if latest[i].ProxyId == normalized.ProxyId {
+				latest[i] = normalized
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			latest = append(latest, normalized)
+		}
+		if err := config.SaveProxies(a.resolveAppPath("proxies.yaml"), latest); err != nil {
+			return BrowserProxy{}, err
+		}
+	}
+	if a.config != nil {
+		found := false
+		for i := range a.config.Browser.Proxies {
+			if a.config.Browser.Proxies[i].ProxyId == normalized.ProxyId {
+				a.config.Browser.Proxies[i] = normalized
+				found = true
+				break
+			}
+		}
+		if !found {
+			a.config.Browser.Proxies = append(a.config.Browser.Proxies, normalized)
+		}
+	}
+	return normalized, nil
+}
+
+// DeleteBrowserProxies 删除指定代理后立即返回；实例绑定修复在后台完成，
+// 避免代理池按钮被数百个环境的扫描与配置落盘阻塞。
+func (a *App) DeleteBrowserProxies(proxyIDs []string) error {
+	deleteSet := make(map[string]struct{}, len(proxyIDs))
+	cleanIDs := make([]string, 0, len(proxyIDs))
+	for _, proxyID := range proxyIDs {
+		proxyID = strings.TrimSpace(proxyID)
+		if proxyID == "" || proxyID == "__direct__" || proxyID == "__local__" {
+			continue
+		}
+		if _, exists := deleteSet[proxyID]; exists {
+			continue
+		}
+		deleteSet[proxyID] = struct{}{}
+		cleanIDs = append(cleanIDs, proxyID)
+	}
+	if len(cleanIDs) == 0 {
+		return nil
+	}
+	if a.browserMgr.ProxyDAO != nil {
+		if batchDAO, ok := a.browserMgr.ProxyDAO.(interface{ DeleteMany([]string) error }); ok {
+			if err := batchDAO.DeleteMany(cleanIDs); err != nil {
+				return err
+			}
+		} else {
+			for _, proxyID := range cleanIDs {
+				if err := a.browserMgr.ProxyDAO.Delete(proxyID); err != nil {
+					return err
+				}
+			}
+		}
+	} else {
+		latest := a.getLatestProxies()
+		kept := latest[:0]
+		for _, item := range latest {
+			if _, deleting := deleteSet[item.ProxyId]; !deleting {
+				kept = append(kept, item)
+			}
+		}
+		if err := config.SaveProxies(a.resolveAppPath("proxies.yaml"), kept); err != nil {
+			return err
+		}
+	}
+	if a.config != nil {
+		kept := a.config.Browser.Proxies[:0]
+		for _, item := range a.config.Browser.Proxies {
+			if _, deleting := deleteSet[item.ProxyId]; !deleting {
+				kept = append(kept, item)
+			}
+		}
+		a.config.Browser.Proxies = kept
+	}
+	go a.reconcileProfileProxyBindings()
+	return nil
+}
+
 func (a *App) SaveBrowserProxies(proxies []BrowserProxy) error {
 	log := logger.New("Browser")
 	normalized := make([]BrowserProxy, 0, len(proxies))
 	for i, item := range proxies {
-		proxyName := strings.TrimSpace(item.ProxyName)
-		proxyConfig := strings.TrimSpace(item.ProxyConfig)
-		if proxyName == "" || proxyConfig == "" {
+		if strings.TrimSpace(item.ProxyName) == "" || strings.TrimSpace(item.ProxyConfig) == "" {
 			continue
 		}
-		if proxy.LooksLikeStandardProxyConfig(proxyConfig) {
-			standardConfig, err := proxy.NormalizeStandardProxyConfig(proxyConfig, "http")
-			if err != nil {
-				return fmt.Errorf("代理 %q 格式无效: %w", proxyName, err)
-			}
-			proxyConfig = standardConfig
+		item, err := normalizeBrowserProxy(item, i)
+		if err != nil {
+			return err
 		}
-		proxyId := strings.TrimSpace(item.ProxyId)
-		if proxyId == "" {
-			proxyId = generateUUID()
-		}
-		sourceURL := strings.TrimSpace(item.SourceURL)
-		sourceID := strings.TrimSpace(item.SourceID)
-		sourceNamePrefix := strings.TrimSpace(item.SourceNamePrefix)
-		sourceLastRefreshAt := strings.TrimSpace(item.SourceLastRefreshAt)
-		sourceRefreshIntervalM := item.SourceRefreshIntervalM
-		if sourceRefreshIntervalM < 0 {
-			sourceRefreshIntervalM = 0
-		}
-		if sourceRefreshIntervalM > 24*60 {
-			sourceRefreshIntervalM = 24 * 60
-		}
-		sourceAutoRefresh := item.SourceAutoRefresh && sourceURL != ""
-		if sourceAutoRefresh && sourceRefreshIntervalM <= 0 {
-			sourceRefreshIntervalM = 60
-		}
-		if !sourceAutoRefresh {
-			sourceRefreshIntervalM = 0
-		}
-		if sourceURL == "" {
-			sourceID = ""
-			sourceNamePrefix = ""
-			sourceLastRefreshAt = ""
-			sourceAutoRefresh = false
-			sourceRefreshIntervalM = 0
-		}
-		normalized = append(normalized, BrowserProxy{
-			ProxyId:                proxyId,
-			ProxyName:              proxyName,
-			ProxyConfig:            proxyConfig,
-			DnsServers:             strings.TrimSpace(item.DnsServers),
-			GroupName:              strings.TrimSpace(item.GroupName),
-			SourceID:               sourceID,
-			SourceURL:              sourceURL,
-			SourceNamePrefix:       sourceNamePrefix,
-			SourceAutoRefresh:      sourceAutoRefresh,
-			SourceRefreshIntervalM: sourceRefreshIntervalM,
-			SourceLastRefreshAt:    sourceLastRefreshAt,
-			SortOrder:              i,
-		})
+		normalized = append(normalized, item)
 	}
 
 	// 确保内置代理始终存在（直连 + 本地代理）
@@ -1357,14 +1474,21 @@ func (a *App) SaveBrowserProxies(proxies []BrowserProxy) error {
 
 	// 优先写入 SQLite
 	if a.browserMgr.ProxyDAO != nil {
-		if err := a.browserMgr.ProxyDAO.DeleteAll(); err != nil {
-			log.Error("清空代理表失败", logger.F("error", err))
-			return err
-		}
-		for _, p := range normalized {
-			if err := a.browserMgr.ProxyDAO.Upsert(p); err != nil {
-				log.Error("代理保存失败", logger.F("proxy_id", p.ProxyId), logger.F("error", err))
+		if replaceDAO, ok := a.browserMgr.ProxyDAO.(interface{ ReplaceAll([]browser.Proxy) error }); ok {
+			if err := replaceDAO.ReplaceAll(normalized); err != nil {
+				log.Error("代理列表事务保存失败", logger.F("error", err))
 				return err
+			}
+		} else {
+			if err := a.browserMgr.ProxyDAO.DeleteAll(); err != nil {
+				log.Error("清空代理表失败", logger.F("error", err))
+				return err
+			}
+			for _, p := range normalized {
+				if err := a.browserMgr.ProxyDAO.Upsert(p); err != nil {
+					log.Error("代理保存失败", logger.F("proxy_id", p.ProxyId), logger.F("error", err))
+					return err
+				}
 			}
 		}
 		log.Info("代理列表已保存到数据库", logger.F("count", len(normalized)))

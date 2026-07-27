@@ -507,6 +507,37 @@ export async function saveBrowserProxies(proxies: BrowserProxy[]): Promise<boole
   return true
 }
 
+export async function upsertBrowserProxy(proxy: BrowserProxy): Promise<BrowserProxy> {
+  const bindings: any = await getBindings()
+  if (bindings?.UpsertBrowserProxy) {
+    return (await bindings.UpsertBrowserProxy(proxy)) || proxy
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.UpsertBrowserProxy) {
+    return (await goApp.UpsertBrowserProxy(proxy)) || proxy
+  }
+  const index = mockProxies.findIndex(item => item.proxyId === proxy.proxyId)
+  if (index >= 0) mockProxies[index] = proxy
+  else mockProxies.push(proxy)
+  return proxy
+}
+
+export async function deleteBrowserProxies(proxyIds: string[]): Promise<boolean> {
+  const bindings: any = await getBindings()
+  if (bindings?.DeleteBrowserProxies) {
+    await bindings.DeleteBrowserProxies(proxyIds)
+    return true
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.DeleteBrowserProxies) {
+    await goApp.DeleteBrowserProxies(proxyIds)
+    return true
+  }
+  const ids = new Set(proxyIds)
+  mockProxies = mockProxies.filter(item => !ids.has(item.proxyId))
+  return true
+}
+
 export async function validateProxyConfig(proxyConfig: string, proxyId: string): Promise<{ supported: boolean; errorMsg: string }> {
   const bindings: any = await getBindings()
   if (bindings?.ValidateProxyConfig) {

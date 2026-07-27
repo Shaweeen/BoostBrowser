@@ -40,8 +40,10 @@ type SpeedTestConfig struct {
 }
 
 var DefaultSpeedTestConfig = SpeedTestConfig{
-	Timeout:    15 * time.Second,
-	TCPTimeout: 6 * time.Second,
+	// 手动验证必须有可预期的响应时间。协议候选并发探测，并共享每个
+	// 候选的短总预算；不再出现 HTTP/HTTPS/SOCKS5 逐个等待几十秒。
+	Timeout:    6 * time.Second,
+	TCPTimeout: 3 * time.Second,
 }
 
 // ─── 对外入口 ───
@@ -101,6 +103,24 @@ func SpeedTest(
 		return tcpPingFallback(proxyId, src, cfg.TCPTimeout, log)
 	}
 
+	// 标准 HTTP/HTTPS/SOCKS5 允许供应商未标注或标错协议。候选协议并发
+	// 检查，首个真实 HTTP 响应即返回，最坏耗时受单一总预算约束。
+	if LooksLikeStandardProxyConfig(src) {
+		if detected, detectedResult, ok := detectWorkingStandardProxy(src, testURLs, cfg.Timeout); ok {
+			detectedResult.ProxyId = proxyId
+			detectedResult.ResolvedConfig = detected
+			return detectedResult
+		} else if detectedResult.Error != "" {
+			detectedResult.ProxyId = proxyId
+			result := detectedResult
+			if fallback := tcpPingFallback(proxyId, src, cfg.TCPTimeout, log); fallback.Ok {
+				result.LatencyMs = fallback.LatencyMs
+				result.Error = "代理端口可连接，但无法通过代理访问互联网: " + result.Error
+			}
+			return result
+		}
+	}
+
 	// 使用 mihomo adapter.ParseProxy 创建代理实例
 	proxyInstance, err := adapter.ParseProxy(mapping)
 	if err != nil {
@@ -118,28 +138,6 @@ func SpeedTest(
 	if result.Ok {
 		result.ResolvedConfig = src
 		return result
-	}
-
-	// 用户批量导入时经常把 HTTP 代理按 SOCKS5 写入。
-	// SOCKS5 握手收到 HTTP 响应时会出现 “unexpected protocol version 72”(72='H')。
-	// 这里自动按同一 host:port 轮流尝试 http/https/socks5，避免协议填错造成假失败。
-	for _, altSrc := range alternateStandardProxyConfigs(src) {
-		altMapping, err := proxyConfigToMapping(altSrc)
-		if err != nil {
-			continue
-		}
-		altProxy, err := adapter.ParseProxy(altMapping)
-		if err != nil {
-			continue
-		}
-		altResult := robustHTTPProxyTest(proxyId, altProxy, testURLs, cfg.Timeout)
-		if altResult.Ok {
-			altResult.ResolvedConfig = altSrc
-			return altResult
-		}
-		if altResult.Error != "" {
-			result.Error = altResult.Error
-		}
 	}
 
 	// TCP 端口开放不等于代理可以访问互联网。旧逻辑在 HTTP/SOCKS
@@ -164,33 +162,26 @@ func robustHTTPProxyTest(proxyId string, px C.Proxy, testURLs []string, timeout 
 	}
 
 	lastErr := ""
-	methods := []string{http.MethodHead, http.MethodGet}
-	totalBudget := timeout * 2
-	if totalBudget > 30*time.Second {
-		totalBudget = 30 * time.Second
-	}
-	if totalBudget < 8*time.Second {
-		totalBudget = 8 * time.Second
-	}
-	deadline := time.Now().Add(totalBudget)
-	for attempt := 0; attempt < 2; attempt++ {
-		for _, testURL := range testURLs {
-			for _, method := range methods {
-				remaining := time.Until(deadline)
-				if remaining <= 0 {
-					return TestResult{ProxyId: proxyId, Ok: false, Error: lastErr}
-				}
-				requestTimeout := timeout
-				if remaining < requestTimeout {
-					requestTimeout = remaining
-				}
-				result := singleHTTPProxyTest(proxyId, px, testURL, method, requestTimeout)
-				if result.Ok {
-					return result
-				}
-				lastErr = result.Error
-			}
+	deadline := time.Now().Add(timeout)
+	// GET 的兼容性高于 HEAD。最多尝试三个独立连通性站点，每次不超过
+	// 3 秒，且所有尝试共享 timeout 总预算。
+	for index, testURL := range testURLs {
+		if index >= 3 {
+			break
 		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		requestTimeout := remaining
+		if requestTimeout > 3*time.Second {
+			requestTimeout = 3 * time.Second
+		}
+		result := singleHTTPProxyTest(proxyId, px, testURL, http.MethodGet, requestTimeout)
+		if result.Ok {
+			return result
+		}
+		lastErr = result.Error
 	}
 	if lastErr == "" {
 		lastErr = "代理测试失败"
@@ -241,10 +232,16 @@ func singleHTTPProxyTest(proxyId string, px C.Proxy, testURL string, method stri
 
 	// 代理连通性测试以“能通过代理拿到 HTTP 响应”为准。
 	// 部分测试站会对不同出口返回 204/200/301/403，不能只认 200/204，否则会造成假失败。
-	if resp.StatusCode >= 100 && resp.StatusCode < 500 {
+	if isUsableProxyResponseStatus(resp.StatusCode) {
 		return TestResult{ProxyId: proxyId, Ok: true, LatencyMs: latency}
 	}
 	return TestResult{ProxyId: proxyId, Ok: false, LatencyMs: latency, Error: fmt.Sprintf("HTTP %d", resp.StatusCode)}
+}
+
+func isUsableProxyResponseStatus(statusCode int) bool {
+	return (statusCode >= 100 && statusCode < 400) ||
+		statusCode == http.StatusForbidden ||
+		statusCode == http.StatusMethodNotAllowed
 }
 
 func addressToMeta(address string) (C.Metadata, error) {
@@ -480,11 +477,21 @@ func DetectWorkingStandardProxyConfig(src string, cfg *SpeedTestConfig) (string,
 	if len(testURLs) == 0 {
 		testURLs = defaultSpeedTestURLs
 	}
+	detected, result, ok := detectWorkingStandardProxy(src, testURLs, cfg.Timeout)
+	if ok {
+		return detected, nil
+	}
+	if result.Error == "" {
+		result.Error = "代理协议探测失败"
+	}
+	return "", fmt.Errorf("%s", result.Error)
+}
+
+func detectWorkingStandardProxy(src string, testURLs []string, timeout time.Duration) (string, TestResult, bool) {
 	candidates := append([]string{src}, alternateStandardProxyConfigs(src)...)
 	type detectionResult struct {
 		candidate string
-		err       string
-		ok        bool
+		result    TestResult
 	}
 	results := make(chan detectionResult, len(candidates))
 	for _, candidate := range candidates {
@@ -492,33 +499,30 @@ func DetectWorkingStandardProxyConfig(src string, cfg *SpeedTestConfig) (string,
 		go func() {
 			mapping, err := proxyConfigToMapping(candidate)
 			if err != nil {
-				results <- detectionResult{candidate: candidate, err: err.Error()}
+				results <- detectionResult{candidate: candidate, result: TestResult{Error: err.Error()}}
 				return
 			}
 			px, err := adapter.ParseProxy(mapping)
 			if err != nil {
-				results <- detectionResult{candidate: candidate, err: err.Error()}
+				results <- detectionResult{candidate: candidate, result: TestResult{Error: err.Error()}}
 				return
 			}
-			result := robustHTTPProxyTest("detect", px, testURLs, cfg.Timeout)
-			results <- detectionResult{candidate: candidate, err: result.Error, ok: result.Ok}
+			result := robustHTTPProxyTest("detect", px, testURLs, timeout)
+			results <- detectionResult{candidate: candidate, result: result}
 		}()
 	}
 
-	lastErr := ""
+	lastResult := TestResult{Error: "代理协议探测失败"}
 	for range candidates {
 		result := <-results
-		if result.ok {
-			return result.candidate, nil
+		if result.result.Ok {
+			return result.candidate, result.result, true
 		}
-		if result.err != "" {
-			lastErr = result.err
+		if result.result.Error != "" {
+			lastResult = result.result
 		}
 	}
-	if lastErr == "" {
-		lastErr = "代理协议探测失败"
-	}
-	return "", fmt.Errorf("%s", lastErr)
+	return "", lastResult, false
 }
 
 func alternateStandardProxyConfigs(src string) []string {

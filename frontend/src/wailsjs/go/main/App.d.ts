@@ -228,6 +228,10 @@ export function ReloadConfig():Promise<void>;
 
 export function SaveBrowserProxies(arg1:Array<config.BrowserProxy>):Promise<void>;
 
+export function UpsertBrowserProxy(arg1:config.BrowserProxy):Promise<config.BrowserProxy>;
+
+export function DeleteBrowserProxies(arg1:Array<string>):Promise<void>;
+
 export function SaveBrowserSettings(arg1:browser.Settings):Promise<void>;
 
 export function SaveNativeMainWindowBounds(arg1:main.MainWindowBounds):Promise<boolean>;

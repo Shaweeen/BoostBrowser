@@ -86,12 +86,20 @@ func (d *SQLiteProxyDAO) ListGroups() ([]string, error) {
 
 // Upsert 新增或更新代理
 func (d *SQLiteProxyDAO) Upsert(proxy Proxy) error {
+	return upsertProxy(d.db, proxy)
+}
+
+type proxyExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func upsertProxy(execer proxyExecer, proxy Proxy) error {
 	now := time.Now().Format(time.RFC3339)
 	autoRefreshInt := 0
 	if proxy.SourceAutoRefresh {
 		autoRefreshInt = 1
 	}
-	_, err := d.db.Exec(`
+	_, err := execer.Exec(`
 		INSERT INTO browser_proxies (
 		  proxy_id, proxy_name, proxy_config, dns_servers, group_name,
 		  source_id, source_url, source_name_prefix, source_auto_refresh, source_refresh_interval_m, source_last_refresh_at,
@@ -120,11 +128,52 @@ func (d *SQLiteProxyDAO) Upsert(proxy Proxy) error {
 	return nil
 }
 
+// ReplaceAll 在一个事务内替换完整代理列表。旧版逐条自动提交会让大代理池
+// 的导入/订阅刷新明显卡顿，并可能在中途失败时留下半张表。
+func (d *SQLiteProxyDAO) ReplaceAll(proxies []Proxy) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("开始替换代理事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM browser_proxies`); err != nil {
+		return fmt.Errorf("清空代理表失败: %w", err)
+	}
+	for _, item := range proxies {
+		if err := upsertProxy(tx, item); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交代理替换事务失败: %w", err)
+	}
+	return nil
+}
+
 // Delete 删除单个代理
 func (d *SQLiteProxyDAO) Delete(proxyId string) error {
 	_, err := d.db.Exec(`DELETE FROM browser_proxies WHERE proxy_id = ?`, proxyId)
 	if err != nil {
 		return fmt.Errorf("删除代理失败: %w", err)
+	}
+	return nil
+}
+
+// DeleteMany 在一次事务中删除多条代理，避免前端批量删除时产生 N 次持久化往返。
+func (d *SQLiteProxyDAO) DeleteMany(proxyIds []string) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("开始批量删除代理事务失败: %w", err)
+	}
+	defer tx.Rollback()
+	for _, proxyID := range proxyIds {
+		if _, err := tx.Exec(`DELETE FROM browser_proxies WHERE proxy_id = ?`, proxyID); err != nil {
+			return fmt.Errorf("删除代理失败: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交批量删除代理事务失败: %w", err)
 	}
 	return nil
 }

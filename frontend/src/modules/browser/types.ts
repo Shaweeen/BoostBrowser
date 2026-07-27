@@ -152,6 +152,7 @@ export interface BrowserProxy {
   proxyConfig: string
   dnsServers?: string
   groupName?: string
+  sortOrder?: number
   sourceId?: string
   sourceUrl?: string
   sourceNamePrefix?: string

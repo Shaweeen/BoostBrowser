@@ -450,6 +450,14 @@ export function SaveBrowserProxies(arg1) {
   return window['go']['main']['App']['SaveBrowserProxies'](arg1);
 }
 
+export function UpsertBrowserProxy(arg1) {
+  return window['go']['main']['App']['UpsertBrowserProxy'](arg1);
+}
+
+export function DeleteBrowserProxies(arg1) {
+  return window['go']['main']['App']['DeleteBrowserProxies'](arg1);
+}
+
 export function SaveBrowserSettings(arg1) {
   return window['go']['main']['App']['SaveBrowserSettings'](arg1);
 }
