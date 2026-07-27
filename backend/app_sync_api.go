@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 	"unsafe"
 
 	"boost-browser/backend/internal/logger"
@@ -31,12 +30,6 @@ var syncState struct {
 
 var syncSessionMu sync.Mutex
 
-var syncRuntimeDiscovery struct {
-	sync.Mutex
-	lastAttempt time.Time
-	running     bool
-}
-
 // SyncProfileInfo 同步页面的实例信息
 type SyncProfileInfo struct {
 	ProfileId   string `json:"profileId"`
@@ -57,9 +50,12 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 }
 
 func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
-	// Prefer the main client's shared runtime snapshot. A full Windows CIM scan
-	// is only a throttled fallback, not a two-second polling dependency.
+	// Window discovery is deliberately action-driven. The sync assistant calls
+	// this API only for initial load and explicit user actions (refresh, select
+	// all, choose master). Reconcile once here so a closed/restarted Chromium
+	// process cannot leave a stale PID or HWND in the next configuration.
 	_, _ = a.applyBrowserRuntimeSnapshot()
+	a.reconcileBrowserRuntimeStateOnce()
 	// NOTE: 不要在这里加 browserMgr.Mutex 锁！List() 内部会自行加锁，
 	// 如果外层再锁一次会导致死锁（Go sync.Mutex 不可重入）。
 	profiles := a.browserMgr.List()
@@ -84,44 +80,17 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 	}
 	resolvedWindows := findProcessTreeWindows(rootPIDs)
 	result := make([]SyncProfileInfo, len(candidates))
-	resolvedCount := 0
 	for i, p := range candidates {
 		info := SyncProfileInfo{ProfileId: p.ProfileId, ProfileName: p.ProfileName, Pid: p.Pid, DebugPort: p.DebugPort, Running: p.Running, BadgeNumber: extractBadgeNumberFromName(p.ProfileName)}
 		if hwnd := resolvedWindows[p.Pid]; hwnd != 0 {
 			info.Hwnd = int64(hwnd)
 			info.Status = "running"
-			resolvedCount++
 		} else {
 			info.Status = "no_window"
 		}
 		result[i] = info
 	}
-	if resolvedCount < len(candidates) {
-		a.reconcileSyncRuntimeStateAsync()
-	}
 	return result
-}
-
-func (a *App) reconcileSyncRuntimeStateAsync() {
-	syncRuntimeDiscovery.Lock()
-	if syncRuntimeDiscovery.running || time.Since(syncRuntimeDiscovery.lastAttempt) < 2*time.Second {
-		syncRuntimeDiscovery.Unlock()
-		return
-	}
-	syncRuntimeDiscovery.lastAttempt = time.Now()
-	syncRuntimeDiscovery.running = true
-	syncRuntimeDiscovery.Unlock()
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				a.lifecycleLog("sync-runtime-discovery-panic", fmt.Sprintf("value=%v", r))
-			}
-			syncRuntimeDiscovery.Lock()
-			syncRuntimeDiscovery.running = false
-			syncRuntimeDiscovery.Unlock()
-		}()
-		a.reconcileBrowserRuntimeStateOnce()
-	}()
 }
 
 // StartInputSync 启动输入同步
@@ -139,7 +108,11 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	syncSessionMu.Lock()
 	defer syncSessionMu.Unlock()
 	log := logger.New("SyncAPI")
+	// Start is a transaction boundary: discard assumptions from earlier UI
+	// scans and obtain the current process/window ownership before validating
+	// the requested master and followers.
 	_, _ = a.applyBrowserRuntimeSnapshot()
+	a.reconcileBrowserRuntimeStateOnce()
 
 	masterProfileId = strings.TrimSpace(masterProfileId)
 	if masterProfileId == "" {

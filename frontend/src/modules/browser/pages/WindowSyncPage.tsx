@@ -87,25 +87,16 @@ export function WindowSyncPage() {
   const [delayPreset, setDelayPreset] = useState<DelayPreset | null>(null)
   const [resumeNoticeVisible, setResumeNoticeVisible] = useState(false)
 
-  const refreshTimer = useRef<ReturnType<typeof setInterval>>()
   const loadProfilesSeq = useRef(0)
-  const pendingManualRefreshes = useRef(0)
-  const silentRefreshInFlight = useRef(false)
-  const loadProfiles = useCallback(async (options?: { silent?: boolean }) => {
-    const silent = options?.silent === true
-    if (silent && silentRefreshInFlight.current) return
-    if (silent) silentRefreshInFlight.current = true
+  const loadProfiles = useCallback(async (): Promise<SyncProfileInfo[]> => {
     const seq = ++loadProfilesSeq.current
-    if (!silent) {
-      pendingManualRefreshes.current += 1
-      setRefreshing(true)
-    }
+    setRefreshing(true)
 
     try {
       const [list, status] = await Promise.all([getSyncProfiles(), getSyncStatus()])
-      if (seq !== loadProfilesSeq.current) return
-
       const sorted = [...list].sort(compareProfileName)
+      if (seq !== loadProfilesSeq.current) return sorted
+
       setProfiles(sorted)
       setSyncStatus(status)
       if (status?.active) {
@@ -120,31 +111,35 @@ export function WindowSyncPage() {
         const nextSelected = new Set([status.masterId, ...(status.followerIds || [])].filter(Boolean))
         setSelectedIds(nextSelected)
         setMasterId(status.masterId)
-        return
+        return sorted
       }
 
-      // A Chrome top-level window can move from its launcher PID to a sibling
-      // while many instances start together. Keep the user's selection during
-      // the brief "no_window" reconciliation state; only remove IDs that are
-      // actually absent from the runtime list.
-      const knownIds = new Set(sorted.map(item => item.profileId))
+      // This is an explicit collection boundary, not a polling snapshot. Drop
+      // selections whose current top-level window no longer exists so a closed
+      // environment cannot poison the next master/follower configuration.
+      const availableIds = new Set(sorted.filter(item => item.status === 'running').map(item => item.profileId))
       setSelectedIds(prev => {
         const next = new Set<string>()
         prev.forEach(id => {
-          if (knownIds.has(id)) next.add(id)
+          if (availableIds.has(id)) next.add(id)
         })
         return next
       })
-      setMasterId(prev => (prev && knownIds.has(prev) ? prev : null))
+      setMasterId(prev => (prev && availableIds.has(prev) ? prev : null))
+      return sorted
     } finally {
-      if (silent) silentRefreshInFlight.current = false
-      if (!silent) {
-        pendingManualRefreshes.current = Math.max(0, pendingManualRefreshes.current - 1)
-        if (pendingManualRefreshes.current === 0) {
-          setRefreshing(false)
-        }
-      }
+      if (seq === loadProfilesSeq.current) setRefreshing(false)
     }
+  }, [])
+
+  const releaseCollectedSyncData = useCallback(() => {
+    loadProfilesSeq.current += 1
+    setProfiles([])
+    setSelectedIds(new Set())
+    setMasterId(null)
+    setSyncStatus(null)
+    setDelayPreset(null)
+    setRefreshing(false)
   }, [])
 
   useEffect(() => {
@@ -160,29 +155,10 @@ export function WindowSyncPage() {
   }, [])
 
   useEffect(() => {
-    void loadProfiles({ silent: true })
-    refreshTimer.current = setInterval(() => {
-      void loadProfiles({ silent: true })
-    }, 1000)
-
-    const handleWindowFocus = () => {
-      void loadProfiles({ silent: true })
-    }
-    const handleVisibilityChange = () => {
-      if (!document.hidden) {
-        void loadProfiles({ silent: true })
-      }
-    }
-
-    const offStarted = EventsOn('browser:instance:started', () => {
-      void loadProfiles({ silent: true })
-    })
-    const offStopped = EventsOn('browser:instance:stopped', () => {
-      void loadProfiles({ silent: true })
-    })
-    const offUpdated = EventsOn('browser:instance:updated', () => {
-      void loadProfiles({ silent: true })
-    })
+    // Collect once when the assistant opens. Afterwards collection is strictly
+    // user-driven; focus changes and one-second timers must not mutate a
+    // configuration while the user is pausing, closing or replacing windows.
+    void loadProfiles()
     const offPauseChanged = EventsOn('window-sync:pause-changed', (payload: { paused?: boolean }) => {
       const paused = payload?.paused === true
       setSyncStatus(prev => prev ? { ...prev, paused } : prev)
@@ -196,16 +172,7 @@ export function WindowSyncPage() {
       }
     })
 
-    window.addEventListener('focus', handleWindowFocus)
-    document.addEventListener('visibilitychange', handleVisibilityChange)
-
     return () => {
-      if (refreshTimer.current) clearInterval(refreshTimer.current)
-      window.removeEventListener('focus', handleWindowFocus)
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
-      offStarted?.()
-      offStopped?.()
-      offUpdated?.()
       offPauseChanged?.()
       if (resumeNoticeTimerRef.current) {
         window.clearTimeout(resumeNoticeTimerRef.current)
@@ -463,16 +430,26 @@ export function WindowSyncPage() {
     })
   }
 
-  const setAsMaster = (id: string) => {
+  const setAsMaster = async (id: string) => {
     if (isSyncing) return
+    const freshProfiles = await loadProfiles()
+    if (!freshProfiles.some(item => item.profileId === id && item.status === 'running')) {
+      toast.error('该环境窗口已关闭，请重新选择主控')
+      return
+    }
     setMasterId(id)
     setSelectedIds(prev => new Set([...prev, id]))
   }
 
-  const handleSelectAllVisible = () => {
+  const handleSelectAllVisible = async () => {
     if (isSyncing) return
-    const visibleIds = visibleProfiles.filter(item => item.status === 'running').map(item => item.profileId)
-    const allSelected = visibleIds.length > 0 && visibleIds.every(id => selectedIds.has(id))
+    const freshProfiles = await loadProfiles()
+    const visibleIds = freshProfiles.filter(item => item.status === 'running').map(item => item.profileId)
+    if (visibleIds.length === 0) {
+      toast.error('没有检测到已打开的环境窗口')
+      return
+    }
+    const allSelected = visibleIds.every(id => selectedIds.has(id))
     if (allSelected) {
       const next = new Set(selectedIds)
       visibleIds.forEach(id => next.delete(id))
@@ -497,14 +474,21 @@ export function WindowSyncPage() {
     }
     setStarting(true)
     const err = await startInputSync(masterId, followers)
-    setStarting(false)
     if (err) {
+      setStarting(false)
       toast.error(`启动同步失败：${err}`)
+      await loadProfiles()
       return
     }
+    const status = await getSyncStatus()
+    if (status) {
+      setSyncStatus(status)
+      setSelectedIds(new Set([status.masterId, ...(status.followerIds || [])].filter(Boolean)))
+      setMasterId(status.masterId)
+    }
+    setStarting(false)
     setPanelPresentation('compact')
     setShowSyncControls(false)
-    await loadProfiles()
   }
 
   const handleStopSync = async () => {
@@ -516,7 +500,7 @@ export function WindowSyncPage() {
     setShowSyncControls(false)
     setPanelPresentation('compact')
     setToolbarMenu(null)
-    await loadProfiles()
+    releaseCollectedSyncData()
   }
 
   const handleDelayPresetChange = async (preset: DelayPreset) => {
@@ -567,6 +551,7 @@ export function WindowSyncPage() {
   }
 
   const handleExitAssistant = async () => {
+    releaseCollectedSyncData()
     await ExitWindowSyncPanel().catch(() => {})
   }
 
@@ -696,7 +681,6 @@ export function WindowSyncPage() {
                 type="button"
                 className="inline-flex items-center gap-2 rounded-xl border border-[#d8dee8] bg-[#f8fafc] px-3 py-2 text-sm font-medium text-[#344054] transition hover:bg-[#eef2f7]"
                 onClick={handleSelectAllVisible}
-                disabled={compactSelectableProfiles.length === 0}
               >
                 {compactSelectableProfiles.length > 0 && compactSelectableProfiles.every(item => selectedIds.has(item.profileId))
                   ? <CheckSquare className="h-4 w-4 text-[#3a6be0]" />

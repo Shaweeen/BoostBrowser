@@ -119,6 +119,18 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("git fetch --unshallow origin --tags --force", publisher)
         self.assertIn('"$Tag^{}^"', publisher)
 
+    def test_sync_window_collection_is_action_driven(self):
+        page = self.read("frontend/src/modules/browser/pages/WindowSyncPage.tsx")
+        backend = self.read("backend/app_sync_api.go")
+        self.assertNotIn("setInterval(() =>", page)
+        self.assertNotIn("browser:instance:started", page)
+        self.assertNotIn("browser:instance:stopped", page)
+        self.assertNotIn("visibilitychange", page)
+        self.assertIn("const releaseCollectedSyncData", page)
+        self.assertIn("const freshProfiles = await loadProfiles()", page)
+        self.assertIn("a.reconcileBrowserRuntimeStateOnce()", backend)
+        self.assertNotIn("reconcileSyncRuntimeStateAsync", backend)
+
     def test_go_mod_does_not_replace_modules_with_missing_local_third_party_dirs(self):
         text = self.read("go.mod")
         self.assertNotRegex(text, r"replace\s+github\.com/energye/systray\s+=>\s+\./third_party/systray")
