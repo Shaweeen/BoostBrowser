@@ -154,8 +154,14 @@ Run-Step "Preparing Go dependencies and preflight compile" {
     }
 
     if ($RunGoTests) {
-        go test ./...
-        if ($LASTEXITCODE -ne 0) { throw "go test ./... failed" }
+        $testLog = Join-Path $RepoRoot "build\go-test-windows.log"
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $testLog) | Out-Null
+        Write-Host "Running deterministic Go release tests..." -ForegroundColor Yellow
+        & go test -count=1 ./... 2>&1 | Tee-Object -FilePath $testLog
+        $testExitCode = $LASTEXITCODE
+        if ($testExitCode -ne 0) {
+            throw "go test ./... failed (exit $testExitCode). Full output: $testLog"
+        }
     } else {
         Write-Host "Skipping go test ./... (pass -RunGoTests to enable)" -ForegroundColor Yellow
     }

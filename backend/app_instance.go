@@ -1357,24 +1357,6 @@ func waitProcessExitWindows(pid int, timeout time.Duration) bool {
 	return !alive
 }
 
-func isProcessAliveWindows(pid int) (bool, error) {
-	cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH")
-	hideWindow(cmd)
-	out, err := cmd.Output()
-	if err != nil {
-		return false, err
-	}
-	line := strings.TrimSpace(string(out))
-	if line == "" {
-		return false, nil
-	}
-	if strings.HasPrefix(strings.ToUpper(line), "INFO:") {
-		return false, nil
-	}
-	token := fmt.Sprintf("\"%d\",", pid)
-	return strings.Contains(line, token), nil
-}
-
 // navigateToTargetURLs 通过 CDP 将浏览器导航到目标 URL。
 //
 // 非 Cloak 内核（ungoogled-chromium 等）：

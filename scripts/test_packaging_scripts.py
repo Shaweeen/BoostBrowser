@@ -103,6 +103,16 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertEqual(lock["version"], version)
         self.assertEqual(lock["packages"][""]["version"], version)
 
+    def test_release_go_tests_are_deterministic_and_logged(self):
+        wrapper = self.read("scripts/build_windows_selfuse.ps1")
+        speedtest = self.read("backend/test/proxy/speedtest_debug_test.go")
+        self.assertIn("go test -count=1 ./...", wrapper)
+        self.assertIn("go-test-windows.log", wrapper)
+        self.assertTrue(
+            speedtest.startswith("//go:build integration\n"),
+            "external-network proxy debug tests must not run in release builds",
+        )
+
     def test_go_mod_does_not_replace_modules_with_missing_local_third_party_dirs(self):
         text = self.read("go.mod")
         self.assertNotRegex(text, r"replace\s+github\.com/energye/systray\s+=>\s+\./third_party/systray")
