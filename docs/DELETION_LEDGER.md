@@ -14,7 +14,7 @@ behavior is intentionally retired.
    release wholesale because that can overwrite user data and unrelated fixes.
 5. Large deletions without an entry in this ledger fail the release health check.
 
-## Pending release cleanup
+## v1.7.33 cleanup
 
 | ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -23,6 +23,3 @@ behavior is intentionally retired.
 | CLEAN-003 | `BOOST_BROWSER_ENABLE_GLOBAL_WINDOW_WATCHERS`, its startup branch, non-Windows stubs, and stale crash-probe comments | `v1.7.32` (`134d520`) | The option activated only the retired duplicate watchers and was disabled by default. | No replacement option is needed; active synchronization owns its listener lifecycle. | Repository symbol scan and full Go tests. | Inspect `main.go`, `backend/extension_popup_sizer_stub.go`, and `backend/app_instance.go` at `134d520`. |
 | CLEAN-004 | Unused `ensureDefaultSearchProvider` and `asJSONString` compatibility helpers | `v1.7.32` (`134d520`) | Zero callers; current search-provider setup uses the maintained launch/CDP path. | `seedDefaultSearchEngine` and current core launch helpers. | Repository symbol scan and full Go tests. | Inspect with `git show 134d520:backend/extension_startup_cleanup.go`. |
 | CLEAN-005 | Tests that exercised only the retired global/off-screen popup watchers | `v1.7.32` (`134d520`) | They prevented removal of dead code but did not cover the active synchronization path. | Compact tests for sync popup confinement, title classification, main-window exclusion, DevTools classification, and IME exclusion. | Windows test binary compilation and full Go tests. | Inspect with `git show 134d520:backend/extension_popup_sizer_windows_test.go`. |
-
-When this cleanup is released, replace “Pending release cleanup” with the
-release version and commit.

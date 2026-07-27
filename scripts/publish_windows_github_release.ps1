@@ -116,7 +116,12 @@ if ($Head -ne $TagCommit) {
 & git ls-remote --exit-code origin "refs/tags/$Tag" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Release tag $Tag is not available on origin" }
 
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$RepoRoot\scripts\check_code_health.ps1" -BaseRef "$Tag^"
+$previousTagOutput = @(& git describe --tags --abbrev=0 --match 'v[0-9]*' "$Tag^")
+if ($LASTEXITCODE -ne 0 -or $previousTagOutput.Count -ne 1) {
+    throw "Unable to resolve the release preceding $Tag"
+}
+$PreviousTag = $previousTagOutput[0].Trim()
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$RepoRoot\scripts\check_code_health.ps1" -BaseRef $PreviousTag
 if ($LASTEXITCODE -ne 0) { throw 'Code health review failed' }
 
 $buildArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$RepoRoot\scripts\build_windows_public.ps1")
