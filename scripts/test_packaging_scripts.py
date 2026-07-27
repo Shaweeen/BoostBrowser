@@ -247,6 +247,7 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("scripts/repair_upgrade_windows.ps1", text)
         self.assertIn("packagingCommit", text)
         self.assertIn("allowedPostTagFiles", text)
+        self.assertIn("'docs/DELETION_LEDGER.md'", text)
         self.assertIn("function Invoke-GhProbe", text)
         self.assertIn("$existingProbe.ExitCode", text)
         self.assertIn("scripts\\check_code_health.ps1", text)

@@ -104,6 +104,7 @@ if ($Head -ne $TagCommit) {
         'scripts/publish_windows_github_release.ps1',
         'scripts/repair_upgrade_windows.ps1',
         'scripts/test_packaging_scripts.py',
+        'docs/DELETION_LEDGER.md',
         "RELEASE_NOTES_v$Version.md"
     )
     $postTagFiles = @(& git diff --name-only $Tag HEAD)
