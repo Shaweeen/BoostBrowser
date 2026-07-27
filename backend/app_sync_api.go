@@ -11,6 +11,7 @@ import (
 
 	"boost-browser/backend/internal/logger"
 
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/sys/windows"
 )
 
@@ -58,10 +59,7 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 	// Prefer the main client's shared runtime snapshot. A full Windows CIM scan
 	// is only a throttled fallback, not a two-second polling dependency.
-	liveSnapshots, totalSnapshots := a.applyBrowserRuntimeSnapshot()
-	if liveSnapshots == 0 || liveSnapshots < totalSnapshots {
-		a.reconcileSyncRuntimeStateAsync()
-	}
+	_, _ = a.applyBrowserRuntimeSnapshot()
 	// NOTE: 不要在这里加 browserMgr.Mutex 锁！List() 内部会自行加锁，
 	// 如果外层再锁一次会导致死锁（Go sync.Mutex 不可重入）。
 	profiles := a.browserMgr.List()
@@ -141,10 +139,7 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	syncSessionMu.Lock()
 	defer syncSessionMu.Unlock()
 	log := logger.New("SyncAPI")
-	liveSnapshots, totalSnapshots := a.applyBrowserRuntimeSnapshot()
-	if liveSnapshots == 0 || liveSnapshots < totalSnapshots {
-		a.reconcileSyncRuntimeStateAsync()
-	}
+	_, _ = a.applyBrowserRuntimeSnapshot()
 
 	masterProfileId = strings.TrimSpace(masterProfileId)
 	if masterProfileId == "" {
@@ -249,6 +244,14 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	syncer := NewInputSyncerWithLogger(func(event string, fields ...string) {
 		a.lifecycleLog(event, fields...)
 	})
+	syncer.SetPauseChangedHandler(func(paused bool) {
+		syncState.mu.Lock()
+		current := syncState.active && syncState.syncer == syncer
+		syncState.mu.Unlock()
+		if current && a.ctx != nil {
+			wailsruntime.EventsEmit(a.ctx, "window-sync:pause-changed", map[string]interface{}{"paused": paused})
+		}
+	})
 	masterDebugPort := masterSnapshot.DebugPort
 	if err := syncer.StartWithURLSync(masterHwnd, followerHwnds, masterSnapshot.Pid, masterDebugPort, followerDebugPorts); err != nil {
 		return fmt.Errorf("启动同步失败：%v", err)
@@ -316,13 +319,16 @@ func (a *App) getSyncStatusLocal() map[string]interface{} {
 
 	config := SyncConfig{MouseEnabled: true, KeyEnabled: true}
 	pointerInsideMaster := false
+	paused := false
 	if syncState.syncer != nil {
 		config = syncState.syncer.GetConfig()
 		pointerInsideMaster = syncState.syncer.PointerInsideMaster()
+		paused = syncState.syncer.IsPaused()
 	}
 
 	return map[string]interface{}{
 		"active":              syncState.active,
+		"paused":              paused,
 		"masterId":            syncState.masterId,
 		"followerIds":         append([]string(nil), syncState.followerIds...),
 		"mouseEnabled":        config.MouseEnabled,

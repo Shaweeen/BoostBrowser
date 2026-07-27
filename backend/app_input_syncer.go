@@ -38,9 +38,12 @@ type InputSyncer struct {
 	followerDebug []int
 
 	// 原子状态：钩子回调中只读 atomic，不加锁
-	active             int32 // 1=活跃, 0=停止
-	mouseEnabled       int32 // 1=启用, 0=禁用
-	keyEnabled         int32 // 1=启用, 0=禁用
+	active             int32  // 1=活跃, 0=停止
+	paused             int32  // 1=Esc 静默暂停，Hook 保持安装以便再次按 Esc 恢复
+	escapeDown         int32  // 防止系统按键重复触发多次切换
+	dispatchGeneration uint64 // 暂停/恢复后，切换前排队的动作永久失效
+	mouseEnabled       int32  // 1=启用, 0=禁用
+	keyEnabled         int32  // 1=启用, 0=禁用
 	randomDelayEnabled int32
 	randomDelayMinMs   int32
 	randomDelayMaxMs   int32
@@ -59,7 +62,7 @@ type InputSyncer struct {
 	activePageMouseButton int32 // Win32 button-down message while dragging page content/scrollbars
 	cdpKeyQueue           chan cdpKeyEvent
 	cdpKeyDrops           int32
-	pageInputQueue        chan func()
+	pageInputQueue        chan pageInputEvent
 	pageInputDrops        int32
 
 	// URL 同步
@@ -79,6 +82,7 @@ type InputSyncer struct {
 	hookInstalls int32
 
 	lifecycleLogger func(event string, fields ...string)
+	pauseChanged    func(paused bool)
 }
 
 // Low-level hook callbacks are process-global resources in the Go Windows
@@ -110,6 +114,7 @@ type SyncConfig struct {
 }
 
 type cdpKeyEvent struct {
+	generation uint64
 	masterPort int
 	ports      []int
 	hwnds      []windows.HWND
@@ -117,6 +122,11 @@ type cdpKeyEvent struct {
 	vk         uint32
 	character  rune
 	modifiers  int
+}
+
+type pageInputEvent struct {
+	generation uint64
+	action     func()
 }
 
 func pageCDPTargets(debugPort int) []cdpTarget {
@@ -241,7 +251,7 @@ func NewInputSyncerWithLogger(lifecycleLogger func(event string, fields ...strin
 		lifecycleLogger: lifecycleLogger,
 		randomDelayNext: make(map[windows.HWND]time.Time),
 		cdpKeyQueue:     make(chan cdpKeyEvent, 512),
-		pageInputQueue:  make(chan func(), 512),
+		pageInputQueue:  make(chan pageInputEvent, 512),
 	}
 }
 
@@ -311,6 +321,9 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	s.followerMu.Unlock()
 
 	atomic.StoreInt32(&s.active, 1)
+	atomic.StoreInt32(&s.paused, 0)
+	atomic.StoreInt32(&s.escapeDown, 0)
+	atomic.StoreUint64(&s.dispatchGeneration, 0)
 	atomic.StoreInt32(&s.mouseEnabled, 1)
 	atomic.StoreInt32(&s.keyEnabled, 1)
 	// Default to immediate delivery. Delay is enabled only after the user
@@ -321,7 +334,7 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	s.stopCh = make(chan struct{})
 	s.stopOnce = sync.Once{}
 	s.cdpKeyQueue = make(chan cdpKeyEvent, 512)
-	s.pageInputQueue = make(chan func(), 512)
+	s.pageInputQueue = make(chan pageInputEvent, 512)
 	ready := make(chan error, 1)
 
 	// 重置诊断计数器
@@ -504,6 +517,48 @@ func (s *InputSyncer) IsActive() bool {
 	return atomic.LoadInt32(&s.active) == 1
 }
 
+// IsPaused reports the lightweight Esc pause state. Pausing keeps the hooks,
+// validated windows and CDP sessions alive, so resume is immediate and does
+// not reorder or rediscover 20+ follower windows.
+func (s *InputSyncer) IsPaused() bool {
+	return atomic.LoadInt32(&s.paused) == 1
+}
+
+func (s *InputSyncer) SetPauseChangedHandler(handler func(paused bool)) {
+	s.pauseChanged = handler
+}
+
+func (s *InputSyncer) togglePausedFromEscape() bool {
+	for {
+		old := atomic.LoadInt32(&s.paused)
+		next := int32(1)
+		if old == 1 {
+			next = 0
+		}
+		if !atomic.CompareAndSwapInt32(&s.paused, old, next) {
+			continue
+		}
+		paused := next == 1
+		atomic.AddUint64(&s.dispatchGeneration, 1)
+		if paused {
+			atomic.StoreInt32(&s.activePageMouseButton, 0)
+		}
+		handler := s.pauseChanged
+		// Never write logs or call Wails/UI work on the low-level hook thread.
+		go func() {
+			s.lifecycle("sync-input-pause", fmt.Sprintf("paused=%t", paused), "source=escape")
+			if handler != nil {
+				handler(paused)
+			}
+		}()
+		return paused
+	}
+}
+
+func (s *InputSyncer) canDispatch() bool {
+	return atomic.LoadInt32(&s.active) == 1 && atomic.LoadInt32(&s.paused) == 0
+}
+
 // SetConfig 更新同步配置
 func (s *InputSyncer) SetConfig(mouseEnabled, keyEnabled bool) {
 	if mouseEnabled {
@@ -538,8 +593,27 @@ func (s *InputSyncer) SetRandomDelay(enabled bool, minMs, maxMs int) {
 }
 
 func (s *InputSyncer) dispatchWithRandomDelay(hwnd windows.HWND, action func()) {
+	s.dispatchWithRandomDelayComplete(hwnd, action, nil)
+}
+
+func (s *InputSyncer) dispatchWithRandomDelayComplete(hwnd windows.HWND, action func(), complete func()) {
+	if action == nil || !s.canDispatch() {
+		if complete != nil {
+			complete()
+		}
+		return
+	}
+	generation := atomic.LoadUint64(&s.dispatchGeneration)
+	guarded := func() {
+		if complete != nil {
+			defer complete()
+		}
+		if s.canDispatch() && generation == atomic.LoadUint64(&s.dispatchGeneration) {
+			action()
+		}
+	}
 	if atomic.LoadInt32(&s.randomDelayEnabled) == 0 {
-		action()
+		guarded()
 		return
 	}
 	minMs := int(atomic.LoadInt32(&s.randomDelayMinMs))
@@ -556,7 +630,7 @@ func (s *InputSyncer) dispatchWithRandomDelay(hwnd windows.HWND, action func()) 
 	}
 	s.randomDelayNext[hwnd] = due
 	s.randomDelayMu.Unlock()
-	time.AfterFunc(time.Until(due), action)
+	time.AfterFunc(time.Until(due), guarded)
 }
 
 func (s *InputSyncer) postMessageWithRandomDelay(hwnd windows.HWND, msg, wparam, lparam uintptr) {
@@ -645,6 +719,21 @@ func (s *InputSyncer) getFollowerSnapshot() []windows.HWND {
 	snapshot := make([]windows.HWND, len(s.followerSnapshot))
 	copy(snapshot, s.followerSnapshot)
 	return snapshot
+}
+
+func syncMouseMoveThrottle(followerCount int) time.Duration {
+	switch {
+	case followerCount >= 20:
+		return 32 * time.Millisecond
+	case followerCount >= 10:
+		return 24 * time.Millisecond
+	case followerCount >= 6:
+		return 16 * time.Millisecond
+	case followerCount >= 3:
+		return 12 * time.Millisecond
+	default:
+		return 8 * time.Millisecond
+	}
 }
 
 // ============================================================================
@@ -1236,7 +1325,7 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 		}
 	}()
 
-	if nCode < 0 || atomic.LoadInt32(&s.active) == 0 || atomic.LoadInt32(&s.mouseEnabled) == 0 || !s.isMasterForeground() {
+	if nCode < 0 || !s.canDispatch() || atomic.LoadInt32(&s.mouseEnabled) == 0 || !s.isMasterForeground() {
 		return callNextHook(nCode, wParam, lParam)
 	}
 	if lParam == 0 {
@@ -1388,15 +1477,7 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 		atomic.AddInt32(&s.moveCount, 1)
 		// 跟随窗口越多，鼠标移动同步越容易把整机拖卡。
 		// 这里按窗口数动态降采样：少量窗口保留手感，多窗口优先稳。
-		throttle := 8 * time.Millisecond
-		switch followerCount := len(followers); {
-		case followerCount >= 10:
-			throttle = 24 * time.Millisecond
-		case followerCount >= 6:
-			throttle = 16 * time.Millisecond
-		case followerCount >= 3:
-			throttle = 12 * time.Millisecond
-		}
+		throttle := syncMouseMoveThrottle(len(followers))
 		now := time.Now().UnixNano()
 		last := atomic.LoadInt64(&s.lastMoveTime)
 		if now-last < int64(throttle) {
@@ -1438,7 +1519,7 @@ func (s *InputSyncer) keyHookCallback(nCode int, wParam uintptr, lParam uintptr)
 		}
 	}()
 
-	if nCode < 0 || atomic.LoadInt32(&s.active) == 0 || atomic.LoadInt32(&s.keyEnabled) == 0 || atomic.LoadInt32(&s.pointerInsideMaster) == 0 || !s.isMasterForeground() {
+	if nCode < 0 || atomic.LoadInt32(&s.active) == 0 {
 		return callNextHook(nCode, wParam, lParam)
 	}
 	if lParam == 0 {
@@ -1458,6 +1539,22 @@ func (s *InputSyncer) keyHookCallback(nCode int, wParam uintptr, lParam uintptr)
 	msg := uint32(wParam)
 
 	if msg != WM_KEYDOWN && msg != WM_KEYUP && msg != WM_SYSKEYDOWN && msg != WM_SYSKEYUP {
+		return callNextHook(nCode, wParam, lParam)
+	}
+
+	// Esc is a process-global pause/resume shortcut only while a synchronization
+	// session exists. Swallow both edges so it cannot also close a Chrome popup.
+	if vk == VK_ESCAPE {
+		if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
+			if atomic.CompareAndSwapInt32(&s.escapeDown, 0, 1) {
+				s.togglePausedFromEscape()
+			}
+		} else {
+			atomic.StoreInt32(&s.escapeDown, 0)
+		}
+		return 1
+	}
+	if !s.canDispatch() || atomic.LoadInt32(&s.keyEnabled) == 0 || atomic.LoadInt32(&s.pointerInsideMaster) == 0 || !s.isMasterForeground() {
 		return callNextHook(nCode, wParam, lParam)
 	}
 
@@ -1606,7 +1703,7 @@ func (s *InputSyncer) dispatchPageKeyViaCDP(msg uint32, vk, scanCode, flags uint
 	}
 	down := msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN
 	ch := toUnicode(uint16(vk), uint16(scanCode), (flags&0x01) != 0)
-	event := cdpKeyEvent{masterPort: masterPort, ports: ports, hwnds: hwnds, down: down, vk: vk, character: ch, modifiers: modifiers}
+	event := cdpKeyEvent{generation: atomic.LoadUint64(&s.dispatchGeneration), masterPort: masterPort, ports: ports, hwnds: hwnds, down: down, vk: vk, character: ch, modifiers: modifiers}
 	select {
 	case s.cdpKeyQueue <- event:
 	default:
@@ -1620,6 +1717,9 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
 		case <-stopCh:
 			return
 		case event := <-queue:
+			if !s.canDispatch() || event.generation != atomic.LoadUint64(&s.dispatchGeneration) {
+				continue
+			}
 			masterTarget, hasMasterTarget := focusedCDPTarget(event.masterPort)
 			var wg sync.WaitGroup
 			for i, hwnd := range event.hwnds {
@@ -1629,8 +1729,7 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
 				}
 				wg.Add(1)
 				go func(debugPort int, follower windows.HWND) {
-					s.dispatchWithRandomDelay(follower, func() {
-						defer wg.Done()
+					s.dispatchWithRandomDelayComplete(follower, func() {
 						if debugPort <= 0 || !hasMasterTarget {
 							s.dispatchPageKeyFallback(follower, event)
 							return
@@ -1653,7 +1752,7 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
 						if _, err := cdpCallTarget(followerTarget, "Input.dispatchKeyEvent", params); err != nil {
 							s.dispatchPageKeyFallback(follower, event)
 						}
-					})
+					}, wg.Done)
 				}(port, hwnd)
 			}
 			wg.Wait()
@@ -1687,24 +1786,24 @@ func (s *InputSyncer) dispatchPageMouseViaCDP(msg uint32, screenX, screenY int) 
 }
 
 func (s *InputSyncer) enqueuePageInput(action func()) {
-	if action == nil || atomic.LoadInt32(&s.active) != 1 {
+	if action == nil || !s.canDispatch() {
 		return
 	}
 	select {
-	case s.pageInputQueue <- action:
+	case s.pageInputQueue <- pageInputEvent{generation: atomic.LoadUint64(&s.dispatchGeneration), action: action}:
 	default:
 		atomic.AddInt32(&s.pageInputDrops, 1)
 	}
 }
 
-func (s *InputSyncer) pageInputDispatchLoop(stopCh <-chan struct{}, queue <-chan func()) {
+func (s *InputSyncer) pageInputDispatchLoop(stopCh <-chan struct{}, queue <-chan pageInputEvent) {
 	for {
 		select {
 		case <-stopCh:
 			return
-		case action := <-queue:
-			if action != nil && atomic.LoadInt32(&s.active) == 1 {
-				action()
+		case event := <-queue:
+			if event.action != nil && s.canDispatch() && event.generation == atomic.LoadUint64(&s.dispatchGeneration) {
+				event.action()
 			}
 		}
 	}
@@ -2139,6 +2238,10 @@ func (s *InputSyncer) urlSyncLoop() {
 
 		if atomic.LoadInt32(&s.active) == 0 {
 			return
+		}
+		if s.IsPaused() {
+			s.lastFocusedEditableState = ""
+			continue
 		}
 		if atomic.LoadInt32(&s.pointerInsideMaster) == 0 {
 			s.lastFocusedEditableState = ""

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"boost-browser/backend/internal/browser"
 	"boost-browser/backend/internal/config"
@@ -51,6 +53,53 @@ func TestGetFollowerSnapshotReturnsCopy(t *testing.T) {
 	defer s.followerMu.RUnlock()
 	if s.followerSnapshot[0] != 1 {
 		t.Fatalf("snapshot mutation leaked into syncer state: got %v", s.followerSnapshot[0])
+	}
+}
+
+func TestEscapePauseKeepsSessionAndTogglesImmediately(t *testing.T) {
+	s := NewInputSyncer()
+	atomic.StoreInt32(&s.active, 1)
+	changed := make(chan bool, 2)
+	s.SetPauseChangedHandler(func(paused bool) { changed <- paused })
+
+	if paused := s.togglePausedFromEscape(); !paused || !s.IsActive() || !s.IsPaused() || s.canDispatch() {
+		t.Fatalf("first Esc must pause without stopping session: active=%v paused=%v", s.IsActive(), s.IsPaused())
+	}
+	if paused := <-changed; !paused {
+		t.Fatal("pause callback did not report paused state")
+	}
+	if paused := s.togglePausedFromEscape(); paused || !s.IsActive() || s.IsPaused() || !s.canDispatch() {
+		t.Fatalf("second Esc must resume same session: active=%v paused=%v", s.IsActive(), s.IsPaused())
+	}
+	if paused := <-changed; paused {
+		t.Fatal("resume callback did not report active state")
+	}
+}
+
+func TestLargeFollowerSchedulingUsesStableCadence(t *testing.T) {
+	if got := syncMouseMoveThrottle(2); got != 8*time.Millisecond {
+		t.Fatalf("small follower throttle=%v", got)
+	}
+	if got := syncMouseMoveThrottle(20); got != 32*time.Millisecond {
+		t.Fatalf("20 follower throttle=%v", got)
+	}
+	if got := syncPopupBoundsIntervalForFollowers(20); got != 75*time.Millisecond {
+		t.Fatalf("20 follower popup interval=%v", got)
+	}
+}
+
+func TestPauseGenerationDropsDelayedEventAfterResume(t *testing.T) {
+	s := NewInputSyncer()
+	atomic.StoreInt32(&s.active, 1)
+	s.SetRandomDelay(true, 40, 40)
+	fired := make(chan struct{}, 1)
+	s.dispatchWithRandomDelay(windows.HWND(1), func() { fired <- struct{}{} })
+	s.togglePausedFromEscape()
+	s.togglePausedFromEscape()
+	select {
+	case <-fired:
+		t.Fatal("event queued before Esc pause must not fire after resume")
+	case <-time.After(90 * time.Millisecond):
 	}
 }
 

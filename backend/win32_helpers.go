@@ -44,6 +44,7 @@ const (
 	VK_CONTROL = 0x11
 	VK_SHIFT   = 0x10
 	VK_MENU    = 0x12 // Alt
+	VK_ESCAPE  = 0x1B
 	VK_F1      = 0x70
 	VK_F2      = 0x71
 	VK_F3      = 0x72

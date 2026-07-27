@@ -13,10 +13,18 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const (
-	syncPopupBoundsInterval = 40 * time.Millisecond
-	syncPopupBoundsInset    = 2
-)
+const syncPopupBoundsInset = 2
+
+func syncPopupBoundsIntervalForFollowers(followerCount int) time.Duration {
+	switch {
+	case followerCount >= 20:
+		return 75 * time.Millisecond
+	case followerCount >= 8:
+		return 55 * time.Millisecond
+	default:
+		return 40 * time.Millisecond
+	}
+}
 
 type syncPopupOwnerWindow struct {
 	hwnd windows.HWND
@@ -82,7 +90,7 @@ func (s *InputSyncer) syncPopupBoundsLoop(stop <-chan struct{}) {
 			logger.New("InputSyncer").Error("sync popup bounds loop panic recovered", logger.F("error", recovered))
 		}
 	}()
-	ticker := time.NewTicker(syncPopupBoundsInterval)
+	ticker := time.NewTicker(syncPopupBoundsIntervalForFollowers(len(s.getFollowerSnapshot())))
 	defer ticker.Stop()
 
 	// Run once immediately. Toolbar menus can be opened before the first timer
@@ -99,7 +107,7 @@ func (s *InputSyncer) syncPopupBoundsLoop(stop <-chan struct{}) {
 }
 
 func (s *InputSyncer) constrainSyncPopupSurfaces() {
-	if s == nil || !s.IsActive() {
+	if s == nil || !s.IsActive() || s.IsPaused() {
 		return
 	}
 	mainWindows := append([]windows.HWND{s.masterHwnd}, s.getFollowerSnapshot()...)

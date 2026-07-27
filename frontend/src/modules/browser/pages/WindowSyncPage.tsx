@@ -139,7 +139,7 @@ export function WindowSyncPage() {
         }
       }
     }
-  }, [syncPanelMode])
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -177,6 +177,11 @@ export function WindowSyncPage() {
     const offUpdated = EventsOn('browser:instance:updated', () => {
       void loadProfiles({ silent: true })
     })
+    const offPauseChanged = EventsOn('window-sync:pause-changed', (payload: { paused?: boolean }) => {
+      const paused = payload?.paused === true
+      setSyncStatus(prev => prev ? { ...prev, paused } : prev)
+      if (!paused) toast.success('同步功能已恢复', 1000)
+    })
 
     window.addEventListener('focus', handleWindowFocus)
     document.addEventListener('visibilitychange', handleVisibilityChange)
@@ -188,6 +193,7 @@ export function WindowSyncPage() {
       offStarted?.()
       offStopped?.()
       offUpdated?.()
+      offPauseChanged?.()
     }
   }, [loadProfiles])
 
@@ -199,8 +205,9 @@ export function WindowSyncPage() {
     setDisplayLabel(`当前显示器（${width}x${height}）`)
   }, [])
 
-  const displayProfiles = useMemo(() => [...profiles].sort(compareProfileName), [profiles])
+  const displayProfiles = profiles
   const isSyncing = syncStatus?.active === true
+  const isSyncPaused = isSyncing && syncStatus?.paused === true
   const activeSyncIds = useMemo(
     () => [syncStatus?.masterId, ...(syncStatus?.followerIds || [])].filter(Boolean) as string[],
     [syncStatus?.followerIds, syncStatus?.masterId],
@@ -423,7 +430,7 @@ export function WindowSyncPage() {
       observer.disconnect()
       if (frame) window.cancelAnimationFrame(frame)
     }
-  }, [compactFunctionPanelMode, compactSyncStatusMode, syncControlsVisible, syncPanelMode, activeSyncCount, followerCount, statusLayoutLabel, masterProfile?.profileId, masterProfile?.profileName, syncStatus?.mouseEnabled, syncStatus?.keyEnabled, displayProfiles.length, selectedCount, masterId])
+  }, [compactFunctionPanelMode, compactSyncStatusMode, syncControlsVisible, syncPanelMode, activeSyncCount, followerCount, statusLayoutLabel, masterProfile?.profileId, masterProfile?.profileName, syncStatus?.mouseEnabled, syncStatus?.keyEnabled, syncStatus?.paused, displayProfiles.length, selectedCount, masterId])
 
   const toggleSelect = (id: string) => {
     if (isSyncing) return
@@ -558,7 +565,7 @@ export function WindowSyncPage() {
         <div className="flex h-9 w-9 shrink-0 cursor-move items-center justify-center" title="拖动同步工具" style={{ ['--wails-draggable' as any]: 'drag' }}>
           <span className="relative flex h-8 w-8 items-center justify-center rounded-[9px] bg-[#17263d] text-[14px] font-black text-white">
             B
-            <span className={`absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#f7f9fc] ${isSyncing ? 'bg-[#22c55e]' : 'bg-[#f59e0b]'}`} />
+            <span className={`absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#f7f9fc] ${isSyncPaused ? 'bg-[#f59e0b]' : isSyncing ? 'bg-[#22c55e]' : 'bg-[#f59e0b]'}`} />
           </span>
         </div>
         <button
@@ -571,7 +578,7 @@ export function WindowSyncPage() {
         >
           <span className="min-w-0 flex-1">
             <span className="block text-[11px] font-semibold leading-4">同步工具</span>
-            <span className="block truncate text-[8px] leading-3 text-[#738199]">{isSyncing ? `${activeSyncCount} 个同步中` : '点击展开'}</span>
+            <span className="block truncate text-[8px] leading-3 text-[#738199]">{isSyncPaused ? 'Esc 已暂停' : isSyncing ? `${activeSyncCount} 个同步中` : '点击展开'}</span>
           </span>
         </button>
       </div>
@@ -746,9 +753,9 @@ export function WindowSyncPage() {
             </div>
             <div className="min-w-0 flex-1">
               <div className="whitespace-normal break-words text-[15px] font-semibold leading-5 text-white">
-                {activeSyncCount} 个环境同步中
+                {isSyncPaused ? '同步已暂停' : `${activeSyncCount} 个环境同步中`}
               </div>
-              <div className="mt-0.5 text-[11px] text-white/72">主控 {masterProfile?.profileName || masterProfile?.profileId || '-'} · 跟随 {followerCount} · {statusLayoutLabel}</div>
+              <div className="mt-0.5 text-[11px] text-white/72">主控 {masterProfile?.profileName || masterProfile?.profileId || '-'} · 跟随 {followerCount} · {statusLayoutLabel} · Esc {isSyncPaused ? '恢复' : '暂停'}</div>
             </div>
             <button
               type="button"
@@ -838,9 +845,9 @@ export function WindowSyncPage() {
         <div className="fixed left-1/2 top-3 z-40 w-[min(820px,calc(100vw-20px))] -translate-x-1/2 rounded-[20px] bg-[#171a22]/95 px-3 py-3 text-white shadow-[0_24px_80px_rgba(0,0,0,0.35)] backdrop-blur">
           <div className="flex flex-wrap items-center gap-2.5">
             <div className="min-w-[160px] pr-2">
-              <div className="text-[11px] uppercase tracking-[0.16em] text-white/50">窗口同步中</div>
-              <div className="mt-1 text-base font-semibold text-green-400">
-                {activeSyncCount} 个环境同步中
+              <div className="text-[11px] uppercase tracking-[0.16em] text-white/50">{isSyncPaused ? '窗口同步已暂停' : '窗口同步中'}</div>
+              <div className={`mt-1 text-base font-semibold ${isSyncPaused ? 'text-amber-300' : 'text-green-400'}`}>
+                {isSyncPaused ? '按 Esc 恢复同步' : `${activeSyncCount} 个环境同步中`}
               </div>
               <div className="mt-1 truncate text-xs text-white/70">
                 主控 {masterProfile?.profileName || masterProfile?.profileId || '-'} · 跟随 {followerCount} · {statusLayoutLabel}
@@ -944,6 +951,11 @@ export function WindowSyncPage() {
             >
               <Columns className="h-4 w-4" />横排
             </button>
+
+            <div className="inline-flex h-9 items-center gap-2 rounded-xl border border-white/12 bg-white/10 px-3 text-xs text-white/80" title="同步开启期间全局生效">
+              <kbd className="rounded border border-white/25 bg-white/12 px-1.5 py-0.5 font-mono text-white">Esc</kbd>
+              {isSyncPaused ? '恢复同步' : '暂停同步'}
+            </div>
 
             <div className="ml-auto flex flex-wrap items-center gap-2 text-sm">
               <button type="button" className="inline-flex h-9 items-center rounded-xl bg-[#4b1620] px-3.5 text-sm font-medium text-[#ff9db0] hover:bg-[#5a1b27]" onClick={() => void handleStopSync()}>

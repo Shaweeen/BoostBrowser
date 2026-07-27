@@ -25,6 +25,7 @@ export interface SyncProfileInfo {
 
 export interface SyncStatus {
   active: boolean
+  paused: boolean
   masterId: string
   followerIds: string[]
   mouseEnabled: boolean
