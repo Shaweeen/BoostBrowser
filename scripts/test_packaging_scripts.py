@@ -157,6 +157,11 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("closeAutomaticExtensionStartupPages", startup_tabs)
         self.assertNotIn("closeRedundantBlankStartupPages", startup_tabs)
         self.assertIn("shouldCloseAutomaticExtensionStartupTarget", startup_tabs)
+        self.assertNotIn("Target.setDiscoverTargets", startup_tabs)
+        self.assertNotIn("automaticExtensionStartupGuardDuration", startup_tabs)
+        self.assertNotIn("automaticExtensionStartupGuards", startup_tabs)
+        self.assertNotIn("automaticExtensionStartupCleanupDelays", startup_tabs)
+        self.assertNotIn("time.AfterFunc", startup_tabs)
 
     def test_go_mod_does_not_replace_modules_with_missing_local_third_party_dirs(self):
         text = self.read("go.mod")

@@ -569,11 +569,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			)
 			enforceBrowserWindowBounds(profile.Pid, 1400, 600)
 
-			// 调试接口一就绪，仅移除扩展页面旁边多余的空白启动标签；用户安装扩展的
-			// onboarding、解锁、连接及授权页面全部保留。浏览器直接在正常屏幕位置启动，
-			// 不再遍历或恢复 Chromium 子进程的隐藏辅助 HWND。
-			finalizeBrowserStartupTabs(stableDebugPort, profile.Pid, profileId)
-
 			// 任务栏 badge 数字直接来自实例名字里的数字段：
 			//   名字 "1"        → badge 1
 			//   名字 "11"       → badge 11
@@ -625,6 +620,11 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			if len(targetURLs) > 0 {
 				navigateToTargetURLs(stableDebugPort, targetURLs, profileId, isCloakSelectedCore)
 			}
+
+			// 本次环境启动的准备步骤完成后只执行一次启动页收尾：关闭扩展自行打开的
+			// 顶层标签，保留 about:blank。函数返回时 CDP 连接已经释放；后续用户点击
+			// 扩展、浏览网页和执行同步均不存在后台监听或控制。
+			finalizeBrowserStartupTabs(stableDebugPort, profile.Pid, profileId)
 
 			// crashprobe: 临时停用实例启动后的 Turnstile 自动点击监控，继续收缩每实例后台
 			// CDP 监控/注入链路，验证是否仍会出现 watchdog exit_code=2。

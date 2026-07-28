@@ -142,6 +142,7 @@ func TestAutomaticExtensionStartupCleanupKeepsBlankAndWebPages(t *testing.T) {
 		{Type: "page", URL: "about:blank"},
 		{Type: "page", URL: "chrome://newtab/"},
 		{Type: "page", URL: "https://example.com/"},
+		{Type: "page", URL: "chrome-extension://wallet/popup.html", OpenerID: "user-opened-page"},
 		{Type: "service_worker", URL: "chrome-extension://wallet/background.js"},
 	} {
 		if shouldCloseAutomaticExtensionStartupTarget(target) {

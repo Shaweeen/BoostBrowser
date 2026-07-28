@@ -11,13 +11,11 @@ import (
 	"time"
 
 	"boost-browser/backend/internal/logger"
-
-	"github.com/gorilla/websocket"
 )
 
 // sanitizeChromeStartupPreferences selects one fixed blank startup page without
-// deleting session files or extension data. Extensions remain free to open their
-// own onboarding, unlock, connect and permission surfaces.
+// deleting session files or extension data. A separate one-shot startup cleanup
+// closes extension-created tabs once the environment debug endpoint is ready.
 func sanitizeChromeStartupPreferences(userDataDir string) {
 	if strings.TrimSpace(userDataDir) == "" {
 		return
@@ -146,17 +144,15 @@ func finalizeBrowserStartupTabs(debugPort int, pid int, profileId string) {
 	// Extensions remain installed and enabled, but their onboarding/unlock
 	// pages must not take over every environment at process startup. The
 	// explicit about:blank bootstrap tab remains as the only default page.
-	// This bounded startup cleanup never runs when the user later clicks an
-	// extension icon.
+	// This is deliberately a single startup sweep: the CDP connection is closed
+	// before this function returns, so normal browsing and later user extension
+	// clicks have no background observer or controller.
 	if closed := closeAutomaticExtensionStartupPages(debugPort); closed > 0 {
-		logger.New("Browser").Info("已关闭扩展自动启动页面", logger.F("profile_id", profileId), logger.F("count", closed))
+		logger.New("Browser").Info("已关闭扩展自动启动页面",
+			logger.F("profile_id", profileId),
+			logger.F("count", closed),
+		)
 	}
-	time.AfterFunc(1200*time.Millisecond, func() {
-		defer func() { _ = recover() }()
-		if closed := closeAutomaticExtensionStartupPages(debugPort); closed > 0 {
-			logger.New("Browser").Info("已关闭延迟出现的扩展自动启动页面", logger.F("profile_id", profileId), logger.F("count", closed))
-		}
-	})
 	// Browser windows are launched at their real onscreen position now.  Do not
 	// run the legacy restore pass here: it walks the whole Chromium process tree
 	// and calls ShowWindow/SetForegroundWindow for every titled top-level HWND.
@@ -177,31 +173,18 @@ func closeAutomaticExtensionStartupPages(debugPort int) int {
 	if err != nil {
 		return 0
 	}
-	browserConn, _, err := websocket.DefaultDialer.Dial(browserWsURL, nil)
+	browserClient, err := newRabbyCDPClient(browserWsURL)
 	if err != nil {
 		return 0
 	}
-	defer browserConn.Close()
-	browserConn.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
+	defer browserClient.close()
 
-	msgID := 3000
 	closed := 0
 	for _, target := range targets {
 		if target.ID == "" || !shouldCloseAutomaticExtensionStartupTarget(target) {
 			continue
 		}
-		msgID++
-		closeMsg := cdpMessage{
-			Id:     msgID,
-			Method: "Target.closeTarget",
-			Params: map[string]any{"targetId": target.ID},
-		}
-		if err := browserConn.WriteJSON(closeMsg); err != nil {
-			continue
-		}
-		var resp cdpResponse
-		_ = browserConn.ReadJSON(&resp)
-		if resp.Error == nil {
+		if _, err := browserClient.call("Target.closeTarget", map[string]any{"targetId": target.ID}, 1500*time.Millisecond); err == nil {
 			closed++
 		}
 	}
@@ -210,6 +193,7 @@ func closeAutomaticExtensionStartupPages(debugPort int) int {
 
 func shouldCloseAutomaticExtensionStartupTarget(target cdpTarget) bool {
 	return strings.EqualFold(strings.TrimSpace(target.Type), "page") &&
+		strings.TrimSpace(target.OpenerID) == "" &&
 		isExtensionStartupURL(target.URL)
 }
 
