@@ -508,7 +508,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	if len(removedWindowArgs) > 0 {
 		logManagedLaunchArgOverrides(log, profileId, "final.windowPlacement", removedWindowArgs)
 	}
-	args = append(args, "--window-size=1400,600")
 	// 不在启动参数中传入目标 URL，让浏览器先以 about:blank 启动。
 	// 等 CDP 就绪后先注入 stealth + UA override（确保 Sec-CH-UA 和 navigator.userAgentData
 	// 在目标页面首次请求前就正确），然后再通过 CDP Page.navigate 导航到目标 URL。

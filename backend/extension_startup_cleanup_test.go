@@ -128,20 +128,24 @@ func TestIsExtensionStartupURL(t *testing.T) {
 	}
 }
 
-func TestRedundantBlankCleanupPreservesExtensionAndWebPages(t *testing.T) {
-	if !shouldCloseRedundantBlankStartupTarget(cdpTarget{Type: "page", URL: "about:blank"}, true) {
-		t.Fatal("blank bootstrap tab should close when an extension page exists")
-	}
+func TestAutomaticExtensionStartupCleanupKeepsBlankAndWebPages(t *testing.T) {
 	for _, target := range []cdpTarget{
 		{Type: "page", URL: "chrome-extension://wallet/onboarding.html"},
+		{Type: "page", URL: "chrome-extension://wallet/unlock.html"},
+		{Type: "page", URL: "chrome://extensions/"},
+	} {
+		if !shouldCloseAutomaticExtensionStartupTarget(target) {
+			t.Fatalf("automatic extension startup page must close: %#v", target)
+		}
+	}
+	for _, target := range []cdpTarget{
+		{Type: "page", URL: "about:blank"},
+		{Type: "page", URL: "chrome://newtab/"},
 		{Type: "page", URL: "https://example.com/"},
 		{Type: "service_worker", URL: "chrome-extension://wallet/background.js"},
 	} {
-		if shouldCloseRedundantBlankStartupTarget(target, true) {
-			t.Fatalf("user extension/web target must be preserved: %#v", target)
+		if shouldCloseAutomaticExtensionStartupTarget(target) {
+			t.Fatalf("blank, web and extension background targets must remain: %#v", target)
 		}
-	}
-	if shouldCloseRedundantBlankStartupTarget(cdpTarget{Type: "page", URL: "about:blank"}, false) {
-		t.Fatal("the only blank startup tab must remain when no extension page exists")
 	}
 }

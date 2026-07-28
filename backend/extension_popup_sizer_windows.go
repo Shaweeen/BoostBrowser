@@ -13,11 +13,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const (
-	extensionPopupTargetWidth  = 390
-	extensionPopupTargetHeight = 620
-	swRestore                  = 9
-)
+const swRestore = 9
 
 type winRect struct {
 	Left   int32
@@ -41,10 +37,10 @@ func cancelBrowserWindowBoundsEnforcement(pid int) {
 	}
 }
 
-// enforceBrowserWindowBounds runs for a short bounded startup period. Chrome
-// can apply a persisted maximised show-state after parsing --window-size, so a
-// final SW_RESTORE + SetWindowPos is required to guarantee a normal 1400x600
-// top-level frame without introducing a permanent window watcher. Any explicit
+// enforceBrowserWindowBounds runs for a short bounded startup period. A final
+// SW_RESTORE + SetWindowPos gives only the initial top-level browser frame the
+// 1400x600 startup template without passing a process-wide --window-size flag
+// that Chrome could reuse for later extension windows. Any explicit
 // tile/stack/horizontal action cancels this startup-only template immediately.
 func enforceBrowserWindowBounds(pid, width, height int) {
 	if pid <= 0 || width <= 0 || height <= 0 {

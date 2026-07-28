@@ -142,6 +142,22 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("a.reconcileBrowserRuntimeStateOnce()", app_backend)
         self.assertNotIn("reconcileSyncRuntimeStateAsync", backend)
 
+    def test_startup_window_template_does_not_propagate_to_extension_popups(self):
+        launch = self.read("backend/app_instance.go")
+        startup_bounds = self.read("backend/extension_popup_sizer_windows.go")
+        popup_bounds = self.read("backend/sync_popup_confinement_windows.go")
+        startup_tabs = self.read("backend/extension_startup_cleanup.go")
+
+        self.assertNotIn('args = append(args, "--window-size=1400,600")', launch)
+        self.assertIn("enforceBrowserWindowBounds(profile.Pid, 1400, 600)", launch)
+        self.assertIn("startup-only template", startup_bounds)
+        self.assertNotIn("extensionPopupTargetWidth", popup_bounds)
+        self.assertNotIn("extensionPopupTargetHeight", popup_bounds)
+        self.assertIn("syncPopupConfinementEnabled(s.IsActive(), s.IsPaused()", popup_bounds)
+        self.assertIn("closeAutomaticExtensionStartupPages", startup_tabs)
+        self.assertNotIn("closeRedundantBlankStartupPages", startup_tabs)
+        self.assertIn("shouldCloseAutomaticExtensionStartupTarget", startup_tabs)
+
     def test_go_mod_does_not_replace_modules_with_missing_local_third_party_dirs(self):
         text = self.read("go.mod")
         self.assertNotRegex(text, r"replace\s+github\.com/energye/systray\s+=>\s+\./third_party/systray")

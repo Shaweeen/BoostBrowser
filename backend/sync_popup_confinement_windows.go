@@ -104,7 +104,12 @@ var syncPopupBoundsEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lP
 		return 1
 	}
 
-	x, y, width, height, shouldMove := constrainSyncPopupRectForTitle(title, popupRect, owner.rect, syncPopupBoundsInset)
+	// Chrome and the extension own the popup's natural content size. The sync
+	// assistant only keeps that surface inside its current environment cell.
+	// In particular, do not apply the browser startup template or a wallet-
+	// specific width/height here: those fixed sizes create blank canvas after
+	// the environment has been tiled, stacked, or arranged horizontally.
+	x, y, width, height, shouldMove := constrainSyncPopupRect(popupRect, owner.rect, syncPopupBoundsInset)
 	if !shouldMove {
 		return 1
 	}
@@ -119,63 +124,6 @@ var syncPopupBoundsEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lP
 	)
 	return 1
 })
-
-func constrainSyncPopupRectForTitle(title string, popup, owner winRect, inset int) (x, y, width, height int, changed bool) {
-	// Secondary surfaces never inherit the 1400x600 startup template and are
-	// never aspect-ratio scaled. Generic menus keep their natural size and are
-	// only clamped into the owner's current (possibly tiled) rectangle. Known
-	// wallet pages independently cap width/height to remove blank canvas while
-	// retaining a complete, scrollable application viewport.
-	x, y, width, height, changed = constrainSyncPopupRect(popup, owner, inset)
-	lowerTitle := strings.ToLower(strings.TrimSpace(title))
-	if !isCompactExtensionPopupTitle(lowerTitle) {
-		return
-	}
-
-	availableWidth := int(owner.Right-owner.Left) - inset*2
-	availableHeight := int(owner.Bottom-owner.Top) - inset*2
-	if availableWidth <= 0 || availableHeight <= 0 {
-		return
-	}
-	targetWidth := extensionPopupTargetWidth
-	targetHeight := extensionPopupTargetHeight
-	if targetWidth > availableWidth {
-		targetWidth = availableWidth
-	}
-	if targetHeight > availableHeight {
-		targetHeight = availableHeight
-	}
-	if width > targetWidth {
-		width = targetWidth
-		changed = true
-	}
-	if height > targetHeight {
-		height = targetHeight
-		changed = true
-	}
-
-	left := int(owner.Left) + inset
-	top := int(owner.Top) + inset
-	right := int(owner.Right) - inset
-	bottom := int(owner.Bottom) - inset
-	if x < left {
-		x = left
-		changed = true
-	}
-	if y < top {
-		y = top
-		changed = true
-	}
-	if x+width > right {
-		x = right - width
-		changed = true
-	}
-	if y+height > bottom {
-		y = bottom - height
-		changed = true
-	}
-	return
-}
 
 func (s *InputSyncer) syncPopupBoundsLoop(stop <-chan struct{}) {
 	defer func() {
@@ -199,8 +147,19 @@ func (s *InputSyncer) syncPopupBoundsLoop(stop <-chan struct{}) {
 	}
 }
 
+func syncPopupConfinementEnabled(active, paused bool, layoutUpdating int32) bool {
+	// `paused` intentionally does not disable geometry ownership. Pause controls
+	// input delivery only; popup containment lasts for the active sync session.
+	_ = paused
+	return active && layoutUpdating == 0
+}
+
 func (s *InputSyncer) constrainSyncPopupSurfaces() {
-	if s == nil || !s.IsActive() || s.IsPaused() || atomic.LoadInt32(&s.layoutUpdating) != 0 {
+	// Pausing input synchronization must not abandon popup geometry. Users can
+	// still open wallet prompts while paused, and those surfaces must remain
+	// inside the environment's current arranged rectangle. StopSync still ends
+	// this loop and releases all synchronization-owned resources.
+	if s == nil || !syncPopupConfinementEnabled(s.IsActive(), s.IsPaused(), atomic.LoadInt32(&s.layoutUpdating)) {
 		return
 	}
 	if !atomic.CompareAndSwapInt32(&s.popupUpdating, 0, 1) {

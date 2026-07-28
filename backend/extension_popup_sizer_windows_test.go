@@ -19,9 +19,8 @@ func TestExplicitLayoutCancelsStartupWindowTemplate(t *testing.T) {
 	}
 }
 
-func TestConstrainSyncWalletPopupUsesCompactResponsiveBounds(t *testing.T) {
-	x, y, width, height, changed := constrainSyncPopupRectForTitle(
-		"Rabby Wallet Notification",
+func TestSyncPopupUsesCurrentArrangedOwnerBounds(t *testing.T) {
+	x, y, width, height, changed := constrainSyncPopupRect(
 		winRect{Left: 20, Top: 20, Right: 1460, Bottom: 920},
 		winRect{Left: 0, Top: 0, Right: 820, Bottom: 560},
 		2,
@@ -29,26 +28,37 @@ func TestConstrainSyncWalletPopupUsesCompactResponsiveBounds(t *testing.T) {
 	if !changed {
 		t.Fatal("oversized wallet popup should be constrained")
 	}
-	if width != extensionPopupTargetWidth || height != 556 {
-		t.Fatalf("unexpected responsive popup size: %dx%d", width, height)
+	if width != 816 || height != 556 {
+		t.Fatalf("popup must adapt to the current arranged owner: %dx%d", width, height)
 	}
 	if x < 2 || y < 2 || x+width > 818 || y+height > 558 {
 		t.Fatalf("popup escaped owner bounds: x=%d y=%d width=%d height=%d", x, y, width, height)
 	}
 }
 
-func TestWalletPopupWidthAndHeightAreClampedIndependently(t *testing.T) {
-	_, _, width, height, changed := constrainSyncPopupRectForTitle(
-		"Rabby Wallet Notification",
-		winRect{Left: 20, Top: 20, Right: 1460, Bottom: 640},
+func TestSyncPopupPreservesExtensionNaturalSizeWhenItFits(t *testing.T) {
+	x, y, width, height, changed := constrainSyncPopupRect(
+		winRect{Left: 120, Top: 80, Right: 560, Bottom: 700},
 		winRect{Left: 0, Top: 0, Right: 1600, Bottom: 900},
 		2,
 	)
-	if !changed {
-		t.Fatal("wide wallet popup should remove unused horizontal canvas")
+	if changed {
+		t.Fatalf("an in-bounds popup must keep the extension's natural geometry: %d,%d %dx%d", x, y, width, height)
 	}
-	if width != extensionPopupTargetWidth || height != extensionPopupTargetHeight {
-		t.Fatalf("wallet popup must use content bounds without proportional scaling: %dx%d", width, height)
+	if x != 120 || y != 80 || width != 440 || height != 620 {
+		t.Fatalf("unexpected natural popup geometry: %d,%d %dx%d", x, y, width, height)
+	}
+}
+
+func TestPausedInputKeepsPopupConfinement(t *testing.T) {
+	if !syncPopupConfinementEnabled(true, true, 0) {
+		t.Fatal("pausing input must not disable popup containment")
+	}
+	if syncPopupConfinementEnabled(false, false, 0) {
+		t.Fatal("a stopped sync session must release popup containment")
+	}
+	if syncPopupConfinementEnabled(true, false, 1) {
+		t.Fatal("popup containment must yield while an explicit layout is updating")
 	}
 }
 

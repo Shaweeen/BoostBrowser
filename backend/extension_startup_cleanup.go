@@ -143,17 +143,18 @@ func finalizeBrowserStartupTabs(debugPort int, pid int, profileId string) {
 	if debugPort <= 0 {
 		return
 	}
-	// Extension onboarding, unlock, connect and permission pages belong to the
-	// user's installed software and must remain visible. Only remove the empty
-	// bootstrap tab when an extension page is already present, so tiled windows
-	// show the useful wallet interface without an extra about:blank tab.
-	if closed := closeRedundantBlankStartupPages(debugPort); closed > 0 {
-		logger.New("Browser").Info("已移除扩展页面旁的空白启动页", logger.F("profile_id", profileId), logger.F("count", closed))
+	// Extensions remain installed and enabled, but their onboarding/unlock
+	// pages must not take over every environment at process startup. The
+	// explicit about:blank bootstrap tab remains as the only default page.
+	// This bounded startup cleanup never runs when the user later clicks an
+	// extension icon.
+	if closed := closeAutomaticExtensionStartupPages(debugPort); closed > 0 {
+		logger.New("Browser").Info("已关闭扩展自动启动页面", logger.F("profile_id", profileId), logger.F("count", closed))
 	}
 	time.AfterFunc(1200*time.Millisecond, func() {
 		defer func() { _ = recover() }()
-		if closed := closeRedundantBlankStartupPages(debugPort); closed > 0 {
-			logger.New("Browser").Info("已移除延迟扩展页面旁的空白启动页", logger.F("profile_id", profileId), logger.F("count", closed))
+		if closed := closeAutomaticExtensionStartupPages(debugPort); closed > 0 {
+			logger.New("Browser").Info("已关闭延迟出现的扩展自动启动页面", logger.F("profile_id", profileId), logger.F("count", closed))
 		}
 	})
 	// Browser windows are launched at their real onscreen position now.  Do not
@@ -166,19 +167,9 @@ func finalizeBrowserStartupTabs(debugPort int, pid int, profileId string) {
 	_ = pid
 }
 
-func closeRedundantBlankStartupPages(debugPort int) int {
+func closeAutomaticExtensionStartupPages(debugPort int) int {
 	targets, err := listCDPTargets(debugPort)
 	if err != nil {
-		return 0
-	}
-	hasExtensionPage := false
-	for _, target := range targets {
-		if strings.EqualFold(strings.TrimSpace(target.Type), "page") && isExtensionStartupURL(target.URL) {
-			hasExtensionPage = true
-			break
-		}
-	}
-	if !hasExtensionPage {
 		return 0
 	}
 
@@ -196,7 +187,7 @@ func closeRedundantBlankStartupPages(debugPort int) int {
 	msgID := 3000
 	closed := 0
 	for _, target := range targets {
-		if target.ID == "" || !shouldCloseRedundantBlankStartupTarget(target, hasExtensionPage) {
+		if target.ID == "" || !shouldCloseAutomaticExtensionStartupTarget(target) {
 			continue
 		}
 		msgID++
@@ -217,16 +208,9 @@ func closeRedundantBlankStartupPages(debugPort int) int {
 	return closed
 }
 
-func shouldCloseRedundantBlankStartupTarget(target cdpTarget, hasExtensionPage bool) bool {
-	if !hasExtensionPage || !strings.EqualFold(strings.TrimSpace(target.Type), "page") {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(target.URL)) {
-	case "about:blank", "chrome://newtab/", "chrome://new-tab-page/":
-		return true
-	default:
-		return false
-	}
+func shouldCloseAutomaticExtensionStartupTarget(target cdpTarget) bool {
+	return strings.EqualFold(strings.TrimSpace(target.Type), "page") &&
+		isExtensionStartupURL(target.URL)
 }
 
 func listCDPTargets(debugPort int) ([]cdpTarget, error) {
