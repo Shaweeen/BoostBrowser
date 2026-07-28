@@ -123,6 +123,7 @@ type BrowserConfig struct {
 	StartStableWindowMs        int                    `yaml:"start_stable_window_ms,omitempty"`
 	CacheAutoCleanEnabled      bool                   `yaml:"cache_auto_clean_enabled,omitempty"`
 	CacheAutoCleanIntervalDays int                    `yaml:"cache_auto_clean_interval_days,omitempty"`
+	CacheCleanupPolicyVersion  int                    `yaml:"cache_cleanup_policy_version,omitempty"`
 	CacheLastCleanAt           string                 `yaml:"cache_last_clean_at,omitempty"`
 	DefaultBookmarks           []BrowserBookmark      `yaml:"default_bookmarks,omitempty"`
 	Cores                      []BrowserCore          `yaml:"cores,omitempty"`
@@ -354,7 +355,14 @@ func normalizeConfig(config *Config) {
 	if config.Browser.StartStableWindowMs <= 0 {
 		config.Browser.StartStableWindowMs = defaultConfig.Browser.StartStableWindowMs
 	}
-	if config.Browser.CacheAutoCleanIntervalDays <= 0 {
+	// Policy v1 replaces the legacy destructive cleaner with a conservative,
+	// cache-only weekly cleaner. Enable it once for upgraded installations;
+	// subsequent user choices are preserved because the policy version is saved.
+	if config.Browser.CacheCleanupPolicyVersion < 1 {
+		config.Browser.CacheAutoCleanEnabled = true
+		config.Browser.CacheAutoCleanIntervalDays = defaultConfig.Browser.CacheAutoCleanIntervalDays
+		config.Browser.CacheCleanupPolicyVersion = 1
+	} else if config.Browser.CacheAutoCleanIntervalDays <= 0 {
 		config.Browser.CacheAutoCleanIntervalDays = defaultConfig.Browser.CacheAutoCleanIntervalDays
 	}
 	if config.Browser.DefaultBookmarks == nil {
@@ -420,8 +428,9 @@ func DefaultConfig() *Config {
 			DefaultProxy:               "",
 			StartReadyTimeoutMs:        3000,
 			StartStableWindowMs:        450,
-			CacheAutoCleanEnabled:      false,
-			CacheAutoCleanIntervalDays: 30,
+			CacheAutoCleanEnabled:      true,
+			CacheAutoCleanIntervalDays: 7,
+			CacheCleanupPolicyVersion:  1,
 			CacheLastCleanAt:           "",
 		},
 		Logging: LoggingConfig{

@@ -19,7 +19,7 @@ func writeCacheCleanupTestFile(t *testing.T, path string) {
 	}
 }
 
-func TestBrowserCleanCacheRemovesOnlyWebCacheStorageAndCookies(t *testing.T) {
+func TestBrowserCleanCachePreservesLoginAndWalletData(t *testing.T) {
 	root := t.TempDir()
 	cfg := config.DefaultConfig()
 	cfg.Browser.UserDataRoot = "data"
@@ -41,14 +41,8 @@ func TestBrowserCleanCacheRemovesOnlyWebCacheStorageAndCookies(t *testing.T) {
 		filepath.Join(defaultRoot, "Cache", "Cache_Data", "img.cache"),
 		filepath.Join(defaultRoot, "Code Cache", "js", "app.cache"),
 		filepath.Join(defaultRoot, "GPUCache", "gpu.cache"),
-		filepath.Join(defaultRoot, "Service Worker", "CacheStorage", "worker.cache"),
-		filepath.Join(defaultRoot, "IndexedDB", "https_app_0.indexeddb.leveldb", "000003.log"),
-		filepath.Join(defaultRoot, "Local Storage", "leveldb", "000004.log"),
-		filepath.Join(defaultRoot, "Session Storage", "000005.log"),
-		filepath.Join(defaultRoot, "WebStorage", "QuotaManager"),
-		filepath.Join(defaultRoot, "Storage", "ext", "cache.bin"),
-		filepath.Join(defaultRoot, "Cookies"),
-		filepath.Join(defaultRoot, "Cookies-journal"),
+		filepath.Join(defaultRoot, "Media Cache", "video.cache"),
+		filepath.Join(defaultRoot, "Favicons"),
 	}
 	for _, path := range mustDelete {
 		writeCacheCleanupTestFile(t, path)
@@ -57,6 +51,15 @@ func TestBrowserCleanCacheRemovesOnlyWebCacheStorageAndCookies(t *testing.T) {
 		filepath.Join(defaultRoot, "Bookmarks"),
 		filepath.Join(defaultRoot, "Preferences"),
 		filepath.Join(defaultRoot, "History"),
+		filepath.Join(defaultRoot, "Cookies"),
+		filepath.Join(defaultRoot, "Network", "Cookies"),
+		filepath.Join(defaultRoot, "Service Worker", "CacheStorage", "worker.cache"),
+		filepath.Join(defaultRoot, "IndexedDB", "chrome-extension_wallet.indexeddb.leveldb", "000003.log"),
+		filepath.Join(defaultRoot, "Local Storage", "leveldb", "000004.log"),
+		filepath.Join(defaultRoot, "Session Storage", "000005.log"),
+		filepath.Join(defaultRoot, "WebStorage", "QuotaManager"),
+		filepath.Join(defaultRoot, "Storage", "ext", "wallet.bin"),
+		filepath.Join(defaultRoot, "Local Extension Settings", "wallet-id", "000006.log"),
 	}
 	for _, path := range mustKeep {
 		writeCacheCleanupTestFile(t, path)
@@ -86,8 +89,8 @@ func TestCacheAutoCleanRunsOnlyWhenEnabledAndDue(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Browser.UserDataRoot = "data"
 	cfg.Browser.CacheAutoCleanEnabled = true
-	cfg.Browser.CacheAutoCleanIntervalDays = 30
-	cfg.Browser.CacheLastCleanAt = time.Now().Add(-31 * 24 * time.Hour).Format(time.RFC3339)
+	cfg.Browser.CacheAutoCleanIntervalDays = 7
+	cfg.Browser.CacheLastCleanAt = time.Now().Add(-8 * 24 * time.Hour).Format(time.RFC3339)
 	app := NewApp(root)
 	app.config = cfg
 	app.browserMgr = browser.NewManager(cfg, root)
@@ -106,5 +109,38 @@ func TestCacheAutoCleanRunsOnlyWhenEnabledAndDue(t *testing.T) {
 	}
 	if cfg.Browser.CacheLastCleanAt == "" {
 		t.Fatal("expected last clean timestamp to be saved")
+	}
+}
+
+func TestBrowserCleanCacheNeverTouchesRunningProfile(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Browser.UserDataRoot = "data"
+	app := NewApp(root)
+	app.config = cfg
+	app.browserMgr = browser.NewManager(cfg, root)
+	app.browserMgr.Profiles = map[string]*browser.Profile{
+		"running": {
+			ProfileId:   "running",
+			ProfileName: "运行中",
+			UserDataDir: "running",
+			Running:     true,
+			Pid:         1234,
+		},
+	}
+	cacheFile := filepath.Join(root, "data", "running", "Default", "Cache", "Cache_Data", "img.cache")
+	writeCacheCleanupTestFile(t, cacheFile)
+
+	// The legacy includeRunning argument remains for API compatibility but is
+	// intentionally ignored by the safe cleaner.
+	res, err := app.BrowserCleanCache(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.SkippedRunning != 1 || res.FilesRemoved != 0 {
+		t.Fatalf("running profile was not protected: %+v", res)
+	}
+	if _, err := os.Stat(cacheFile); err != nil {
+		t.Fatalf("running profile cache was touched: %v", err)
 	}
 }

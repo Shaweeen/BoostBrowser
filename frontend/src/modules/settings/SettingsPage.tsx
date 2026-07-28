@@ -414,13 +414,13 @@ export function SettingsPage() {
         </div>
       </Card>
 
-      <Card title="缓存清理" subtitle="只清理网页/小程序 App 产生的缓存图片、Storage 和 Cookies，不删除环境配置">
+      <Card title="缓存清理" subtitle="只清理可再生的图片、Logo、视频、代码缓存和调试日志；保留账号与钱包数据">
         <div className="space-y-4">
           <div className="flex items-center justify-between gap-4">
             <div>
-              <p className="text-sm font-medium text-[var(--color-text-primary)]">每30天自动清理</p>
+              <p className="text-sm font-medium text-[var(--color-text-primary)]">每7天自动清理</p>
               <p className="text-xs text-[var(--color-text-muted)] mt-0.5">
-                固定周期 30 天；自动清理会跳过正在运行的浏览器环境，避免影响当前窗口。
+                固定周期 7 天；延迟到客户端稳定启动后执行，并跳过正在运行的浏览器环境。
               </p>
             </div>
             <Switch
@@ -429,10 +429,10 @@ export function SettingsPage() {
             />
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-[var(--color-text-muted)] rounded-lg border border-[var(--color-border-muted)] bg-[var(--color-bg-secondary)] p-3">
-            <div>清理周期：{settings.cacheAutoCleanIntervalDays || 30} 天</div>
+            <div>清理周期：{settings.cacheAutoCleanIntervalDays || 7} 天</div>
             <div>上次清理：{settings.cacheLastCleanAt ? new Date(settings.cacheLastCleanAt).toLocaleString('zh-CN') : '尚未清理'}</div>
-            <div>下次自动清理：{settings.cacheNextCleanAt ? new Date(settings.cacheNextCleanAt).toLocaleString('zh-CN') : '开启后按30天计算'}</div>
-            <div>范围：Cache / 图片缓存 / 小程序 Storage / Cookies</div>
+            <div>下次自动清理：{settings.cacheNextCleanAt ? new Date(settings.cacheNextCleanAt).toLocaleString('zh-CN') : '开启后按7天计算'}</div>
+            <div>保留：Cookies / 登录状态 / IndexedDB / Local Storage / 钱包扩展数据</div>
           </div>
         </div>
       </Card>

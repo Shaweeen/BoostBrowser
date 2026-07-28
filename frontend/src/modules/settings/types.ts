@@ -48,8 +48,8 @@ export const defaultSettings: AppSettings = {
   logLevel: 'info',
   maxMemoryMB: 1024,
   gcPercent: 100,
-  cacheAutoCleanEnabled: false,
-  cacheAutoCleanIntervalDays: 30,
+  cacheAutoCleanEnabled: true,
+  cacheAutoCleanIntervalDays: 7,
   cacheLastCleanAt: '',
   cacheNextCleanAt: '',
 }

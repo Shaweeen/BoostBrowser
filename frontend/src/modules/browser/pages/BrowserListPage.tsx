@@ -994,8 +994,8 @@ export function BrowserListPage() {
   const handleCleanCache = async () => {
     const running = profiles.filter(p => p.running).length
     const message = running > 0
-      ? `将清理已停止环境的网页图片缓存、小程序/网页 App 缓存和 Cookies；${running} 个运行中环境会跳过。是否继续？`
-      : '将清理所有环境的网页图片缓存、小程序/网页 App 缓存和 Cookies，不删除书签和配置。是否继续？'
+      ? `将清理已停止环境中可重新生成的图片、Logo、视频、代码缓存和调试日志；${running} 个运行中环境会跳过。Cookies、登录状态、钱包扩展数据、指纹和配置不会删除。是否继续？`
+      : '将清理所有环境中可重新生成的图片、Logo、视频、代码缓存和调试日志。Cookies、登录状态、钱包扩展数据、指纹、书签和配置不会删除。是否继续？'
     if (!confirm(message)) return
     setCleaningCache(true)
     try {
@@ -1252,7 +1252,7 @@ export function BrowserListPage() {
         <div className="flex gap-2">
           <Button variant="secondary" size="sm" onClick={() => setHeaderCollapsed(prev => !prev)}>{headerCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}{headerCollapsed ? '展开面板' : '收起面板'}</Button>
           <Button variant="secondary" size="sm" onClick={() => { void loadProfiles() }}><RefreshCw className="w-4 h-4" />刷新</Button>
-          <Button variant="secondary" size="sm" onClick={handleCleanCache} loading={cleaningCache} title="只清理网页图片缓存、小程序/网页 App 缓存和 Cookies；不删除配置/书签">
+          <Button variant="secondary" size="sm" onClick={handleCleanCache} loading={cleaningCache} title="只清理可再生缓存和调试日志；保留 Cookies、登录状态、钱包扩展数据、指纹和配置">
             <Trash2 className="w-4 h-4" />清理缓存
           </Button>
           <Button variant="secondary" size="sm" onClick={handleOpenExtensionModal} disabled={selectedIds.size === 0} title="先勾选环境，再输入扩展下载地址"><Download className="w-4 h-4" />导入扩展</Button>

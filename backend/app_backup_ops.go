@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"boost-browser/backend/internal/backup"
 	"boost-browser/backend/internal/browser"
+	"boost-browser/backend/internal/cachecleanup"
 	"boost-browser/backend/internal/config"
 	"boost-browser/backend/internal/logger"
 	"crypto/sha256"
@@ -567,7 +568,11 @@ func backupWritePackageZip(zipPath string, scope backup.Scope, manifest backup.M
 			}
 			entryAddedFiles := 0
 			if info.IsDir() {
-				n, err := backupZipAddDir(w, entry.SourcePath, entry.ArchivePath, zipPath)
+				var shouldSkip func(string) bool
+				if entry.Category == backup.CategoryAppData || entry.Category == backup.CategoryBrowserData {
+					shouldSkip = backupShouldSkipDisposableData
+				}
+				n, err := backupZipAddDir(w, entry.SourcePath, entry.ArchivePath, zipPath, shouldSkip)
 				if err != nil {
 					return fmt.Errorf("写入目录失败(%s): %w", entry.ID, err)
 				}
@@ -642,7 +647,7 @@ func backupResolveEntryComponentName(entry backup.ScopeEntry) string {
 	}
 }
 
-func backupZipAddDir(w *zip.Writer, srcDir, archiveBase, outputZipPath string) (int, error) {
+func backupZipAddDir(w *zip.Writer, srcDir, archiveBase, outputZipPath string, shouldSkip func(string) bool) (int, error) {
 	base := strings.TrimSuffix(filepath.ToSlash(strings.TrimSpace(archiveBase)), "/")
 	if base == "" {
 		return 0, fmt.Errorf("archive base 不能为空")
@@ -666,6 +671,12 @@ func backupZipAddDir(w *zip.Writer, srcDir, archiveBase, outputZipPath string) (
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
+		if shouldSkip != nil && shouldSkip(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		targetName := base + "/" + rel
 		if d.IsDir() {
 			_, err := w.Create(strings.TrimSuffix(targetName, "/") + "/")
@@ -1062,11 +1073,11 @@ func (a *App) backupImportFileTrees(payloadRoot string, incomingCfg *config.Conf
 		if resetFirst {
 			if err := backupRemoveContentsExcept(appDataDst, keepDB); err != nil {
 				report("app_data_root", "应用数据目录（含数据库、快照及默认浏览器数据）", err)
-			} else if err := backupSyncDir(appDataSrc, appDataDst, true, stats, backupShouldSkipAppDBFile); err != nil {
+			} else if err := backupSyncDir(appDataSrc, appDataDst, true, stats, backupShouldSkipAppDBAndDisposableData); err != nil {
 				report("app_data_root", "应用数据目录（含数据库、快照及默认浏览器数据）", err)
 			}
 		} else {
-			if err := backupSyncDir(appDataSrc, appDataDst, false, stats, backupShouldSkipAppDBFile); err != nil {
+			if err := backupSyncDir(appDataSrc, appDataDst, false, stats, backupShouldSkipAppDBAndDisposableData); err != nil {
 				report("app_data_root", "应用数据目录（含数据库、快照及默认浏览器数据）", err)
 			}
 		}
@@ -1079,11 +1090,11 @@ func (a *App) backupImportFileTrees(payloadRoot string, incomingCfg *config.Conf
 			_ = os.RemoveAll(userDataDst)
 			if err := os.MkdirAll(userDataDst, 0755); err != nil {
 				report("browser_user_data_root", "浏览器用户数据根目录（若与 data 重合则自动去重）", err)
-			} else if err := backupSyncDir(userDataSrc, userDataDst, true, stats, nil); err != nil {
+			} else if err := backupSyncDir(userDataSrc, userDataDst, true, stats, backupShouldSkipDisposableData); err != nil {
 				report("browser_user_data_root", "浏览器用户数据根目录（若与 data 重合则自动去重）", err)
 			}
 		} else {
-			if err := backupSyncDir(userDataSrc, userDataDst, false, stats, nil); err != nil {
+			if err := backupSyncDir(userDataSrc, userDataDst, false, stats, backupShouldSkipDisposableData); err != nil {
 				report("browser_user_data_root", "浏览器用户数据根目录（若与 data 重合则自动去重）", err)
 			}
 		}
@@ -1330,6 +1341,14 @@ func backupSHA256File(path string) (string, error) {
 func backupShouldSkipAppDBFile(rel string) bool {
 	r := strings.TrimSpace(filepath.ToSlash(rel))
 	return r == "app.db" || r == "app.db-wal" || r == "app.db-shm"
+}
+
+func backupShouldSkipDisposableData(rel string) bool {
+	return cachecleanup.IsDisposableRelativePath(rel)
+}
+
+func backupShouldSkipAppDBAndDisposableData(rel string) bool {
+	return backupShouldSkipAppDBFile(rel) || backupShouldSkipDisposableData(rel)
 }
 
 func backupRemoveContentsExcept(dir string, keep map[string]struct{}) error {

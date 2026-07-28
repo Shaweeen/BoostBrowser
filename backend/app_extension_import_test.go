@@ -148,6 +148,24 @@ func TestAppendGlobalExtensionArgsRunsOnlyForNewProfileCreation(t *testing.T) {
 	}
 }
 
+func TestAddExtensionDirRemovesAllExtensionBlockingArgs(t *testing.T) {
+	extDir := filepath.Join(t.TempDir(), "extensions", "wallet")
+	got := addExtensionDirToLaunchArgs([]string{
+		"--disable-extensions",
+		"--disable-extensions=except-component-extensions-with-background-pages",
+		"--disable-extensions-except=/old/extension",
+		"--no-first-run",
+	}, extDir)
+	if !hasExtensionDirInLaunchArgs(got, extDir) {
+		t.Fatalf("assigned extension missing from launch args: %#v", got)
+	}
+	for _, arg := range got {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(arg)), "--disable-extensions") {
+			t.Fatalf("extension blocking argument survived explicit assignment: %q", arg)
+		}
+	}
+}
+
 func TestPreserveAssignedExtensionArgsDuringProfileEdit(t *testing.T) {
 	root := t.TempDir()
 	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"

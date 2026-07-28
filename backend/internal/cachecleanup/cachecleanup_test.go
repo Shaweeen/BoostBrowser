@@ -16,21 +16,17 @@ func writeTestFile(t *testing.T, path string) {
 	}
 }
 
-func TestCleanProfileRootRemovesOnlyCacheStorageAndCookies(t *testing.T) {
+func TestCleanProfileRootRemovesOnlyRegenerableCache(t *testing.T) {
 	profileRoot := t.TempDir()
 	defaultRoot := filepath.Join(profileRoot, "Default")
 	mustDelete := []string{
 		filepath.Join(defaultRoot, "Cache", "Cache_Data", "img.cache"),
+		filepath.Join(defaultRoot, "Network", "Cache", "Cache_Data", "net.cache"),
 		filepath.Join(defaultRoot, "Code Cache", "js", "app.cache"),
 		filepath.Join(defaultRoot, "GPUCache", "gpu.cache"),
-		filepath.Join(defaultRoot, "Service Worker", "CacheStorage", "worker.cache"),
-		filepath.Join(defaultRoot, "IndexedDB", "https_app_0.indexeddb.leveldb", "000003.log"),
-		filepath.Join(defaultRoot, "Local Storage", "leveldb", "000004.log"),
-		filepath.Join(defaultRoot, "Session Storage", "000005.log"),
-		filepath.Join(defaultRoot, "WebStorage", "QuotaManager"),
-		filepath.Join(defaultRoot, "Storage", "ext", "cache.bin"),
-		filepath.Join(defaultRoot, "Cookies"),
-		filepath.Join(defaultRoot, "Cookies-journal"),
+		filepath.Join(defaultRoot, "Media Cache", "video.cache"),
+		filepath.Join(defaultRoot, "Favicons"),
+		filepath.Join(profileRoot, "chrome_debug.log"),
 	}
 	for _, path := range mustDelete {
 		writeTestFile(t, path)
@@ -39,6 +35,16 @@ func TestCleanProfileRootRemovesOnlyCacheStorageAndCookies(t *testing.T) {
 		filepath.Join(defaultRoot, "Bookmarks"),
 		filepath.Join(defaultRoot, "Preferences"),
 		filepath.Join(defaultRoot, "History"),
+		filepath.Join(defaultRoot, "Cookies"),
+		filepath.Join(defaultRoot, "Network", "Cookies"),
+		filepath.Join(defaultRoot, "Service Worker", "CacheStorage", "worker.cache"),
+		filepath.Join(defaultRoot, "IndexedDB", "chrome-extension_wallet.indexeddb.leveldb", "000003.log"),
+		filepath.Join(defaultRoot, "Local Storage", "leveldb", "000004.log"),
+		filepath.Join(defaultRoot, "Session Storage", "000005.log"),
+		filepath.Join(defaultRoot, "WebStorage", "QuotaManager"),
+		filepath.Join(defaultRoot, "Storage", "ext", "wallet.bin"),
+		filepath.Join(defaultRoot, "Local Extension Settings", "wallet-id", "000006.log"),
+		filepath.Join(defaultRoot, "Local Extension Settings", "wallet-id", "Cache", "state.bin"),
 	}
 	for _, path := range mustKeep {
 		writeTestFile(t, path)
@@ -59,6 +65,26 @@ func TestCleanProfileRootRemovesOnlyCacheStorageAndCookies(t *testing.T) {
 	for _, path := range mustKeep {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected kept: %s err=%v", path, err)
+		}
+	}
+}
+
+func TestIsDisposableRelativePathForBackupScope(t *testing.T) {
+	cases := map[string]bool{
+		"profile-1/Default/Cache/data/file":                         true,
+		"profile-1/Default/Network/Cache/data/file":                 true,
+		"profile-1/Default/Media Cache/video":                       true,
+		"profile-1/Default/Favicons":                                true,
+		"profile-1/Default/Cookies":                                 false,
+		"profile-1/Default/IndexedDB/wallet/000003.log":             false,
+		"profile-1/Default/Local Extension Settings/id/000003.log":  false,
+		"profile-1/Default/Local Extension Settings/id/Cache/state": false,
+		"profile-1/GPUCache/data":                                   true,
+		"profile-1/chrome_debug.log":                                true,
+	}
+	for path, want := range cases {
+		if got := IsDisposableRelativePath(path); got != want {
+			t.Fatalf("IsDisposableRelativePath(%q)=%v want %v", path, got, want)
 		}
 	}
 }

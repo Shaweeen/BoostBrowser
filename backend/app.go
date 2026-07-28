@@ -337,11 +337,10 @@ func (a *App) startup(ctx context.Context) {
 	} else {
 		a.lifecycleLog("runtime-reconcile", "state=skipped", "reason=no-live-runtime")
 	}
-	// Never run cache maintenance during the Wails startup window. The previous
-	// five-second goroutine overlapped profile/database initialisation and was the
-	// only startup task whose deadline exactly matched the observed exit_code=2
-	// restart loop. Cache cleanup remains available through the explicit UI/API.
-	a.lifecycleLog("cache-auto-clean", "state=deferred", "reason=startup-stability")
+	// Cache maintenance starts well after the Wails/profile/database startup
+	// window and only touches stopped environments.
+	a.lifecycleLog("cache-auto-clean", "state=scheduled", "initialDelay=2m", "pollInterval=6h")
+	a.startCacheAutoCleanScheduler()
 	// a.startBrowserRuntimeReconciler()
 	if a.panelMode {
 		a.lifecycleLog("sync-engine-owner", "mode=panel-process", "isolation=main-client")

@@ -3,13 +3,18 @@ package backend
 import (
 	"boost-browser/backend/internal/browser"
 	"boost-browser/backend/internal/cachecleanup"
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
-const cacheAutoCleanFixedIntervalDays = 30
+const (
+	cacheAutoCleanFixedIntervalDays = 7
+	cacheAutoCleanInitialDelay      = 2 * time.Minute
+	cacheAutoCleanPollInterval      = 6 * time.Hour
+)
 
 type CacheCleanResult struct {
 	ProfilesScanned int      `json:"profilesScanned"`
@@ -36,31 +41,45 @@ type CacheAutoCleanResult struct {
 	Result *CacheCleanResult `json:"result,omitempty"`
 }
 
-func (a *App) BrowserCleanCache(includeRunning bool) (*CacheCleanResult, error) {
+func (a *App) BrowserCleanCache(_ bool) (*CacheCleanResult, error) {
 	if a == nil || a.config == nil || a.browserMgr == nil {
 		return nil, fmt.Errorf("应用未完成初始化")
 	}
-	profiles := a.cacheCleanProfiles()
-	result := &CacheCleanResult{ProfilesScanned: len(profiles), CleanedProfiles: []string{}}
-	for _, profile := range profiles {
+
+	a.browserMgr.Mutex.Lock()
+	profileIDs := make([]string, 0, len(a.browserMgr.Profiles))
+	for profileID := range a.browserMgr.Profiles {
+		profileIDs = append(profileIDs, profileID)
+	}
+	a.browserMgr.Mutex.Unlock()
+
+	result := &CacheCleanResult{ProfilesScanned: len(profileIDs), CleanedProfiles: []string{}}
+	for _, profileID := range profileIDs {
+		// Hold the same state lock used by environment startup until this
+		// profile's cleanup is complete. A stopped profile therefore cannot
+		// transition to running between the state check and filesystem removal.
+		a.browserMgr.Mutex.Lock()
+		profile := a.browserMgr.Profiles[profileID]
 		if profile == nil {
+			a.browserMgr.Mutex.Unlock()
 			continue
 		}
-		if profile.Running && !includeRunning {
+		if profile.Running || profile.Pid > 0 {
 			result.SkippedRunning++
+			a.browserMgr.Mutex.Unlock()
 			continue
 		}
 		profileRoot := a.cacheCleanProfileRoot(profile)
 		if profileRoot == "" {
+			a.browserMgr.Mutex.Unlock()
 			continue
 		}
+		profileName := strings.TrimSpace(profile.ProfileName)
 		res, err := cachecleanup.CleanProfileRoot(profileRoot)
+		a.browserMgr.Mutex.Unlock()
 		if err != nil {
 			result.Errors++
 			continue
-		}
-		if profile.Running {
-			_ = a.BrowserClearCookies(profile.ProfileId)
 		}
 		result.FilesRemoved += res.FilesRemoved
 		result.DirsRemoved += res.DirsRemoved
@@ -68,10 +87,14 @@ func (a *App) BrowserCleanCache(includeRunning bool) (*CacheCleanResult, error) 
 		result.Errors += res.Errors
 		if res.FilesRemoved > 0 || res.DirsRemoved > 0 {
 			result.ProfilesCleaned++
-			result.CleanedProfiles = append(result.CleanedProfiles, strings.TrimSpace(profile.ProfileName))
+			result.CleanedProfiles = append(result.CleanedProfiles, profileName)
 		}
 	}
-	a.markCacheCleanedNow()
+	// If any environment was running, keep the cleanup due. The scheduler will
+	// retry later instead of postponing that environment for another full week.
+	if result.SkippedRunning == 0 {
+		a.markCacheCleanedNow()
+	}
 	result.Message = fmt.Sprintf("已扫描 %d 个环境，清理 %d 个环境，删除 %d 个文件，释放 %.1f MB", result.ProfilesScanned, result.ProfilesCleaned, result.FilesRemoved, float64(result.BytesRemoved)/1024/1024)
 	if result.SkippedRunning > 0 {
 		result.Message += fmt.Sprintf("；跳过 %d 个运行中的环境", result.SkippedRunning)
@@ -106,7 +129,7 @@ func (a *App) BrowserRunDueCacheAutoClean() (*CacheAutoCleanResult, error) {
 		return &CacheAutoCleanResult{Ran: false, Reason: "未开启自动清理"}, nil
 	}
 	if !a.cacheAutoCleanDue(time.Now()) {
-		return &CacheAutoCleanResult{Ran: false, Reason: "未到30天清理周期"}, nil
+		return &CacheAutoCleanResult{Ran: false, Reason: "未到7天清理周期"}, nil
 	}
 	res, err := a.BrowserCleanCache(false)
 	if err != nil {
@@ -116,22 +139,33 @@ func (a *App) BrowserRunDueCacheAutoClean() (*CacheAutoCleanResult, error) {
 }
 
 func (a *App) startCacheAutoCleanScheduler() {
-	go func() {
-		// Give startup/reconciliation a short moment; this is best-effort and skips
-		// running profiles, so it will not interrupt active browser windows.
-		time.Sleep(5 * time.Second)
-		_, _ = a.BrowserRunDueCacheAutoClean()
-	}()
-}
-
-func (a *App) cacheCleanProfiles() []*browser.Profile {
-	a.browserMgr.Mutex.Lock()
-	defer a.browserMgr.Mutex.Unlock()
-	profiles := make([]*browser.Profile, 0, len(a.browserMgr.Profiles))
-	for _, profile := range a.browserMgr.Profiles {
-		profiles = append(profiles, profile)
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return profiles
+	go func() {
+		// Do not overlap Wails/profile/database startup. Subsequent checks are
+		// inexpensive and cleanup itself only touches stopped environments.
+		timer := time.NewTimer(cacheAutoCleanInitialDelay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		_, _ = a.BrowserRunDueCacheAutoClean()
+
+		ticker := time.NewTicker(cacheAutoCleanPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_, _ = a.BrowserRunDueCacheAutoClean()
+			}
+		}
+	}()
 }
 
 func (a *App) cacheCleanProfileRoot(profile *browser.Profile) string {

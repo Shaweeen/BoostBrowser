@@ -1130,7 +1130,10 @@ func removeExtensionBlockingLaunchArgs(args []string) []string {
 	out := make([]string, 0, len(args))
 	for _, arg := range args {
 		trimmed := strings.TrimSpace(arg)
-		if strings.EqualFold(trimmed, "--disable-extensions") || strings.HasPrefix(strings.ToLower(trimmed), "--disable-extensions=") {
+		lower := strings.ToLower(trimmed)
+		if strings.EqualFold(trimmed, "--disable-extensions") ||
+			strings.HasPrefix(lower, "--disable-extensions=") ||
+			strings.HasPrefix(lower, "--disable-extensions-except=") {
 			continue
 		}
 		out = append(out, arg)
@@ -1205,7 +1208,8 @@ func (a *App) InstallExtensionFromCRXURL(profileID string, crxURL string) (strin
 }
 
 func addExtensionDirToLaunchArgs(args []string, extDir string) []string {
-	return normalizeLoadExtensionArgs(append(append([]string{}, args...), "--load-extension="+extDir))
+	args = removeExtensionBlockingLaunchArgs(append([]string{}, args...))
+	return normalizeLoadExtensionArgs(append(args, "--load-extension="+extDir))
 }
 
 func removeExtensionDirFromLaunchArgs(args []string, extDir string) ([]string, bool) {

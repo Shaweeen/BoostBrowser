@@ -84,7 +84,7 @@ export async function fetchSettings(): Promise<AppSettings> {
     settings = {
       ...settings,
       cacheAutoCleanEnabled: !!cache.autoCleanEnabled,
-      cacheAutoCleanIntervalDays: Number(cache.intervalDays) || 30,
+      cacheAutoCleanIntervalDays: Number(cache.intervalDays) || 7,
       cacheLastCleanAt: cache.lastCleanAt || '',
       cacheNextCleanAt: cache.nextCleanAt || '',
     }

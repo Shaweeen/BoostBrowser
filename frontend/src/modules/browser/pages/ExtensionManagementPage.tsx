@@ -155,27 +155,7 @@ export function ExtensionManagementPage() {
           .map(item => extensionAddressKey(item.downloadAddress)),
       )
 
-      // Migrate items saved by older clients. Previously “global use” was only
-      // localStorage metadata, so register each missing item with the backend.
-      const missing = loadExtensions().filter(item =>
-        item.platform === 'google' &&
-        item.distributionMode === 'global' &&
-        !applied.has(extensionAddressKey(item.downloadAddress)),
-      )
-      let migratedCount = 0
-      for (const item of missing) {
-        try {
-          await importGlobalExtension(item.downloadAddress)
-          applied.add(extensionAddressKey(item.downloadAddress))
-          migratedCount += 1
-        } catch (error: any) {
-          toast.error(`${item.name} 全局同步失败：${error?.message || '请检查扩展下载地址'}`)
-        }
-      }
       setAppliedGlobalAddresses(new Set(applied))
-      if (migratedCount > 0) {
-        toast.success('旧版全局扩展配置已同步到后端，重启运行中的浏览器后生效')
-      }
     }
     initialize().catch(() => {
       setProfiles([])
