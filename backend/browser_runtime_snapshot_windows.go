@@ -6,15 +6,19 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"golang.org/x/sys/windows"
 )
 
 type browserRuntimeSnapshotEntry struct {
-	ProfileID string `json:"profileId"`
-	PID       int    `json:"pid"`
-	DebugPort int    `json:"debugPort"`
+	ProfileID   string `json:"profileId"`
+	ProfileName string `json:"profileName"`
+	PID         int    `json:"pid"`
+	DebugPort   int    `json:"debugPort"`
+	HWND        int64  `json:"hwnd"`
+	WindowPID   int    `json:"windowPid"`
 }
 
 type browserRuntimeSnapshot struct {
@@ -32,17 +36,31 @@ func (a *App) persistBrowserRuntimeSnapshotLocked() {
 	if a == nil || a.panelMode || a.browserMgr == nil {
 		return
 	}
+	rootPIDs := make([]int, 0)
+	for _, profile := range a.browserMgr.Profiles {
+		if profile != nil && profile.Running && profile.Pid > 0 {
+			rootPIDs = append(rootPIDs, profile.Pid)
+		}
+	}
+	resolvedWindows := findProcessTreeWindows(rootPIDs)
 	snapshot := browserRuntimeSnapshot{UpdatedAt: time.Now(), Entries: make([]browserRuntimeSnapshotEntry, 0)}
 	for profileID, profile := range a.browserMgr.Profiles {
 		if profile == nil || !profile.Running || profile.Pid <= 0 {
 			continue
 		}
+		hwnd := resolvedWindows[profile.Pid]
 		snapshot.Entries = append(snapshot.Entries, browserRuntimeSnapshotEntry{
-			ProfileID: profileID,
-			PID:       profile.Pid,
-			DebugPort: profile.DebugPort,
+			ProfileID:   profileID,
+			ProfileName: profile.ProfileName,
+			PID:         profile.Pid,
+			DebugPort:   profile.DebugPort,
+			HWND:        int64(hwnd),
+			WindowPID:   int(windowPID(hwnd)),
 		})
 	}
+	sort.Slice(snapshot.Entries, func(i, j int) bool {
+		return snapshot.Entries[i].ProfileID < snapshot.Entries[j].ProfileID
+	})
 	data, err := json.Marshal(snapshot)
 	if err != nil {
 		return
@@ -61,75 +79,82 @@ func (a *App) persistBrowserRuntimeSnapshotLocked() {
 	}
 }
 
-// Apply the main client's shared state using only the cheap process-liveness
-// check. Window resolution is performed once, in parallel, by GetSyncProfiles.
-// Doing it here as well used to duplicate 12 expensive process-tree scans and
-// then block the response on a five-second CIM fallback when only one failed.
-func (a *App) applyBrowserRuntimeSnapshot() (int, int) {
-	if a == nil || a.browserMgr == nil {
-		return 0, 0
+func (a *App) readBrowserRuntimeSnapshot() (browserRuntimeSnapshot, bool) {
+	path := a.browserRuntimeSnapshotPath()
+	for attempt := 0; attempt < 3; attempt++ {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			var snapshot browserRuntimeSnapshot
+			if json.Unmarshal(data, &snapshot) == nil && time.Since(snapshot.UpdatedAt) <= 7*24*time.Hour {
+				return snapshot, true
+			}
+		}
+		if attempt < 2 {
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
-	data, err := os.ReadFile(a.browserRuntimeSnapshotPath())
-	if err != nil {
-		return 0, 0
-	}
-	var snapshot browserRuntimeSnapshot
-	if json.Unmarshal(data, &snapshot) != nil || time.Since(snapshot.UpdatedAt) > 7*24*time.Hour {
-		return 0, 0
-	}
+	return browserRuntimeSnapshot{}, false
+}
 
-	// A previous sync session may have reconciled a Chromium child or sibling
-	// process that remains alive after its top-level window has gone away.
-	// Process liveness alone is therefore not enough to preserve that local
-	// mapping. Resolve all local candidates in one Toolhelp/EnumWindows pass so
-	// an explicit refresh can replace stale mappings without per-profile scans.
-	localPIDs := make([]int, 0, len(snapshot.Entries))
+// PrepareWindowSyncRuntimeSnapshot is invoked by the main client immediately
+// before it launches the assistant. The main environment list is the sole
+// runtime owner; the assistant only consumes this snapshot.
+func (a *App) PrepareWindowSyncRuntimeSnapshot() int {
+	if a == nil || a.panelMode || a.browserMgr == nil {
+		return 0
+	}
 	a.browserMgr.Mutex.Lock()
-	for _, entry := range snapshot.Entries {
-		profile := a.browserMgr.Profiles[entry.ProfileID]
-		if localRuntimeCandidate(profile, entry) {
-			localPIDs = append(localPIDs, profile.Pid)
+	a.persistBrowserRuntimeSnapshotLocked()
+	count := 0
+	for _, profile := range a.browserMgr.Profiles {
+		if profile != nil && profile.Running && profile.Pid > 0 {
+			count++
 		}
 	}
 	a.browserMgr.Mutex.Unlock()
-	localWindows := findProcessTreeWindows(localPIDs)
+	return count
+}
 
+func (a *App) applyBrowserRuntimeSnapshotData(snapshot browserRuntimeSnapshot) (int, int) {
+	if a == nil || a.browserMgr == nil {
+		return 0, 0
+	}
 	live := 0
 	a.browserMgr.Mutex.Lock()
 	defer a.browserMgr.Mutex.Unlock()
+	// The panel's browser manager is only a configuration reader. Clear every
+	// process-local runtime value before applying the main client's current
+	// list so an older panel scan can never override a later Start/Stop state.
+	for _, profile := range a.browserMgr.Profiles {
+		if profile == nil {
+			continue
+		}
+		profile.Running = false
+		profile.Pid = 0
+		profile.DebugPort = 0
+		profile.DebugReady = false
+	}
 	for _, entry := range snapshot.Entries {
 		profile := a.browserMgr.Profiles[entry.ProfileID]
 		if profile == nil || entry.PID <= 0 || !isProcessAlive(entry.PID) {
 			continue
 		}
-		// The independent sync assistant can reconcile Chrome's real browser
-		// process after the launcher hands its top-level frame to a sibling.
-		// Do not let a still-alive but stale launcher PID from the main-client
-		// snapshot overwrite that locally confirmed runtime on an explicit
-		// refresh. A dead/windowless local runtime can still be recovered from
-		// the shared snapshot as before.
-		if keepLocalRuntimeInsteadOfSnapshot(profile, entry, localWindows[profile.Pid]) {
-			live++
-			continue
-		}
 		profile.Running = true
 		profile.Pid = entry.PID
 		profile.DebugPort = entry.DebugPort
-		// Input synchronization only needs HWND/PID. Do not serially dial every
-		// CDP port on the critical list-loading path.
 		profile.DebugReady = entry.DebugPort > 0
 		live++
 	}
 	return live, len(snapshot.Entries)
 }
 
-func localRuntimeCandidate(profile *BrowserProfile, entry browserRuntimeSnapshotEntry) bool {
-	if profile == nil || !profile.Running || profile.Pid <= 0 || profile.Pid == entry.PID {
-		return false
+func validRuntimeSnapshotWindow(entry browserRuntimeSnapshotEntry) windows.HWND {
+	hwnd := windows.HWND(entry.HWND)
+	if hwnd == 0 || !isWindow(hwnd) {
+		return 0
 	}
-	return isProcessAlive(profile.Pid)
-}
-
-func keepLocalRuntimeInsteadOfSnapshot(profile *BrowserProfile, entry browserRuntimeSnapshotEntry, localWindow windows.HWND) bool {
-	return localRuntimeCandidate(profile, entry) && localWindow != 0
+	if entry.WindowPID > 0 && int(windowPID(hwnd)) != entry.WindowPID {
+		return 0
+	}
+	return hwnd
 }

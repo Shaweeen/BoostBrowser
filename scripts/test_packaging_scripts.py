@@ -122,6 +122,9 @@ class PackagingScriptsTest(unittest.TestCase):
     def test_sync_window_collection_is_action_driven(self):
         page = self.read("frontend/src/modules/browser/pages/WindowSyncPage.tsx")
         backend = self.read("backend/app_sync_api.go")
+        app_backend = self.read("backend/app.go")
+        runtime_snapshot = self.read("backend/browser_runtime_snapshot_windows.go")
+        main_helpers = self.read("main_runtime_helpers.go")
         self.assertNotIn("setInterval(() =>", page)
         self.assertNotIn("browser:instance:started", page)
         self.assertNotIn("browser:instance:stopped", page)
@@ -131,7 +134,12 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("if (loadProfilesPromiseRef.current) return loadProfilesPromiseRef.current", page)
         self.assertNotIn("const freshProfiles = await loadProfiles()", page)
         self.assertIn("func (a *App) GetSyncSnapshot() SyncSnapshot", backend)
-        self.assertIn("a.reconcileBrowserRuntimeStateOnce()", backend)
+        self.assertNotIn("a.reconcileBrowserRuntimeStateOnce()", backend)
+        self.assertIn("a.readBrowserRuntimeSnapshot()", backend)
+        self.assertIn("func (a *App) PrepareWindowSyncRuntimeSnapshot()", runtime_snapshot)
+        self.assertIn("a.App.PrepareWindowSyncRuntimeSnapshot()", main_helpers)
+        self.assertIn("if !a.panelMode {", app_backend)
+        self.assertIn("a.reconcileBrowserRuntimeStateOnce()", app_backend)
         self.assertNotIn("reconcileSyncRuntimeStateAsync", backend)
 
     def test_go_mod_does_not_replace_modules_with_missing_local_third_party_dirs(self):

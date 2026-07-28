@@ -62,6 +62,7 @@ func (a *App) SaveNativeMainWindowBounds(bounds MainWindowBounds) bool {
 // OpenWindowSyncPanel launches a second process in the lightweight sync-panel
 // mode. Single-instance handling keeps only one panel alive.
 func (a *App) OpenWindowSyncPanel() error {
+	a.App.PrepareWindowSyncRuntimeSnapshot()
 	exePath, err := os.Executable()
 	if err != nil {
 		return err

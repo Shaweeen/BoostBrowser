@@ -374,18 +374,33 @@ func TestMainProcessPersistsBrowserRuntimeSnapshot(t *testing.T) {
 	}
 }
 
-func TestRuntimeSnapshotKeepsLocallyReconciledLivePID(t *testing.T) {
+func TestPanelSnapshotReplacesProcessLocalRuntimeWithMainClientState(t *testing.T) {
 	currentPID := os.Getpid()
-	profile := &BrowserProfile{Running: true, Pid: currentPID, DebugPort: 32123}
-	stale := browserRuntimeSnapshotEntry{ProfileID: "profile-1", PID: currentPID + 100000, DebugPort: 32124}
-	if !keepLocalRuntimeInsteadOfSnapshot(profile, stale, windows.HWND(1)) {
-		t.Fatal("a live locally reconciled PID must not be overwritten by a stale shared snapshot")
+	root := t.TempDir()
+	app := NewApp(root, true)
+	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
+	app.browserMgr.Profiles["profile-1"] = &browser.Profile{
+		ProfileId: "profile-1",
+		Running:   true,
+		Pid:       currentPID + 100000,
+		DebugPort: 32124,
 	}
-	if keepLocalRuntimeInsteadOfSnapshot(profile, stale, 0) {
-		t.Fatal("a live process without a top-level window must yield to the shared snapshot")
+	snapshot := browserRuntimeSnapshot{Entries: []browserRuntimeSnapshotEntry{{
+		ProfileID: "profile-1",
+		PID:       currentPID,
+		DebugPort: 32123,
+	}}}
+	live, total := app.applyBrowserRuntimeSnapshotData(snapshot)
+	if live != 1 || total != 1 {
+		t.Fatalf("unexpected snapshot counts: live=%d total=%d", live, total)
 	}
-	stale.PID = currentPID
-	if keepLocalRuntimeInsteadOfSnapshot(profile, stale, windows.HWND(1)) {
-		t.Fatal("the same PID should accept current shared snapshot metadata")
+	profile := app.browserMgr.Profiles["profile-1"]
+	if profile.Pid != currentPID || profile.DebugPort != 32123 || !profile.Running {
+		t.Fatalf("panel did not inherit main-client runtime: %+v", profile)
+	}
+
+	app.applyBrowserRuntimeSnapshotData(browserRuntimeSnapshot{})
+	if profile.Running || profile.Pid != 0 || profile.DebugPort != 0 {
+		t.Fatalf("an empty main-client snapshot must clear panel runtime state: %+v", profile)
 	}
 }

@@ -66,8 +66,7 @@ func (a *App) GetSyncSnapshot() SyncSnapshot {
 
 // GetSyncProfiles 获取所有可用于同步的实例列表
 func (a *App) GetSyncProfiles() []SyncProfileInfo {
-	// 同步面板直接读取共享状态并接管存活窗口，因此主客户端崩溃或
-	// watchdog 重启不会让同步面板失联退出。
+	// 同步面板只读取主客户端发布的环境运行状态。
 	// Serialize collection with Start/Stop so a fast refresh can never rebuild
 	// window data while the previous session is still releasing hooks/workers.
 	syncSessionMu.Lock()
@@ -76,12 +75,15 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 }
 
 func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
-	// Window discovery is deliberately action-driven. The sync assistant calls
-	// this API only for initial load and explicit user actions (refresh, select
-	// all, choose master). Reconcile once here so a closed/restarted Chromium
-	// process cannot leave a stale PID or HWND in the next configuration.
-	_, _ = a.applyBrowserRuntimeSnapshot()
-	a.reconcileBrowserRuntimeStateOnce()
+	// The main client's environment list is authoritative. The panel never runs
+	// its own process discovery or runtime reconciliation because that creates a
+	// second state owner which can replace valid PIDs with unrelated Chrome
+	// child processes. Refresh only reloads the latest main-client snapshot.
+	runtimeSnapshot, snapshotOK := a.readBrowserRuntimeSnapshot()
+	if !snapshotOK {
+		runtimeSnapshot = browserRuntimeSnapshot{}
+	}
+	a.applyBrowserRuntimeSnapshotData(runtimeSnapshot)
 	// NOTE: 不要在这里加 browserMgr.Mutex 锁！List() 内部会自行加锁，
 	// 如果外层再锁一次会导致死锁（Go sync.Mutex 不可重入）。
 	profiles := a.browserMgr.List()
@@ -98,7 +100,11 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 		candidates = append(candidates, p)
 	}
 
+	snapshotEntries := make(map[string]browserRuntimeSnapshotEntry, len(runtimeSnapshot.Entries))
 	rootPIDs := make([]int, 0, len(candidates))
+	for _, entry := range runtimeSnapshot.Entries {
+		snapshotEntries[entry.ProfileID] = entry
+	}
 	for _, profile := range candidates {
 		if profile.Pid > 0 {
 			rootPIDs = append(rootPIDs, profile.Pid)
@@ -108,7 +114,11 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 	result := make([]SyncProfileInfo, len(candidates))
 	for i, p := range candidates {
 		info := SyncProfileInfo{ProfileId: p.ProfileId, ProfileName: p.ProfileName, Pid: p.Pid, DebugPort: p.DebugPort, Running: p.Running, BadgeNumber: extractBadgeNumberFromName(p.ProfileName)}
-		if hwnd := resolvedWindows[p.Pid]; hwnd != 0 {
+		hwnd := validRuntimeSnapshotWindow(snapshotEntries[p.ProfileId])
+		if hwnd == 0 {
+			hwnd = resolvedWindows[p.Pid]
+		}
+		if hwnd != 0 {
 			info.Hwnd = int64(hwnd)
 			info.Status = "running"
 		} else {
@@ -137,8 +147,15 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	// Start is a transaction boundary: discard assumptions from earlier UI
 	// scans and obtain the current process/window ownership before validating
 	// the requested master and followers.
-	_, _ = a.applyBrowserRuntimeSnapshot()
-	a.reconcileBrowserRuntimeStateOnce()
+	runtimeSnapshot, snapshotOK := a.readBrowserRuntimeSnapshot()
+	if !snapshotOK {
+		return fmt.Errorf("无法读取主客户端的运行环境状态，请返回主客户端后重新打开同步助手")
+	}
+	a.applyBrowserRuntimeSnapshotData(runtimeSnapshot)
+	snapshotEntries := make(map[string]browserRuntimeSnapshotEntry, len(runtimeSnapshot.Entries))
+	for _, entry := range runtimeSnapshot.Entries {
+		snapshotEntries[entry.ProfileID] = entry
+	}
 
 	masterProfileId = strings.TrimSpace(masterProfileId)
 	if masterProfileId == "" {
@@ -200,13 +217,20 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 		rootPIDs = append(rootPIDs, candidate.profile.Pid)
 	}
 	resolvedWindows := findProcessTreeWindows(rootPIDs)
-	masterHwnd := resolvedWindows[masterSnapshot.Pid]
+	masterHwnd := validRuntimeSnapshotWindow(snapshotEntries[masterProfileId])
+	if masterHwnd == 0 {
+		masterHwnd = resolvedWindows[masterSnapshot.Pid]
+	}
 	if masterHwnd == 0 {
 		return fmt.Errorf("未找到主控实例窗口")
 	}
 	resolved := make([]followerWindow, len(followers))
 	for i, candidate := range followers {
-		resolved[i] = followerWindow{hwnd: resolvedWindows[candidate.profile.Pid], debugPort: candidate.profile.DebugPort}
+		hwnd := validRuntimeSnapshotWindow(snapshotEntries[candidate.id])
+		if hwnd == 0 {
+			hwnd = resolvedWindows[candidate.profile.Pid]
+		}
+		resolved[i] = followerWindow{hwnd: hwnd, debugPort: candidate.profile.DebugPort}
 	}
 
 	var followerHwnds []windows.HWND

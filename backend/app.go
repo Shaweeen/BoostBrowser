@@ -322,7 +322,7 @@ func (a *App) startup(ctx context.Context) {
 			break
 		}
 	}
-	if hasRuntimeToRecover {
+	if !a.panelMode && hasRuntimeToRecover {
 		a.lifecycleLog("runtime-reconcile", "state=scheduled")
 		go func() {
 			defer func() {
@@ -334,6 +334,8 @@ func (a *App) startup(ctx context.Context) {
 			a.reconcileBrowserRuntimeStateOnce()
 			a.lifecycleLog("runtime-reconcile", "state=completed")
 		}()
+	} else if a.panelMode {
+		a.lifecycleLog("runtime-reconcile", "state=skipped", "reason=panel-consumes-main-client-snapshot")
 	} else {
 		a.lifecycleLog("runtime-reconcile", "state=skipped", "reason=no-live-runtime")
 	}
@@ -650,7 +652,9 @@ type BrowserCoreExtendedInfo = browser.CoreExtendedInfo
 
 // BrowserProfileList 获取所有实例列表
 func (a *App) BrowserProfileList() []BrowserProfile {
-	a.reconcileBrowserRuntimeStateOnce()
+	if !a.panelMode {
+		a.reconcileBrowserRuntimeStateOnce()
+	}
 	return a.browserMgr.List()
 }
 

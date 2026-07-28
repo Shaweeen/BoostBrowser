@@ -104,6 +104,9 @@ func (a *App) reconcileBrowserRuntimeStateOnce() {
 
 	a.browserMgr.Mutex.Lock()
 	defer func() {
+		if len(updates) > 0 {
+			a.persistBrowserRuntimeSnapshotLocked()
+		}
 		a.browserMgr.Mutex.Unlock()
 		for _, item := range updates {
 			if item.profile != nil {
