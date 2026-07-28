@@ -671,7 +671,12 @@ func (a *App) BrowserProfileSetKeywords(profileId string, keywords []string) (*B
 }
 
 func (a *App) BrowserProfileCreate(input BrowserProfileInput) (*BrowserProfile, error) {
-	return a.browserMgr.Create(input)
+	input.LaunchArgs = a.appendGlobalExtensionArgsForNewProfile(input.LaunchArgs)
+	profile, err := a.browserMgr.Create(input)
+	if err == nil && profile != nil && len(activeLoadExtensionDirs(profile.LaunchArgs)) > 0 {
+		enableExtensionDeveloperMode(a.browserMgr.ResolveUserDataDir(profile))
+	}
+	return profile, err
 }
 
 // BrowserProfileBatchCreate 批量创建实例配置
@@ -754,6 +759,7 @@ func (a *App) BrowserProfileBatchCreate(prefix string, startIndex int, count int
 		name := fmt.Sprintf("%s-%d", prefix, startIndex+i)
 		profileInput := input
 		profileInput.ProfileName = name
+		profileInput.LaunchArgs = a.appendGlobalExtensionArgsForNewProfile(profileInput.LaunchArgs)
 		// 每个实例独立分配种子，由 Create 内部检测「无 --fingerprint=」时随机生成
 		profileInput.FingerprintArgs = append([]string{}, baseFingerprint...)
 		p, err := a.browserMgr.Create(profileInput)
@@ -762,6 +768,9 @@ func (a *App) BrowserProfileBatchCreate(prefix string, startIndex int, count int
 			return created, fmt.Errorf("第 %d 个实例创建失败: %w", i+1, err)
 		}
 		created = append(created, p)
+		if len(activeLoadExtensionDirs(p.LaunchArgs)) > 0 {
+			enableExtensionDeveloperMode(a.browserMgr.ResolveUserDataDir(p))
+		}
 	}
 	return created, nil
 }
@@ -772,6 +781,12 @@ func (a *App) BrowserProfileRandomizeFingerprint(profileId string) (*BrowserProf
 }
 
 func (a *App) BrowserProfileUpdate(profileId string, input BrowserProfileInput) (*BrowserProfile, error) {
+	for _, profile := range a.browserMgr.List() {
+		if profile.ProfileId == profileId {
+			input.LaunchArgs = preserveAssignedExtensionArgs(profile.LaunchArgs, input.LaunchArgs)
+			break
+		}
+	}
 	return a.browserMgr.Update(profileId, input)
 }
 

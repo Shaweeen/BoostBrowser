@@ -79,7 +79,12 @@ $retiredSymbols = @(
     'StartGlobalExtensionPopupSizer',
     'StartGlobalServiceWorkerDevToolsRestorer',
     'restoreBrowserWindowsAfterStartup',
-    'startExtensionPopupSizer'
+    'startExtensionPopupSizer',
+    'appendManagedExtensionLaunchArgs',
+    'cleanupStaleManagedUnpackedExtensions',
+    'cleanupRemovedManagedExtension',
+    'pinAllLoadedExtensionsToToolbar',
+    'coreSupportsManagedUnpackedExtensions'
 )
 $retiredPattern = ($retiredSymbols | ForEach-Object { [Regex]::Escape($_) }) -join '|'
 $savedPreference = $ErrorActionPreference

@@ -427,10 +427,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	args = append(args, effectiveFingerprintArgs...)
 	args = append(args, sanitizedProfileLaunchArgs...)
 	args = append(args, sanitizedExtraLaunchArgs...)
-	// Global extensions are backend policies, not profile-local UI metadata.
-	// Re-inject them on every launch so newly-created and previously missed
-	// profiles automatically receive the same extension set.
-	args = a.appendGlobalExtensionLaunchArgs(args)
 	args = appendChromeTestingInfobarSuppressArg(args, isCloakSelectedCore)
 
 	// cloak 路径下额外剥掉几个会暴露 chromium 身份的 launch arg：
@@ -506,13 +502,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
-	args, rejectedExtensions := filterInvalidLoadExtensionArgs(args)
-	if len(rejectedExtensions) > 0 {
-		log.Warn("已隔离损坏或不完整的解包扩展，避免浏览器扩展进程崩溃",
-			logger.F("profile_id", profileId),
-			logger.F("extensions", strings.Join(rejectedExtensions, " | ")),
-		)
-	}
 	// Final authoritative placement pass: fingerprint/profile/API arguments are
 	// already appended, so stale sizes and maximised/fullscreen flags cannot win.
 	args, removedWindowArgs := sanitizeManagedWindowPlacementArgs(args)
@@ -520,9 +509,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		logManagedLaunchArgOverrides(log, profileId, "final.windowPlacement", removedWindowArgs)
 	}
 	args = append(args, "--window-size=1400,600")
-	// 清理 profile 中旧的 unpacked 扩展记录，避免同一个钱包/Header Fix 因旧路径残留显示两份。
-	cleanupStaleManagedUnpackedExtensions(userDataDir, args, a.appRoot)
-	pinAllLoadedExtensionsToToolbar(userDataDir, args)
 	// 不在启动参数中传入目标 URL，让浏览器先以 about:blank 启动。
 	// 等 CDP 就绪后先注入 stealth + UA override（确保 Sec-CH-UA 和 navigator.userAgentData
 	// 在目标页面首次请求前就正确），然后再通过 CDP Page.navigate 导航到目标 URL。
@@ -552,7 +538,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	// Register the live process before waiting for DevTools. This is the key
 	// boundary for multi-instance startup: profile preparation and process
 	// creation remain serialized, while the slow debug-port readiness window and
-	// extension cleanup can overlap across different environments.
+	// independent browser readiness waits can overlap across environments.
 	a.markProfileRunningLocked(profileId, profile, cmd, cmd.Process.Pid, assignedDebugPort, false, "浏览器正在启动并等待调试接口")
 	if acquiredXrayBridgeKey != "" {
 		a.bindProfileXrayBridge(profileId, acquiredXrayBridgeKey)

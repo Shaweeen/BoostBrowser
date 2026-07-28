@@ -46,9 +46,24 @@ type globalExtensionRegistryEntry struct {
 	ExtensionID     string `json:"extensionId"`
 }
 
+// profileExtensionRegistry is the backend-authoritative manual assignment map.
+// Do not rely only on Profile.LaunchArgs: profile editing, legacy recovery and
+// migrations legitimately replace that slice. The registry lets every launch
+// reconstruct the current extension arguments from stable profile IDs.
+type profileExtensionRegistry struct {
+	Extensions []profileExtensionRegistryEntry `json:"extensions"`
+}
+
+type profileExtensionRegistryEntry struct {
+	DownloadAddress string   `json:"downloadAddress"`
+	ExtensionID     string   `json:"extensionId"`
+	ProfileIDs      []string `json:"profileIds"`
+}
+
 const (
-	globalExtensionRegistryFilename = "global-extensions.json"
-	managedExtensionChromeVersion   = "148.0.7778.167"
+	globalExtensionRegistryFilename  = "global-extensions.json"
+	profileExtensionRegistryFilename = "profile-extensions.json"
+	managedExtensionChromeVersion    = "148.0.7778.167"
 )
 
 var chromeWebStoreIDPattern = regexp.MustCompile(`[a-p]{32}`)
@@ -67,11 +82,23 @@ func (a *App) BrowserProfileRemoveExtension(profileIds []string, downloadAddress
 		return nil, fmt.Errorf("浏览器管理器未初始化")
 	}
 
+	a.maintenanceMu.Lock()
+	defer a.maintenanceMu.Unlock()
+
 	extID := extractExtensionID(downloadAddress)
 	if extID == "" {
 		return nil, fmt.Errorf("无法识别扩展 ID")
 	}
 	extDir := filepath.Join(a.appRoot, "extensions", "imported", safePathName(extID))
+
+	assignments, err := a.loadProfileExtensionRegistry()
+	if err != nil {
+		return nil, err
+	}
+	assignments.Extensions, _ = removeProfileExtensionAssignments(assignments.Extensions, extID, profileIds)
+	if err := a.saveProfileExtensionRegistry(assignments); err != nil {
+		return nil, err
+	}
 
 	a.browserMgr.Mutex.Lock()
 	updated := make([]string, 0, len(profileIds))
@@ -81,19 +108,17 @@ func (a *App) BrowserProfileRemoveExtension(profileIds []string, downloadAddress
 			continue
 		}
 		nextArgs, changed := removeExtensionDirFromLaunchArgs(profile.LaunchArgs, extDir)
-		if !changed {
-			continue
+		if changed {
+			profile.LaunchArgs = nextArgs
+			profile.UpdatedAt = time.Now().Format(time.RFC3339)
 		}
-		profile.LaunchArgs = nextArgs
-		profile.UpdatedAt = time.Now().Format(time.RFC3339)
-		cleanupRemovedManagedExtension(profile.UserDataDir, extDir, extID, a.appRoot)
 		updated = append(updated, id)
 	}
 	if len(updated) == 0 {
 		a.browserMgr.Mutex.Unlock()
 		return nil, fmt.Errorf("选中的实例未绑定该扩展")
 	}
-	stillReferenced := false
+	stillReferenced := profileExtensionAssigned(assignments.Extensions, extID)
 	for _, profile := range a.browserMgr.Profiles {
 		if profile == nil {
 			continue
@@ -109,7 +134,7 @@ func (a *App) BrowserProfileRemoveExtension(profileIds []string, downloadAddress
 	}
 	a.browserMgr.Mutex.Unlock()
 
-	if !stillReferenced {
+	if !stillReferenced && !a.globalExtensionRegistered(extID) {
 		_ = os.RemoveAll(extDir)
 		_ = os.RemoveAll(extDir + ".previous")
 	}
@@ -137,13 +162,59 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 		return nil, fmt.Errorf("浏览器管理器未初始化")
 	}
 
+	a.maintenanceMu.Lock()
+	defer a.maintenanceMu.Unlock()
+
+	for _, id := range profileIds {
+		a.enableExtensionDeveloperModeForProfile(id)
+	}
+	candidateID := a.registeredExtensionIDForAddress(downloadAddress)
+	if candidateID == "" {
+		candidateID = extractExtensionID(downloadAddress)
+	}
+	if candidateID != "" {
+		missing := a.filterProfilesMissingEquivalentExtension(profileIds, candidateID, "", downloadAddress)
+		if len(missing) == 0 {
+			return &ExtensionImportResult{
+				ExtensionID:     candidateID,
+				UpdatedProfiles: []string{},
+				Message:         fmt.Sprintf("所选 %d 个环境已存在同一扩展，未覆盖原扩展", len(profileIds)),
+			}, nil
+		}
+		profileIds = missing
+	}
+
 	extID, extDir, previousVersion, extensionVersion, err := a.downloadAndInstallExtension(downloadAddress)
 	if err != nil {
 		return nil, err
 	}
+	manifestName := readManifestNameFromDir(extDir)
+	profileIds = a.filterProfilesMissingEquivalentExtension(profileIds, extID, manifestName, downloadAddress)
+	if len(profileIds) == 0 {
+		return &ExtensionImportResult{
+			ExtensionDir:     extDir,
+			ExtensionID:      extID,
+			ExtensionVersion: extensionVersion,
+			PreviousVersion:  previousVersion,
+			UpdatedProfiles:  []string{},
+			Message:          "所选环境已存在同类型、名称或来源的扩展，未覆盖原扩展",
+		}, nil
+	}
 
 	updated, err := a.bindExtensionDirToProfiles(profileIds, extDir)
 	if err != nil {
+		return nil, err
+	}
+	assignments, err := a.loadProfileExtensionRegistry()
+	if err != nil {
+		return nil, err
+	}
+	assignments.Extensions = upsertProfileExtensionAssignments(assignments.Extensions, profileExtensionRegistryEntry{
+		DownloadAddress: downloadAddress,
+		ExtensionID:     extID,
+		ProfileIDs:      updated,
+	})
+	if err := a.saveProfileExtensionRegistry(assignments); err != nil {
 		return nil, err
 	}
 	return &ExtensionImportResult{
@@ -152,7 +223,7 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 		ExtensionVersion: extensionVersion,
 		PreviousVersion:  previousVersion,
 		UpdatedProfiles:  updated,
-		Message:          extensionInstallMessage(previousVersion, extensionVersion, len(updated), false),
+		Message:          extensionInstallMessage(previousVersion, extensionVersion, len(updated)),
 	}, nil
 }
 
@@ -187,9 +258,19 @@ func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionIm
 		return nil, err
 	}
 
-	updated, err := a.bindExtensionDirToAllProfiles(extDir)
-	if err != nil {
-		return nil, err
+	profiles := a.browserMgr.List()
+	targetIDs := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
+		targetIDs = append(targetIDs, profile.ProfileId)
+		a.enableExtensionDeveloperModeForProfile(profile.ProfileId)
+	}
+	missing := a.filterProfilesMissingEquivalentExtension(targetIDs, extID, readManifestNameFromDir(extDir), downloadAddress)
+	updated := []string{}
+	if len(missing) > 0 {
+		updated, err = a.bindExtensionDirToProfiles(missing, extDir)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &ExtensionImportResult{
 		ExtensionDir:     extDir,
@@ -197,7 +278,7 @@ func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionIm
 		ExtensionVersion: extensionVersion,
 		PreviousVersion:  previousVersion,
 		UpdatedProfiles:  updated,
-		Message:          extensionInstallMessage(previousVersion, extensionVersion, len(updated), true),
+		Message:          fmt.Sprintf("全局扩展已应用：新增 %d 个环境，跳过 %d 个已有同类扩展的环境；后续新建环境在创建时继承", len(updated), len(targetIDs)-len(updated)),
 	}, nil
 }
 
@@ -241,21 +322,28 @@ func (a *App) BrowserGlobalExtensionRemove(downloadAddress string) (*ExtensionIm
 
 	updatedSet := map[string]bool{}
 	lastDir := ""
+	assignments, assignmentErr := a.loadProfileExtensionRegistry()
+	if assignmentErr != nil {
+		return nil, assignmentErr
+	}
 	for _, extID := range removedIDs {
 		if extID == "" {
 			continue
 		}
 		extDir := a.globalExtensionDir(extID)
 		lastDir = extDir
-		updated, removeErr := a.removeExtensionDirFromAllProfiles(extDir, extID)
+		keepProfiles := assignedProfilesForExtension(assignments.Extensions, extID)
+		updated, removeErr := a.removeExtensionDirFromProfilesExcept(extDir, keepProfiles)
 		if removeErr != nil {
 			return nil, removeErr
 		}
 		for _, id := range updated {
 			updatedSet[id] = true
 		}
-		_ = os.RemoveAll(extDir)
-		_ = os.RemoveAll(extDir + ".previous")
+		if len(keepProfiles) == 0 {
+			_ = os.RemoveAll(extDir)
+			_ = os.RemoveAll(extDir + ".previous")
+		}
 	}
 	updated := make([]string, 0, len(updatedSet))
 	for id := range updatedSet {
@@ -295,6 +383,16 @@ func (a *App) BrowserGlobalExtensionList() ([]GlobalManagedExtension, error) {
 
 func (a *App) downloadAndInstallExtension(downloadAddress string) (string, string, string, string, error) {
 	extID := extractExtensionID(downloadAddress)
+	if extID == "" {
+		extID = a.registeredExtensionIDForAddress(downloadAddress)
+	}
+	if extID != "" {
+		extDir := a.globalExtensionDir(extID)
+		if validateUnpackedExtensionManifest(extDir) == nil {
+			version := readManifestVersionFromDir(extDir)
+			return extID, extDir, version, version, nil
+		}
+	}
 	downloadURL := resolveExtensionDownloadURL(downloadAddress, extID)
 	if err := validateExtensionDownloadURL(downloadURL); err != nil {
 		return "", "", "", "", err
@@ -311,6 +409,11 @@ func (a *App) downloadAndInstallExtension(downloadAddress string) (string, strin
 		sum := sha256.Sum256(payload)
 		extID = "external-" + hex.EncodeToString(sum[:])[:16]
 	}
+	extDir := a.globalExtensionDir(extID)
+	if validateUnpackedExtensionManifest(extDir) == nil {
+		version := readManifestVersionFromDir(extDir)
+		return extID, extDir, version, version, nil
+	}
 	extDir, previousVersion, extensionVersion, err := installUnpackedExtension(a.appRoot, extID, zipPayload)
 	if err != nil {
 		return "", "", "", "", err
@@ -318,15 +421,124 @@ func (a *App) downloadAndInstallExtension(downloadAddress string) (string, strin
 	return extID, extDir, previousVersion, extensionVersion, nil
 }
 
-func extensionInstallMessage(previousVersion, extensionVersion string, count int, global bool) string {
-	scope := "选中的"
-	if global {
-		scope = "全部现有和后续"
+func (a *App) registeredExtensionIDForAddress(downloadAddress string) string {
+	key := extensionSourceKey(downloadAddress)
+	if key == "" {
+		return ""
 	}
+	if registry, err := a.loadGlobalExtensionRegistry(); err == nil {
+		for _, entry := range registry.Extensions {
+			if extensionSourceKey(entry.DownloadAddress) == key {
+				return strings.TrimSpace(entry.ExtensionID)
+			}
+		}
+	}
+	if registry, err := a.loadProfileExtensionRegistry(); err == nil {
+		for _, entry := range registry.Extensions {
+			if extensionSourceKey(entry.DownloadAddress) == key {
+				return strings.TrimSpace(entry.ExtensionID)
+			}
+		}
+	}
+	return ""
+}
+
+func extensionSourceKey(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func extensionInstallMessage(previousVersion, extensionVersion string, count int) string {
 	if previousVersion != "" && previousVersion != extensionVersion {
-		return fmt.Sprintf("扩展已从 %s 更新到 %s，并重新绑定到%s实例；各环境钱包/Cookies 数据未改动，重启实例后生效", previousVersion, extensionVersion, scope)
+		return fmt.Sprintf("扩展已从 %s 更新到 %s，并绑定到选中的实例；各环境钱包/Cookies 数据未改动，重启实例后生效", previousVersion, extensionVersion)
 	}
 	return fmt.Sprintf("扩展 %s 已绑定到 %d 个实例；各环境钱包/Cookies 数据未改动，重启实例后生效", extensionVersion, count)
+}
+
+func (a *App) filterProfilesMissingEquivalentExtension(profileIDs []string, extensionID string, manifestName string, downloadAddress string) []string {
+	assignments, _ := a.loadProfileExtensionRegistry()
+	sourceKey := extensionSourceKey(downloadAddress)
+	assigned := map[string]bool{}
+	for _, entry := range assignments.Extensions {
+		sameID := extensionID != "" && strings.EqualFold(entry.ExtensionID, extensionID)
+		sameSource := sourceKey != "" && extensionSourceKey(entry.DownloadAddress) == sourceKey
+		if !sameID && !sameSource {
+			continue
+		}
+		for _, profileID := range entry.ProfileIDs {
+			assigned[profileID] = true
+		}
+	}
+
+	profiles := map[string]BrowserProfile{}
+	for _, profile := range a.browserMgr.List() {
+		profiles[profile.ProfileId] = profile
+	}
+	extDir := ""
+	if extensionID != "" {
+		extDir = a.globalExtensionDir(extensionID)
+	}
+	missing := make([]string, 0, len(profileIDs))
+	for _, profileID := range normalizeProfileIDs(profileIDs) {
+		profile, ok := profiles[profileID]
+		if !ok {
+			continue
+		}
+		if assigned[profileID] || (extDir != "" && hasExtensionDirInLaunchArgs(profile.LaunchArgs, extDir)) {
+			continue
+		}
+		userDataDir := a.browserMgr.ResolveUserDataDir(&profile)
+		if profileHasEquivalentExtension(userDataDir, extensionID, manifestName) {
+			continue
+		}
+		missing = append(missing, profileID)
+	}
+	return missing
+}
+
+func profileHasEquivalentExtension(userDataDir string, extensionID string, manifestName string) bool {
+	extensionID = strings.ToLower(strings.TrimSpace(extensionID))
+	manifestName = strings.ToLower(strings.TrimSpace(manifestName))
+	if extensionID != "" {
+		for _, profileDir := range chromeProfileDirs(userDataDir) {
+			if info, err := os.Stat(filepath.Join(profileDir, "Extensions", extensionID)); err == nil && info.IsDir() {
+				return true
+			}
+		}
+	}
+	for _, prefPath := range chromeProfilePreferencePaths(userDataDir) {
+		data, err := os.ReadFile(prefPath)
+		if err != nil {
+			continue
+		}
+		var prefs map[string]any
+		if json.Unmarshal(data, &prefs) != nil {
+			continue
+		}
+		extensions, _ := prefs["extensions"].(map[string]any)
+		settings, _ := extensions["settings"].(map[string]any)
+		for id, raw := range settings {
+			if extensionID != "" && strings.EqualFold(strings.TrimSpace(id), extensionID) {
+				return true
+			}
+			setting, _ := raw.(map[string]any)
+			if manifestName != "" && extensionSettingManifestName(setting) == manifestName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func chromeProfileDirs(userDataDir string) []string {
+	dirs := []string{filepath.Join(userDataDir, "Default"), userDataDir}
+	if entries, err := os.ReadDir(userDataDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), "Profile ") {
+				dirs = append(dirs, filepath.Join(userDataDir, entry.Name()))
+			}
+		}
+	}
+	return dirs
 }
 
 func normalizeProfileIDs(ids []string) []string {
@@ -594,7 +806,7 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) ([]
 	return updated, nil
 }
 
-func (a *App) bindExtensionDirToAllProfiles(extDir string) ([]string, error) {
+func (a *App) removeExtensionDirFromProfilesExcept(extDir string, keepProfiles map[string]bool) ([]string, error) {
 	a.browserMgr.Mutex.Lock()
 	defer a.browserMgr.Mutex.Unlock()
 	updated := make([]string, 0, len(a.browserMgr.Profiles))
@@ -602,29 +814,7 @@ func (a *App) bindExtensionDirToAllProfiles(extDir string) ([]string, error) {
 		if profile == nil {
 			continue
 		}
-		if hasExtensionDirInLaunchArgs(profile.LaunchArgs, extDir) {
-			updated = append(updated, id)
-			continue
-		}
-		profile.LaunchArgs = addExtensionDirToLaunchArgs(profile.LaunchArgs, extDir)
-		profile.UpdatedAt = time.Now().Format(time.RFC3339)
-		updated = append(updated, id)
-	}
-	if len(updated) == 0 {
-		return updated, nil
-	}
-	if err := a.browserMgr.SaveProfiles(); err != nil {
-		return nil, fmt.Errorf("保存全局扩展配置失败：%w", err)
-	}
-	return updated, nil
-}
-
-func (a *App) removeExtensionDirFromAllProfiles(extDir string, extID string) ([]string, error) {
-	a.browserMgr.Mutex.Lock()
-	defer a.browserMgr.Mutex.Unlock()
-	updated := make([]string, 0, len(a.browserMgr.Profiles))
-	for id, profile := range a.browserMgr.Profiles {
-		if profile == nil {
+		if keepProfiles[id] {
 			continue
 		}
 		nextArgs, changed := removeExtensionDirFromLaunchArgs(profile.LaunchArgs, extDir)
@@ -633,7 +823,6 @@ func (a *App) removeExtensionDirFromAllProfiles(extDir string, extID string) ([]
 		}
 		profile.LaunchArgs = nextArgs
 		profile.UpdatedAt = time.Now().Format(time.RFC3339)
-		cleanupRemovedManagedExtension(profile.UserDataDir, extDir, extID, a.appRoot)
 		updated = append(updated, id)
 	}
 	if len(updated) == 0 {
@@ -647,6 +836,10 @@ func (a *App) removeExtensionDirFromAllProfiles(extDir string, extID string) ([]
 
 func (a *App) globalExtensionRegistryPath() string {
 	return a.resolveAppPath(filepath.Join("data", globalExtensionRegistryFilename))
+}
+
+func (a *App) profileExtensionRegistryPath() string {
+	return a.resolveAppPath(filepath.Join("data", profileExtensionRegistryFilename))
 }
 
 func (a *App) globalExtensionDir(extensionID string) string {
@@ -705,6 +898,158 @@ func (a *App) saveGlobalExtensionRegistry(registry globalExtensionRegistry) erro
 	return nil
 }
 
+func (a *App) loadProfileExtensionRegistry() (profileExtensionRegistry, error) {
+	registry := profileExtensionRegistry{Extensions: []profileExtensionRegistryEntry{}}
+	data, err := os.ReadFile(a.profileExtensionRegistryPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return registry, nil
+		}
+		return registry, fmt.Errorf("读取环境扩展分配配置失败：%w", err)
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return registry, nil
+	}
+	if err := json.Unmarshal(data, &registry); err != nil {
+		return registry, fmt.Errorf("解析环境扩展分配配置失败：%w", err)
+	}
+	registry.Extensions = normalizeProfileExtensionRegistryEntries(registry.Extensions)
+	return registry, nil
+}
+
+func (a *App) saveProfileExtensionRegistry(registry profileExtensionRegistry) error {
+	registry.Extensions = normalizeProfileExtensionRegistryEntries(registry.Extensions)
+	data, err := json.MarshalIndent(registry, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化环境扩展分配配置失败：%w", err)
+	}
+	path := a.profileExtensionRegistryPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("创建环境扩展分配目录失败：%w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".profile-extensions-*.tmp")
+	if err != nil {
+		return fmt.Errorf("创建环境扩展分配临时配置失败：%w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("设置环境扩展分配配置权限失败：%w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("写入环境扩展分配临时配置失败：%w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("关闭环境扩展分配临时配置失败：%w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("保存环境扩展分配配置失败：%w", err)
+	}
+	return nil
+}
+
+func normalizeProfileExtensionRegistryEntries(entries []profileExtensionRegistryEntry) []profileExtensionRegistryEntry {
+	out := make([]profileExtensionRegistryEntry, 0, len(entries))
+	indexByID := map[string]int{}
+	for _, entry := range entries {
+		entry.DownloadAddress = strings.TrimSpace(entry.DownloadAddress)
+		entry.ExtensionID = strings.TrimSpace(entry.ExtensionID)
+		entry.ProfileIDs = normalizeProfileIDs(entry.ProfileIDs)
+		if entry.ExtensionID == "" || len(entry.ProfileIDs) == 0 {
+			continue
+		}
+		key := strings.ToLower(entry.ExtensionID)
+		if index, ok := indexByID[key]; ok {
+			merged := append(out[index].ProfileIDs, entry.ProfileIDs...)
+			out[index].ProfileIDs = normalizeProfileIDs(merged)
+			if entry.DownloadAddress != "" {
+				out[index].DownloadAddress = entry.DownloadAddress
+			}
+			continue
+		}
+		indexByID[key] = len(out)
+		out = append(out, entry)
+	}
+	return out
+}
+
+func upsertProfileExtensionAssignments(entries []profileExtensionRegistryEntry, want profileExtensionRegistryEntry) []profileExtensionRegistryEntry {
+	want.DownloadAddress = strings.TrimSpace(want.DownloadAddress)
+	want.ExtensionID = strings.TrimSpace(want.ExtensionID)
+	want.ProfileIDs = normalizeProfileIDs(want.ProfileIDs)
+	if want.ExtensionID == "" || len(want.ProfileIDs) == 0 {
+		return normalizeProfileExtensionRegistryEntries(entries)
+	}
+	merged := append([]profileExtensionRegistryEntry{}, entries...)
+	merged = append(merged, want)
+	return normalizeProfileExtensionRegistryEntries(merged)
+}
+
+func removeProfileExtensionAssignments(entries []profileExtensionRegistryEntry, extensionID string, profileIDs []string) ([]profileExtensionRegistryEntry, bool) {
+	removeIDs := map[string]bool{}
+	for _, id := range normalizeProfileIDs(profileIDs) {
+		removeIDs[id] = true
+	}
+	changed := false
+	out := make([]profileExtensionRegistryEntry, 0, len(entries))
+	for _, entry := range normalizeProfileExtensionRegistryEntries(entries) {
+		if !strings.EqualFold(entry.ExtensionID, strings.TrimSpace(extensionID)) {
+			out = append(out, entry)
+			continue
+		}
+		kept := make([]string, 0, len(entry.ProfileIDs))
+		for _, id := range entry.ProfileIDs {
+			if removeIDs[id] {
+				changed = true
+				continue
+			}
+			kept = append(kept, id)
+		}
+		if len(kept) > 0 {
+			entry.ProfileIDs = kept
+			out = append(out, entry)
+		}
+	}
+	return out, changed
+}
+
+func profileExtensionAssigned(entries []profileExtensionRegistryEntry, extensionID string) bool {
+	for _, entry := range entries {
+		if strings.EqualFold(strings.TrimSpace(entry.ExtensionID), strings.TrimSpace(extensionID)) && len(entry.ProfileIDs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func assignedProfilesForExtension(entries []profileExtensionRegistryEntry, extensionID string) map[string]bool {
+	out := map[string]bool{}
+	for _, entry := range entries {
+		if !strings.EqualFold(strings.TrimSpace(entry.ExtensionID), strings.TrimSpace(extensionID)) {
+			continue
+		}
+		for _, id := range entry.ProfileIDs {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+func (a *App) globalExtensionRegistered(extensionID string) bool {
+	registry, err := a.loadGlobalExtensionRegistry()
+	if err != nil {
+		return false
+	}
+	for _, entry := range registry.Extensions {
+		if strings.EqualFold(strings.TrimSpace(entry.ExtensionID), strings.TrimSpace(extensionID)) {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizeGlobalExtensionRegistryEntries(entries []globalExtensionRegistryEntry) []globalExtensionRegistryEntry {
 	out := make([]globalExtensionRegistryEntry, 0, len(entries))
 	seen := map[string]bool{}
@@ -750,19 +1095,47 @@ func extensionManifestExists(extDir string) bool {
 	return err == nil && !info.IsDir()
 }
 
-func (a *App) appendGlobalExtensionLaunchArgs(args []string) []string {
+// appendGlobalExtensionArgsForNewProfile is called only by the explicit
+// profile-creation workflow. Browser startup never reads registries or scans
+// extension directories.
+func (a *App) appendGlobalExtensionArgsForNewProfile(args []string) []string {
 	registry, err := a.loadGlobalExtensionRegistry()
 	if err != nil {
-		return args
+		return normalizeLoadExtensionArgs(args)
 	}
 	for _, entry := range registry.Extensions {
 		extDir := a.globalExtensionDir(entry.ExtensionID)
-		if !extensionManifestExists(extDir) {
+		if extensionManifestExists(extDir) {
+			args = addExtensionDirToLaunchArgs(args, extDir)
+		}
+	}
+	if len(activeLoadExtensionDirs(args)) > 0 {
+		args = removeExtensionBlockingLaunchArgs(args)
+	}
+	return normalizeLoadExtensionArgs(args)
+}
+
+func preserveAssignedExtensionArgs(existing []string, requested []string) []string {
+	out := append([]string{}, requested...)
+	for _, dir := range activeLoadExtensionDirs(existing) {
+		out = addExtensionDirToLaunchArgs(out, dir)
+	}
+	if len(activeLoadExtensionDirs(out)) > 0 {
+		out = removeExtensionBlockingLaunchArgs(out)
+	}
+	return normalizeLoadExtensionArgs(out)
+}
+
+func removeExtensionBlockingLaunchArgs(args []string) []string {
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		if strings.EqualFold(trimmed, "--disable-extensions") || strings.HasPrefix(strings.ToLower(trimmed), "--disable-extensions=") {
 			continue
 		}
-		args = addExtensionDirToLaunchArgs(args, extDir)
+		out = append(out, arg)
 	}
-	return args
+	return out
 }
 
 // readManifestNameFromDir 从已解包的扩展目录里读 manifest.name（用于 toast 提示）。
@@ -797,30 +1170,38 @@ func (a *App) InstallExtensionFromCRXURL(profileID string, crxURL string) (strin
 		return "", "", fmt.Errorf("crxUrl 为空")
 	}
 
+	a.maintenanceMu.Lock()
+	defer a.maintenanceMu.Unlock()
+
 	extID := extractExtensionID(crxURL)
-	if err := validateExtensionDownloadURL(crxURL); err != nil {
-		return extID, "", err
+	a.enableExtensionDeveloperModeForProfile(profileID)
+	if extID != "" && len(a.filterProfilesMissingEquivalentExtension([]string{profileID}, extID, "", crxURL)) == 0 {
+		return extID, "", nil
 	}
-	payload, err := downloadExtensionPayload(crxURL)
+	extID, extDir, _, _, err := a.downloadAndInstallExtension(crxURL)
 	if err != nil {
 		return extID, "", err
 	}
-	zipPayload, err := extractZipPayloadFromCRX(payload)
-	if err != nil {
-		return extID, "", err
-	}
-	if extID == "" {
-		sum := sha256.Sum256(payload)
-		extID = "external-" + hex.EncodeToString(sum[:])[:16]
-	}
-	extDir, _, _, err := installUnpackedExtension(a.appRoot, extID, zipPayload)
-	if err != nil {
-		return extID, "", err
+	extName := readManifestNameFromDir(extDir)
+	if len(a.filterProfilesMissingEquivalentExtension([]string{profileID}, extID, extName, crxURL)) == 0 {
+		return extID, extName, nil
 	}
 	if _, err := a.bindExtensionDirToProfiles([]string{profileID}, extDir); err != nil {
 		return extID, "", err
 	}
-	return extID, readManifestNameFromDir(extDir), nil
+	assignments, err := a.loadProfileExtensionRegistry()
+	if err != nil {
+		return extID, "", err
+	}
+	assignments.Extensions = upsertProfileExtensionAssignments(assignments.Extensions, profileExtensionRegistryEntry{
+		DownloadAddress: crxURL,
+		ExtensionID:     extID,
+		ProfileIDs:      []string{profileID},
+	})
+	if err := a.saveProfileExtensionRegistry(assignments); err != nil {
+		return extID, "", err
+	}
+	return extID, extName, nil
 }
 
 func addExtensionDirToLaunchArgs(args []string, extDir string) []string {
@@ -898,161 +1279,6 @@ func normalizeLoadExtensionArgs(args []string) []string {
 	return out
 }
 
-// filterInvalidLoadExtensionArgs keeps one damaged/unpacked extension from
-// destabilising every Chromium process in a large batch launch. Stored Chrome
-// Web Store extensions are unaffected; this only validates directories passed
-// explicitly through --load-extension.
-func filterInvalidLoadExtensionArgs(args []string) ([]string, []string) {
-	out := make([]string, 0, len(args))
-	rejected := []string{}
-	for _, arg := range args {
-		trimmed := strings.TrimSpace(arg)
-		if !strings.HasPrefix(trimmed, "--load-extension=") {
-			out = append(out, arg)
-			continue
-		}
-		valid := []string{}
-		for _, part := range strings.Split(strings.TrimSpace(strings.TrimPrefix(trimmed, "--load-extension=")), ",") {
-			extDir := strings.Trim(strings.TrimSpace(part), `"`)
-			if extDir == "" {
-				continue
-			}
-			if err := validateUnpackedExtensionManifest(extDir); err != nil {
-				rejected = append(rejected, fmt.Sprintf("%s (%v)", extDir, err))
-				continue
-			}
-			valid = append(valid, extDir)
-		}
-		if len(valid) > 0 {
-			out = append(out, "--load-extension="+strings.Join(valid, ","))
-		}
-	}
-	return normalizeLoadExtensionArgs(out), rejected
-}
-
-// cleanupStaleManagedUnpackedExtensions removes stale unpacked-extension records
-// left in Chrome profile Preferences after a managed --load-extension path was
-// changed or removed. Without this, Chrome can show both the old profile copy and
-// the current --load-extension copy in the toolbar extension list.
-func cleanupStaleManagedUnpackedExtensions(userDataDir string, args []string, appRoot string) {
-	active := activeLoadExtensionDirs(args)
-	if len(active) == 0 {
-		return
-	}
-	activeNames := map[string]bool{}
-	activeIDs := map[string]bool{}
-	for _, dir := range active {
-		activeIDs[strings.ToLower(filepath.Base(dir))] = true
-		if name := readExtensionManifestName(dir); name != "" {
-			activeNames[name] = true
-		}
-	}
-	managedRoots := []string{
-		normalizeExtensionPath(filepath.Join(appRoot, "extensions", "imported")),
-		normalizeExtensionPath(filepath.Join(appRoot, "data", "stealth_header_ext")),
-	}
-
-	for _, prefPath := range chromeProfilePreferencePaths(userDataDir) {
-		cleanupStaleUnpackedExtensionsInPreferences(prefPath, active, activeNames, activeIDs, managedRoots)
-	}
-}
-
-func cleanupRemovedManagedExtension(userDataDir string, extDir string, extID string, appRoot string) {
-	normExtDir := normalizeExtensionPath(extDir)
-	if userDataDir == "" || normExtDir == "" {
-		return
-	}
-	managedRoots := []string{
-		normalizeExtensionPath(filepath.Join(appRoot, "extensions", "imported")),
-		normalizeExtensionPath(filepath.Join(appRoot, "data", "stealth_header_ext")),
-	}
-	manifestName := readExtensionManifestName(extDir)
-	for _, prefPath := range chromeProfilePreferencePaths(userDataDir) {
-		removeManagedExtensionFromPreferences(prefPath, normExtDir, strings.ToLower(strings.TrimSpace(extID)), manifestName, managedRoots)
-	}
-}
-
-func removeManagedExtensionFromPreferences(prefPath string, normExtDir string, extID string, manifestName string, managedRoots []string) {
-	data, err := os.ReadFile(prefPath)
-	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
-		return
-	}
-	var prefs map[string]any
-	if json.Unmarshal(data, &prefs) != nil {
-		return
-	}
-	extensions, ok := prefs["extensions"].(map[string]any)
-	if !ok {
-		return
-	}
-	settings, ok := extensions["settings"].(map[string]any)
-	if !ok || len(settings) == 0 {
-		return
-	}
-	removedIDs := []string{}
-	for id, raw := range settings {
-		setting, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		extPath, _ := setting["path"].(string)
-		normPath := normalizeExtensionPath(extPath)
-		name := extensionSettingManifestName(setting)
-		isManagedPath := false
-		for _, root := range managedRoots {
-			if root != "" && normPath != "" && (normPath == root || strings.HasPrefix(normPath, root+string(os.PathSeparator))) {
-				isManagedPath = true
-				break
-			}
-		}
-		if (normPath != "" && normPath == normExtDir) ||
-			(extID != "" && strings.EqualFold(id, extID)) ||
-			(manifestName != "" && name == manifestName && isManagedPath) {
-			delete(settings, id)
-			removedIDs = append(removedIDs, id)
-		}
-	}
-	if len(removedIDs) == 0 {
-		return
-	}
-	if pinnedRaw, ok := extensions["pinned_extensions"]; ok {
-		extensions["pinned_extensions"] = removePinnedExtensionIDs(pinnedRaw, removedIDs)
-	}
-	if out, err := json.MarshalIndent(prefs, "", "   "); err == nil {
-		_ = os.WriteFile(prefPath, out, 0644)
-	}
-	profileDir := filepath.Dir(prefPath)
-	for _, id := range removedIDs {
-		removeStaleExtensionProfileData(profileDir, id)
-	}
-}
-
-func removePinnedExtensionIDs(pinnedRaw any, removedIDs []string) []string {
-	removed := map[string]bool{}
-	for _, id := range removedIDs {
-		removed[strings.ToLower(strings.TrimSpace(id))] = true
-	}
-	values := []string{}
-	switch v := pinnedRaw.(type) {
-	case []string:
-		values = append(values, v...)
-	case []any:
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				values = append(values, s)
-			}
-		}
-	}
-	filtered := make([]string, 0, len(values))
-	for _, value := range values {
-		if removed[strings.ToLower(strings.TrimSpace(value))] {
-			continue
-		}
-		filtered = append(filtered, value)
-	}
-	return filtered
-}
-
 func activeLoadExtensionDirs(args []string) map[string]string {
 	out := map[string]string{}
 	const prefix = "--load-extension="
@@ -1100,59 +1326,49 @@ func chromeProfilePreferencePaths(userDataDir string) []string {
 	return out
 }
 
-func cleanupStaleUnpackedExtensionsInPreferences(prefPath string, active map[string]string, activeNames map[string]bool, activeIDs map[string]bool, managedRoots []string) {
-	data, err := os.ReadFile(prefPath)
-	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+func (a *App) enableExtensionDeveloperModeForProfile(profileID string) {
+	for _, profile := range a.browserMgr.List() {
+		if profile.ProfileId == profileID {
+			enableExtensionDeveloperMode(a.browserMgr.ResolveUserDataDir(&profile))
+			return
+		}
+	}
+}
+
+// enableExtensionDeveloperMode runs only when the user explicitly distributes
+// an extension or when a new profile inherits a global choice.
+func enableExtensionDeveloperMode(userDataDir string) {
+	if strings.TrimSpace(userDataDir) == "" {
 		return
 	}
-	var prefs map[string]any
-	if json.Unmarshal(data, &prefs) != nil {
-		return
-	}
-	extensions, ok := prefs["extensions"].(map[string]any)
-	if !ok {
-		return
-	}
-	settings, ok := extensions["settings"].(map[string]any)
-	if !ok || len(settings) == 0 {
-		return
-	}
-	removedIDs := []string{}
-	for id, raw := range settings {
-		setting, ok := raw.(map[string]any)
-		if !ok {
+	defaultPrefs := filepath.Join(userDataDir, "Default", "Preferences")
+	_ = ensureChromePreferencesFile(defaultPrefs)
+	for _, prefPath := range chromeProfilePreferencePaths(userDataDir) {
+		data, err := os.ReadFile(prefPath)
+		if err != nil {
 			continue
 		}
-		extPath, _ := setting["path"].(string)
-		if strings.TrimSpace(extPath) == "" {
+		prefs := map[string]any{}
+		if len(strings.TrimSpace(string(data))) > 0 && json.Unmarshal(data, &prefs) != nil {
 			continue
 		}
-		normPath := normalizeExtensionPath(extPath)
-		if active[normPath] != "" {
+		extensions, _ := prefs["extensions"].(map[string]any)
+		if extensions == nil {
+			extensions = map[string]any{}
+			prefs["extensions"] = extensions
+		}
+		ui, _ := extensions["ui"].(map[string]any)
+		if ui == nil {
+			ui = map[string]any{}
+			extensions["ui"] = ui
+		}
+		if ui["developer_mode"] == true {
 			continue
 		}
-		name := extensionSettingManifestName(setting)
-		isManagedPath := false
-		for _, root := range managedRoots {
-			if root != "" && (normPath == root || strings.HasPrefix(normPath, root+string(os.PathSeparator))) {
-				isManagedPath = true
-				break
-			}
+		ui["developer_mode"] = true
+		if out, marshalErr := json.MarshalIndent(prefs, "", "   "); marshalErr == nil {
+			_ = os.WriteFile(prefPath, out, 0644)
 		}
-		if isManagedPath || activeIDs[strings.ToLower(id)] || (name != "" && activeNames[name]) {
-			delete(settings, id)
-			removedIDs = append(removedIDs, id)
-		}
-	}
-	if len(removedIDs) == 0 {
-		return
-	}
-	if out, err := json.MarshalIndent(prefs, "", "   "); err == nil {
-		_ = os.WriteFile(prefPath, out, 0644)
-	}
-	profileDir := filepath.Dir(prefPath)
-	for _, id := range removedIDs {
-		removeStaleExtensionProfileData(profileDir, id)
 	}
 }
 
@@ -1167,19 +1383,6 @@ func normalizeExtensionPath(path string) string {
 	return strings.ToLower(filepath.Clean(path))
 }
 
-func readExtensionManifestName(dir string) string {
-	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
-	if err != nil {
-		return ""
-	}
-	var manifest map[string]any
-	if json.Unmarshal(data, &manifest) != nil {
-		return ""
-	}
-	name, _ := manifest["name"].(string)
-	return strings.TrimSpace(strings.ToLower(name))
-}
-
 func extensionSettingManifestName(setting map[string]any) string {
 	manifest, ok := setting["manifest"].(map[string]any)
 	if !ok {
@@ -1187,31 +1390,6 @@ func extensionSettingManifestName(setting map[string]any) string {
 	}
 	name, _ := manifest["name"].(string)
 	return strings.TrimSpace(strings.ToLower(name))
-}
-
-func removeStaleExtensionProfileData(profileDir string, id string) {
-	id = strings.TrimSpace(strings.ToLower(id))
-	if id == "" {
-		return
-	}
-	for _, rel := range []string{
-		filepath.Join("Extensions", id),
-		filepath.Join("Local Extension Settings", id),
-		filepath.Join("Sync Extension Settings", id),
-		filepath.Join("Managed Extension Settings", id),
-	} {
-		_ = os.RemoveAll(filepath.Join(profileDir, rel))
-	}
-	for _, pattern := range []string{
-		filepath.Join(profileDir, "IndexedDB", "chrome-extension_"+id+"_*"),
-		filepath.Join(profileDir, "Service Worker", "ScriptCache", "*"+id+"*"),
-	} {
-		if matches, err := filepath.Glob(pattern); err == nil {
-			for _, match := range matches {
-				_ = os.RemoveAll(match)
-			}
-		}
-	}
 }
 
 func safePathName(name string) string {
@@ -1226,104 +1404,4 @@ func safePathName(name string) string {
 		return "extension"
 	}
 	return b.String()
-}
-
-// pinAllLoadedExtensionsToToolbar ensures all extensions loaded via --load-extension
-// are shown on the Chrome toolbar (not hidden behind the puzzle icon) by adding
-// their IDs to the pinned_extensions list in Preferences.
-func pinAllLoadedExtensionsToToolbar(userDataDir string, args []string) {
-	active := activeLoadExtensionDirs(args)
-	if len(active) == 0 {
-		return
-	}
-
-	// Collect the extension IDs from the loaded directories
-	extensionIDs := map[string]bool{}
-	for dir := range active {
-		extID := strings.ToLower(strings.TrimSpace(filepath.Base(dir)))
-		if extID != "" {
-			extensionIDs[extID] = true
-		}
-	}
-	if len(extensionIDs) == 0 {
-		return
-	}
-
-	for _, prefPath := range chromeProfilePreferencePaths(userDataDir) {
-		pinExtensionsInPreferences(prefPath, extensionIDs)
-	}
-}
-
-// pinExtensionsInPreferences adds the given extension IDs to the pinned_extensions
-// list in a Chrome Preferences JSON file.
-func pinExtensionsInPreferences(prefPath string, extensionIDs map[string]bool) {
-	data, err := os.ReadFile(prefPath)
-	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
-		return
-	}
-	var prefs map[string]any
-	if json.Unmarshal(data, &prefs) != nil {
-		return
-	}
-
-	extensions, ok := prefs["extensions"].(map[string]any)
-	if !ok {
-		extensions = make(map[string]any)
-		prefs["extensions"] = extensions
-	}
-
-	// Read the current pinned_extensions list
-	pinnedRaw, ok := extensions["pinned_extensions"]
-	var pinnedList []string
-	if ok {
-		switch v := pinnedRaw.(type) {
-		case []string:
-			pinnedList = v
-		case []any:
-			for _, item := range v {
-				if s, ok := item.(string); ok {
-					pinnedList = append(pinnedList, s)
-				}
-			}
-		default:
-			pinnedList = []string{}
-		}
-	}
-	pinnedSet := map[string]bool{}
-	for _, id := range pinnedList {
-		pinnedSet[strings.ToLower(id)] = true
-	}
-
-	changed := false
-	for id := range extensionIDs {
-		if !pinnedSet[id] {
-			pinnedList = append(pinnedList, id)
-			pinnedSet[id] = true
-			changed = true
-		}
-	}
-
-	// Also include the stealth header extension if it exists in settings
-	settings, ok := extensions["settings"].(map[string]any)
-	if ok {
-		for id := range settings {
-			idLower := strings.ToLower(strings.TrimSpace(id))
-			if !pinnedSet[idLower] {
-				pinnedSet[idLower] = true
-				pinnedList = append(pinnedList, idLower)
-				changed = true
-			}
-		}
-	}
-
-	if !changed {
-		return
-	}
-
-	extensions["pinned_extensions"] = pinnedList
-	out, err := json.Marshal(prefs)
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(prefPath, out, 0644)
 }

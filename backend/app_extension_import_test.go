@@ -2,6 +2,8 @@ package backend
 
 import (
 	"archive/zip"
+	"boost-browser/backend/internal/browser"
+	"boost-browser/backend/internal/config"
 	"bytes"
 	"encoding/json"
 	"os"
@@ -68,36 +70,6 @@ func TestInstallUnpackedExtensionUpdateKeepsProgramRollbackAndReportsVersions(t 
 	}
 }
 
-func TestFilterInvalidLoadExtensionArgsKeepsHealthyExtensionOnly(t *testing.T) {
-	root := t.TempDir()
-	healthy := filepath.Join(root, "healthy")
-	broken := filepath.Join(root, "broken")
-	if err := os.MkdirAll(healthy, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(broken, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(healthy, "manifest.json"), []byte(`{"name":"Wallet","version":"1.0","manifest_version":3}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(broken, "manifest.json"), []byte(`{"name":"Broken"}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	args, rejected := filterInvalidLoadExtensionArgs([]string{
-		"--no-first-run",
-		"--load-extension=" + healthy + "," + broken,
-	})
-	want := []string{"--no-first-run", "--load-extension=" + healthy}
-	if !reflect.DeepEqual(args, want) {
-		t.Fatalf("unexpected filtered args\nwant: %#v\n got: %#v", want, args)
-	}
-	if len(rejected) != 1 || !strings.Contains(rejected[0], broken) {
-		t.Fatalf("expected broken extension rejection, got %#v", rejected)
-	}
-}
-
 func TestRemoveExtensionDirFromLaunchArgs(t *testing.T) {
 	target := `Z:\\Boost Browser\\extensions\\imported\\mcohilncbfahbmgdjkbpemcciiolgcge`
 	other := `Z:\\Boost Browser\\extensions\\imported\\nkbihfbeogaeaoehlefnkodbefgpgknn`
@@ -144,7 +116,7 @@ func TestResolveExtensionDownloadURLUsesBundledChromeVersion(t *testing.T) {
 	}
 }
 
-func TestAppendGlobalExtensionLaunchArgsSurvivesNewProfiles(t *testing.T) {
+func TestAppendGlobalExtensionArgsRunsOnlyForNewProfileCreation(t *testing.T) {
 	root := t.TempDir()
 	app := NewApp(root)
 	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
@@ -162,106 +134,70 @@ func TestAppendGlobalExtensionLaunchArgsSurvivesNewProfiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := app.appendGlobalExtensionLaunchArgs([]string{"--no-first-run"})
+	got := app.appendGlobalExtensionArgsForNewProfile([]string{"--disable-extensions", "--no-first-run"})
 	if !hasExtensionDirInLaunchArgs(got, extDir) {
 		t.Fatalf("global extension was not injected into fresh launch args: %#v", got)
 	}
-	got = app.appendGlobalExtensionLaunchArgs(got)
+	got = app.appendGlobalExtensionArgsForNewProfile(got)
 	active := activeLoadExtensionDirs(got)
 	if len(active) != 1 {
 		t.Fatalf("global extension should be de-duplicated, got %#v", got)
 	}
-}
-
-func TestCleanupStaleManagedUnpackedExtensionsRemovesOldDuplicateByManifestName(t *testing.T) {
-	root := t.TempDir()
-	userDataDir := filepath.Join(root, "profile")
-	profileDir := filepath.Join(userDataDir, "Default")
-	activeExt := filepath.Join(root, "extensions", "imported", "nkbihfbeogaeaoehlefnkodbefgpgknn")
-	oldExt := filepath.Join(root, "extensions", "imported", "old-metamask")
-	if err := os.MkdirAll(activeExt, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(activeExt, "manifest.json"), []byte(`{"name":"MetaMask","version":"1.0","manifest_version":3}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(profileDir, "Extensions", "oldid"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	prefs := map[string]any{
-		"extensions": map[string]any{
-			"settings": map[string]any{
-				"oldid": map[string]any{
-					"path":     oldExt,
-					"manifest": map[string]any{"name": "MetaMask"},
-				},
-				"keepid": map[string]any{
-					"path":     activeExt,
-					"manifest": map[string]any{"name": "MetaMask"},
-				},
-				"webstoreid": map[string]any{
-					"manifest": map[string]any{"name": "MetaMask"},
-				},
-			},
-		},
-	}
-	data, _ := json.Marshal(prefs)
-	if err := os.MkdirAll(profileDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(profileDir, "Preferences"), data, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	cleanupStaleManagedUnpackedExtensions(userDataDir, []string{"--load-extension=" + activeExt}, root)
-
-	outData, err := os.ReadFile(filepath.Join(profileDir, "Preferences"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out map[string]any
-	if err := json.Unmarshal(outData, &out); err != nil {
-		t.Fatal(err)
-	}
-	settings := out["extensions"].(map[string]any)["settings"].(map[string]any)
-	if _, ok := settings["oldid"]; ok {
-		t.Fatalf("old duplicate unpacked extension setting was not removed")
-	}
-	if _, ok := settings["keepid"]; !ok {
-		t.Fatalf("active extension setting should be kept")
-	}
-	if _, ok := settings["webstoreid"]; !ok {
-		t.Fatalf("extension without path should be kept")
-	}
-	if _, err := os.Stat(filepath.Join(profileDir, "Extensions", "oldid")); !os.IsNotExist(err) {
-		t.Fatalf("old extension profile data should be removed")
+	if reflect.DeepEqual(got, []string{"--disable-extensions", "--no-first-run"}) {
+		t.Fatalf("extension blocker should be removed during profile creation: %#v", got)
 	}
 }
 
-func TestCleanupRemovedManagedExtensionRemovesPinnedAndProfileData(t *testing.T) {
+func TestPreserveAssignedExtensionArgsDuringProfileEdit(t *testing.T) {
 	root := t.TempDir()
-	userDataDir := filepath.Join(root, "profile")
-	profileDir := filepath.Join(userDataDir, "Default")
-	extID := "mcohilncbfahbmgdjkbpemcciiolgcge"
-	extDir := filepath.Join(root, "extensions", "imported", extID)
-	if err := os.MkdirAll(extDir, 0755); err != nil {
-		t.Fatal(err)
+	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
+	extDir := filepath.Join(root, extID)
+	got := preserveAssignedExtensionArgs(
+		[]string{"--load-extension=" + extDir},
+		[]string{"--disable-extensions", "--no-first-run"},
+	)
+	if !hasExtensionDirInLaunchArgs(got, extDir) {
+		t.Fatalf("manual extension assignment was not preserved: %#v", got)
 	}
-	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"OKX Wallet","version":"1.0","manifest_version":3}`), 0644); err != nil {
-		t.Fatal(err)
+	for _, arg := range got {
+		if strings.EqualFold(arg, "--disable-extensions") {
+			t.Fatalf("extension-blocking flag was not removed: %#v", got)
+		}
 	}
-	if err := os.MkdirAll(filepath.Join(profileDir, "Extensions", extID), 0755); err != nil {
-		t.Fatal(err)
+}
+
+func TestProfileExtensionRegistryMergesAndRemovesAssignments(t *testing.T) {
+	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
+	entries := upsertProfileExtensionAssignments(nil, profileExtensionRegistryEntry{
+		DownloadAddress: extID,
+		ExtensionID:     extID,
+		ProfileIDs:      []string{"profile-1", "profile-2"},
+	})
+	entries = upsertProfileExtensionAssignments(entries, profileExtensionRegistryEntry{
+		DownloadAddress: "https://chromewebstore.google.com/detail/metamask/" + extID,
+		ExtensionID:     extID,
+		ProfileIDs:      []string{"profile-2", "profile-3"},
+	})
+	if len(entries) != 1 || !reflect.DeepEqual(entries[0].ProfileIDs, []string{"profile-1", "profile-2", "profile-3"}) {
+		t.Fatalf("unexpected merged assignments: %#v", entries)
 	}
+	entries, changed := removeProfileExtensionAssignments(entries, extID, []string{"profile-2"})
+	if !changed || len(entries) != 1 || !reflect.DeepEqual(entries[0].ProfileIDs, []string{"profile-1", "profile-3"}) {
+		t.Fatalf("unexpected assignments after removal: %#v changed=%v", entries, changed)
+	}
+}
+
+func TestProfileHasEquivalentExtensionByIDOrName(t *testing.T) {
+	root := t.TempDir()
+	profileDir := filepath.Join(root, "Default")
+	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
 	prefs := map[string]any{
 		"extensions": map[string]any{
 			"settings": map[string]any{
 				extID: map[string]any{
-					"path":     extDir,
-					"manifest": map[string]any{"name": "OKX Wallet"},
+					"manifest": map[string]any{"name": "MetaMask"},
 				},
 			},
-			"pinned_extensions": []any{extID, "otherext"},
 		},
 	}
 	data, _ := json.Marshal(prefs)
@@ -272,7 +208,37 @@ func TestCleanupRemovedManagedExtensionRemovesPinnedAndProfileData(t *testing.T)
 		t.Fatal(err)
 	}
 
-	cleanupRemovedManagedExtension(userDataDir, extDir, extID, root)
+	if !profileHasEquivalentExtension(root, extID, "") {
+		t.Fatal("existing extension ID should be detected during explicit distribution")
+	}
+	if !profileHasEquivalentExtension(root, "differentid", "MetaMask") {
+		t.Fatal("existing extension name should be detected during explicit distribution")
+	}
+	if profileHasEquivalentExtension(root, "differentid", "Rabby Wallet") {
+		t.Fatal("different extension should not be treated as equivalent")
+	}
+}
+
+func TestEnableExtensionDeveloperModePreservesExistingSettings(t *testing.T) {
+	root := t.TempDir()
+	profileDir := filepath.Join(root, "Default")
+	if err := os.MkdirAll(profileDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	prefs := map[string]any{
+		"extensions": map[string]any{
+			"settings": map[string]any{"keep": map[string]any{"state": float64(1)}},
+		},
+	}
+	data, _ := json.Marshal(prefs)
+	if err := os.MkdirAll(profileDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profileDir, "Preferences"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	enableExtensionDeveloperMode(root)
 
 	outData, err := os.ReadFile(filepath.Join(profileDir, "Preferences"))
 	if err != nil {
@@ -283,15 +249,96 @@ func TestCleanupRemovedManagedExtensionRemovesPinnedAndProfileData(t *testing.T)
 		t.Fatal(err)
 	}
 	extensions := out["extensions"].(map[string]any)
+	ui := extensions["ui"].(map[string]any)
+	if ui["developer_mode"] != true {
+		t.Fatalf("developer mode was not enabled: %#v", ui)
+	}
 	settings := extensions["settings"].(map[string]any)
-	if _, ok := settings[extID]; ok {
-		t.Fatalf("removed extension should be deleted from settings")
+	if _, ok := settings["keep"]; !ok {
+		t.Fatal("existing extension settings were overwritten")
 	}
-	pinned := extensions["pinned_extensions"].([]any)
-	if len(pinned) != 1 || pinned[0].(string) != "otherext" {
-		t.Fatalf("unexpected pinned_extensions after cleanup: %#v", pinned)
+}
+
+func TestBrowserProfileCreateInheritsGlobalExtensionAtCreationOnly(t *testing.T) {
+	root := t.TempDir()
+	app := NewApp(root)
+	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
+	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
+	extDir := app.globalExtensionDir(extID)
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(profileDir, "Extensions", extID)); !os.IsNotExist(err) {
-		t.Fatalf("removed extension profile data should be deleted")
+	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"MetaMask","version":"1.0","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.saveGlobalExtensionRegistry(globalExtensionRegistry{Extensions: []globalExtensionRegistryEntry{{
+		DownloadAddress: extID,
+		ExtensionID:     extID,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	profile, err := app.BrowserProfileCreate(BrowserProfileInput{ProfileName: "实例-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasExtensionDirInLaunchArgs(profile.LaunchArgs, extDir) {
+		t.Fatalf("new profile did not inherit the explicit global choice: %#v", profile.LaunchArgs)
+	}
+	prefs, err := os.ReadFile(filepath.Join(app.browserMgr.ResolveUserDataDir(profile), "Default", "Preferences"))
+	if err != nil || !strings.Contains(string(prefs), `"developer_mode": true`) {
+		t.Fatalf("developer mode was not enabled at profile creation: %s err=%v", prefs, err)
+	}
+}
+
+func TestBrowserProfileUpdateDoesNotEraseAssignedExtension(t *testing.T) {
+	root := t.TempDir()
+	app := NewApp(root)
+	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
+	extDir := filepath.Join(root, "extensions", "imported", "wallet")
+	created, err := app.browserMgr.Create(BrowserProfileInput{
+		ProfileName: "实例-1",
+		LaunchArgs:  []string{"--load-extension=" + extDir},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := app.BrowserProfileUpdate(created.ProfileId, BrowserProfileInput{
+		ProfileName: "实例-1",
+		LaunchArgs:  []string{"--no-first-run"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasExtensionDirInLaunchArgs(updated.LaunchArgs, extDir) {
+		t.Fatalf("profile edit erased assigned extension: %#v", updated.LaunchArgs)
+	}
+}
+
+func TestDownloadAndInstallExtensionReusesExistingPackageWithoutOverwrite(t *testing.T) {
+	root := t.TempDir()
+	app := NewApp(root)
+	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
+	extDir := app.globalExtensionDir(extID)
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"MetaMask","version":"1.0","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(extDir, "user-data.marker")
+	if err := os.WriteFile(marker, []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gotID, gotDir, previous, current, err := app.downloadAndInstallExtension(extID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotID != extID || gotDir != extDir || previous != "1.0" || current != "1.0" {
+		t.Fatalf("unexpected reused package result: %s %s %s %s", gotID, gotDir, previous, current)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "keep" {
+		t.Fatalf("existing extension package was overwritten: data=%q err=%v", data, err)
 	}
 }
