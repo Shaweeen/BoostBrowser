@@ -4,7 +4,7 @@
 param(
     [string]$BaseRef = "HEAD^",
     [int]$MaxNetGrowth = 800,
-    [int]$LedgerDeletionThreshold = 80,
+    [int]$LedgerDeletionThreshold = 20,
     [string]$ApprovedGrowthReason = ""
 )
 
@@ -73,6 +73,13 @@ if ($LASTEXITCODE -ne 0) {
 if ($deleted -ge $LedgerDeletionThreshold -and $changedFiles -notcontains 'docs/DELETION_LEDGER.md') {
     throw "Material deletion ($deleted lines) is missing docs/DELETION_LEDGER.md"
 }
+$deletedSourceFiles = @(& git diff --diff-filter=D --name-only $BaseRef HEAD --)
+if ($LASTEXITCODE -ne 0) {
+    throw 'Unable to inspect deleted source files'
+}
+if ($deletedSourceFiles.Count -gt 0 -and $changedFiles -notcontains 'docs/DELETION_LEDGER.md') {
+    throw "Deleted files are missing a reversible docs/DELETION_LEDGER.md entry"
+}
 
 $retiredSymbols = @(
     'StartGlobalSerializedWindowWatchers',
@@ -84,7 +91,10 @@ $retiredSymbols = @(
     'cleanupStaleManagedUnpackedExtensions',
     'cleanupRemovedManagedExtension',
     'pinAllLoadedExtensionsToToolbar',
-    'coreSupportsManagedUnpackedExtensions'
+    'coreSupportsManagedUnpackedExtensions',
+    'startSyncBridge',
+    'callSyncBridge',
+    'syncBridgeAddress'
 )
 $retiredPattern = ($retiredSymbols | ForEach-Object { [Regex]::Escape($_) }) -join '|'
 $savedPreference = $ErrorActionPreference

@@ -200,6 +200,8 @@ export function GetRunningInstances():Promise<Array<browser.Profile>>;
 
 export function GetSyncProfiles():Promise<Array<backend.SyncProfileInfo>>;
 
+export function GetSyncSnapshot():Promise<backend.SyncSnapshot>;
+
 export function GetSyncStatus():Promise<Record<string, any>>;
 
 export function InstallExtensionFromCRXURL(arg1:string,arg2:string):Promise<string>;

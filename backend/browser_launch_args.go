@@ -82,10 +82,6 @@ func sanitizeLaunchArgsBySpecs(args []string, specs []managedLaunchArgSpec) ([]s
 	return sanitized, removed
 }
 
-func matchManagedLaunchArg(arg string) (managedLaunchArgSpec, bool) {
-	return matchLaunchArgSpec(arg, managedLaunchArgSpecs)
-}
-
 func matchLaunchArgSpec(arg string, specs []managedLaunchArgSpec) (managedLaunchArgSpec, bool) {
 	for _, spec := range specs {
 		if strings.EqualFold(arg, spec.prefix) || strings.HasPrefix(strings.ToLower(arg), strings.ToLower(spec.prefix)+"=") {

@@ -1440,24 +1440,6 @@ func backupUniqueNonEmpty(list []string) []string {
 	return out
 }
 
-func backupUnionStrings(a, b []string) []string {
-	seen := map[string]struct{}{}
-	out := make([]string, 0, len(a)+len(b))
-	for _, item := range append(append([]string{}, a...), b...) {
-		item = strings.TrimSpace(item)
-		if item == "" {
-			continue
-		}
-		key := strings.ToLower(item)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, item)
-	}
-	return out
-}
-
 func backupMergeBookmarks(a, b []config.BrowserBookmark) []config.BrowserBookmark {
 	seen := map[string]struct{}{}
 	out := make([]config.BrowserBookmark, 0, len(a)+len(b))

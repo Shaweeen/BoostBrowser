@@ -3,7 +3,6 @@ package backend
 import (
 	"fmt"
 	"regexp"
-	"strings"
 	"time"
 )
 
@@ -250,12 +249,4 @@ func importMnemonicIntoFreshMetaMask(debugPort int, mnemonic, password string) (
 		}
 	}
 	return "", fmt.Errorf("MetaMask 完成页面加载超时")
-}
-
-func sanitizeWalletPublicAddress(value string) string {
-	value = strings.TrimSpace(value)
-	if ethereumAddressPattern.MatchString(value) || solanaAddressPattern.MatchString(value) {
-		return value
-	}
-	return ""
 }

@@ -444,10 +444,6 @@ func (a *App) startWalletImportProfile(spec walletImportSpec, row rabbyWalletImp
 	return started.DebugPort, nil
 }
 
-func (a *App) emitRabbyImportProgress(completed, total int, row RabbyWalletImportResultRow) {
-	a.emitWalletImportProgress("rabby", completed, total, row)
-}
-
 func (a *App) emitWalletImportProgress(walletType string, completed, total int, row RabbyWalletImportResultRow) {
 	if a.ctx == nil {
 		return
@@ -868,15 +864,6 @@ func resolveWalletImportProfile(row rabbyWalletImportSecretRow, profiles map[str
 
 func normalizeRabbyMnemonic(value string) string {
 	return strings.ToLower(strings.Join(strings.Fields(value), " "))
-}
-
-func validRabbyMnemonicWordCount(count int) bool {
-	switch count {
-	case 12, 15, 18, 21, 24:
-		return true
-	default:
-		return false
-	}
 }
 
 func sha256Bytes(value string) [32]byte {

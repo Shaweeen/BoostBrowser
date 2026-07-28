@@ -394,6 +394,10 @@ export function GetSyncProfiles() {
   return window['go']['main']['App']['GetSyncProfiles']();
 }
 
+export function GetSyncSnapshot() {
+  return window['go']['main']['App']['GetSyncSnapshot']();
+}
+
 export function GetSyncStatus() {
   return window['go']['main']['App']['GetSyncStatus']();
 }

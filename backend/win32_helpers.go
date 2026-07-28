@@ -375,34 +375,29 @@ func findProcessWindow(pid int) (windows.HWND, error) {
 	return best.hwnd, nil
 }
 
-// findProcessTreeWindow resolves the real Chrome frame even when the launcher
-// PID hands the browser window to a child process. CloakBrowser and current
-// Chrome builds can both exhibit this during startup/recovery.
-func findProcessTreeWindow(rootPID int) (windows.HWND, error) {
-	if hwnd, err := findProcessWindow(rootPID); err == nil {
-		return hwnd, nil
-	}
+type processEntry32 struct {
+	Size            uint32
+	Usage           uint32
+	ProcessID       uint32
+	DefaultHeapID   uintptr
+	ModuleID        uint32
+	Threads         uint32
+	ParentProcessID uint32
+	PriClassBase    int32
+	Flags           uint32
+	ExeFile         [260]uint16
+}
+
+func snapshotProcessChildren() map[int][]int {
 	const th32csSnapProcess = 0x00000002
 	const invalidHandleValue = ^uintptr(0)
-	type processEntry32 struct {
-		Size            uint32
-		Usage           uint32
-		ProcessID       uint32
-		DefaultHeapID   uintptr
-		ModuleID        uint32
-		Threads         uint32
-		ParentProcessID uint32
-		PriClassBase    int32
-		Flags           uint32
-		ExeFile         [260]uint16
-	}
 	snapshot, _, _ := procCreateToolhelp32Snapshot.Call(th32csSnapProcess, 0)
 	if snapshot == invalidHandleValue || snapshot == 0 {
-		return 0, fmt.Errorf("无法读取 PID=%d 的进程树", rootPID)
+		return nil
 	}
 	defer windows.CloseHandle(windows.Handle(snapshot))
 
-	children := map[int][]int{}
+	children := make(map[int][]int)
 	var entry processEntry32
 	entry.Size = uint32(unsafe.Sizeof(entry))
 	ret, _, _ := procProcess32FirstW.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
@@ -410,6 +405,48 @@ func findProcessTreeWindow(rootPID int) (windows.HWND, error) {
 		children[int(entry.ParentProcessID)] = append(children[int(entry.ParentProcessID)], int(entry.ProcessID))
 		entry.Size = uint32(unsafe.Sizeof(entry))
 		ret, _, _ = procProcess32NextW.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
+	}
+	return children
+}
+
+func mapProcessTreeRoots(rootPIDs []int) map[int]int {
+	children := snapshotProcessChildren()
+	if children == nil {
+		return nil
+	}
+	pidToRoot := make(map[int]int)
+	for _, rootPID := range rootPIDs {
+		if rootPID <= 0 {
+			continue
+		}
+		queue := []int{rootPID}
+		seen := make(map[int]struct{})
+		for len(queue) > 0 {
+			pid := queue[0]
+			queue = queue[1:]
+			if _, exists := seen[pid]; exists {
+				continue
+			}
+			seen[pid] = struct{}{}
+			if _, claimed := pidToRoot[pid]; !claimed {
+				pidToRoot[pid] = rootPID
+			}
+			queue = append(queue, children[pid]...)
+		}
+	}
+	return pidToRoot
+}
+
+// findProcessTreeWindow resolves the real Chrome frame even when the launcher
+// PID hands the browser window to a child process. CloakBrowser and current
+// Chrome builds can both exhibit this during startup/recovery.
+func findProcessTreeWindow(rootPID int) (windows.HWND, error) {
+	if hwnd, err := findProcessWindow(rootPID); err == nil {
+		return hwnd, nil
+	}
+	children := snapshotProcessChildren()
+	if children == nil {
+		return 0, fmt.Errorf("无法读取 PID=%d 的进程树", rootPID)
 	}
 
 	queue := append([]int(nil), children[rootPID]...)
@@ -437,55 +474,9 @@ func findProcessTreeWindows(rootPIDs []int) map[int]windows.HWND {
 	if len(rootPIDs) == 0 {
 		return result
 	}
-	const th32csSnapProcess = 0x00000002
-	const invalidHandleValue = ^uintptr(0)
-	type processEntry32 struct {
-		Size            uint32
-		Usage           uint32
-		ProcessID       uint32
-		DefaultHeapID   uintptr
-		ModuleID        uint32
-		Threads         uint32
-		ParentProcessID uint32
-		PriClassBase    int32
-		Flags           uint32
-		ExeFile         [260]uint16
-	}
-	snapshot, _, _ := procCreateToolhelp32Snapshot.Call(th32csSnapProcess, 0)
-	if snapshot == invalidHandleValue || snapshot == 0 {
+	pidToRoot := mapProcessTreeRoots(rootPIDs)
+	if pidToRoot == nil {
 		return result
-	}
-	defer windows.CloseHandle(windows.Handle(snapshot))
-
-	children := make(map[int][]int)
-	var entry processEntry32
-	entry.Size = uint32(unsafe.Sizeof(entry))
-	ret, _, _ := procProcess32FirstW.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
-	for ret != 0 {
-		children[int(entry.ParentProcessID)] = append(children[int(entry.ParentProcessID)], int(entry.ProcessID))
-		entry.Size = uint32(unsafe.Sizeof(entry))
-		ret, _, _ = procProcess32NextW.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
-	}
-
-	pidToRoot := make(map[int]int)
-	for _, rootPID := range rootPIDs {
-		if rootPID <= 0 {
-			continue
-		}
-		queue := []int{rootPID}
-		seen := make(map[int]struct{})
-		for len(queue) > 0 {
-			pid := queue[0]
-			queue = queue[1:]
-			if _, exists := seen[pid]; exists {
-				continue
-			}
-			seen[pid] = struct{}{}
-			if _, claimed := pidToRoot[pid]; !claimed {
-				pidToRoot[pid] = rootPID
-			}
-			queue = append(queue, children[pid]...)
-		}
 	}
 	search := &processWindowsBatchSearch{pidToRoot: pidToRoot, best: make(map[int]processWindowCandidate)}
 	procEnumWindows.Call(processWindowsBatchEnumCallback, uintptr(unsafe.Pointer(search)))

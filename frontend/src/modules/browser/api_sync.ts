@@ -38,6 +38,31 @@ export interface SyncStatus {
   bridgeError?: string
 }
 
+export interface SyncSnapshot {
+  profiles: SyncProfileInfo[]
+  status: SyncStatus | null
+  generation: number
+}
+
+export async function getSyncSnapshot(): Promise<SyncSnapshot> {
+  const bindings: any = await getBindings()
+  if (bindings?.GetSyncSnapshot) {
+    try {
+      const snapshot = await bindings.GetSyncSnapshot()
+      return {
+        profiles: snapshot?.profiles || [],
+        status: snapshot?.status || null,
+        generation: Number(snapshot?.generation || 0),
+      }
+    } catch {
+      return { profiles: [], status: null, generation: 0 }
+    }
+  }
+  // Compatibility fallback for older locally generated Wails bindings.
+  const [profiles, status] = await Promise.all([getSyncProfiles(), getSyncStatus()])
+  return { profiles, status, generation: 0 }
+}
+
 export async function updateSyncRandomDelay(enabled: boolean, minMs: number, maxMs: number): Promise<string | null> {
   const bindings: any = await getBindings()
   try {

@@ -103,6 +103,75 @@ func TestPauseGenerationDropsDelayedEventAfterResume(t *testing.T) {
 	}
 }
 
+func TestLayoutBoundarySuspendsDispatchAndDropsOldGeometryEvents(t *testing.T) {
+	s := NewInputSyncer()
+	atomic.StoreInt32(&s.active, 1)
+	s.SetRandomDelay(true, 40, 40)
+	fired := make(chan struct{}, 1)
+	s.dispatchWithRandomDelay(windows.HWND(1), func() { fired <- struct{}{} })
+
+	s.BeginLayoutUpdate()
+	if s.canDispatch() {
+		t.Fatal("input dispatch must be suspended while windows are moving")
+	}
+	s.EndLayoutUpdate()
+	if !s.canDispatch() {
+		t.Fatal("input dispatch must resume after the layout boundary")
+	}
+	select {
+	case <-fired:
+		t.Fatal("event mapped against the old window geometry must not fire")
+	case <-time.After(90 * time.Millisecond):
+	}
+}
+
+func TestPopupGeometryUpdateSuspendsDispatch(t *testing.T) {
+	s := NewInputSyncer()
+	atomic.StoreInt32(&s.active, 1)
+	atomic.StoreInt32(&s.popupUpdating, 1)
+	if s.canDispatch() {
+		t.Fatal("input dispatch must pause during popup geometry updates")
+	}
+	atomic.StoreInt32(&s.popupUpdating, 0)
+	if !s.canDispatch() {
+		t.Fatal("input dispatch must resume after popup geometry updates")
+	}
+}
+
+func TestClearRuntimeStateReleasesCollectedSessionData(t *testing.T) {
+	s := NewInputSyncer()
+	s.masterHwnd = windows.HWND(11)
+	s.followerHwnds = []windows.HWND{12, 13}
+	s.masterPid = 101
+	s.masterDebug = 9222
+	s.followerDebug = []int{9223, 9224}
+	s.lastSyncURL = "https://example.test"
+	s.lastFocusedEditableState = "stale"
+	s.followerSnapshot = []windows.HWND{12, 13}
+	s.randomDelayNext[windows.HWND(12)] = time.Now()
+	atomic.StoreInt32(&s.paused, 1)
+	atomic.StoreInt32(&s.pointerInsideMaster, 1)
+	atomic.StoreInt32(&s.mouseEnabled, 1)
+	atomic.StoreInt32(&s.keyEnabled, 1)
+	atomic.StoreInt32(&s.layoutUpdating, 1)
+	atomic.StoreInt32(&s.popupUpdating, 1)
+
+	s.clearRuntimeState()
+
+	if s.masterHwnd != 0 || s.masterPid != 0 || s.masterDebug != 0 ||
+		len(s.followerHwnds) != 0 || len(s.followerDebug) != 0 ||
+		len(s.followerSnapshot) != 0 || len(s.randomDelayNext) != 0 ||
+		s.cdpKeyQueue != nil || s.pageInputQueue != nil ||
+		s.lastSyncURL != "" || s.lastFocusedEditableState != "" {
+		t.Fatalf("runtime session data was not fully released: %+v", s.GetStats())
+	}
+	if s.IsPaused() || s.PointerInsideMaster() ||
+		atomic.LoadInt32(&s.mouseEnabled) != 0 || atomic.LoadInt32(&s.keyEnabled) != 0 ||
+		atomic.LoadInt32(&s.layoutUpdating) != 0 || atomic.LoadInt32(&s.popupUpdating) != 0 {
+		t.Fatal("runtime atomic state was not reset")
+	}
+}
+
 func TestSyncDebugLogEnabledByEnv(t *testing.T) {
 	old := os.Getenv("BOOST_BROWSER_SYNC_DEBUG_LOG")
 	defer os.Setenv("BOOST_BROWSER_SYNC_DEBUG_LOG", old)
@@ -309,11 +378,14 @@ func TestRuntimeSnapshotKeepsLocallyReconciledLivePID(t *testing.T) {
 	currentPID := os.Getpid()
 	profile := &BrowserProfile{Running: true, Pid: currentPID, DebugPort: 32123}
 	stale := browserRuntimeSnapshotEntry{ProfileID: "profile-1", PID: currentPID + 100000, DebugPort: 32124}
-	if !keepLocalRuntimeInsteadOfSnapshot(profile, stale) {
+	if !keepLocalRuntimeInsteadOfSnapshot(profile, stale, windows.HWND(1)) {
 		t.Fatal("a live locally reconciled PID must not be overwritten by a stale shared snapshot")
 	}
+	if keepLocalRuntimeInsteadOfSnapshot(profile, stale, 0) {
+		t.Fatal("a live process without a top-level window must yield to the shared snapshot")
+	}
 	stale.PID = currentPID
-	if keepLocalRuntimeInsteadOfSnapshot(profile, stale) {
+	if keepLocalRuntimeInsteadOfSnapshot(profile, stale, windows.HWND(1)) {
 		t.Fatal("the same PID should accept current shared snapshot metadata")
 	}
 }

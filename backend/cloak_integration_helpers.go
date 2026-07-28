@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -299,33 +298,6 @@ func (a *App) isProfileUsingCloakCore(profileId string) bool {
 	return found && isCloakCore(core, chromeBinaryPath)
 }
 
-func mergeUniqueLaunchArgs(primary []string, secondary []string) []string {
-	result := make([]string, 0, len(primary)+len(secondary))
-	seenKeys := map[string]int{}
-	appendOrReplace := func(arg string) {
-		arg = strings.TrimSpace(arg)
-		if arg == "" {
-			return
-		}
-		key := launchArgKey(arg)
-		if key != "" {
-			if idx, ok := seenKeys[key]; ok {
-				result[idx] = arg
-				return
-			}
-			seenKeys[key] = len(result)
-		}
-		result = append(result, arg)
-	}
-	for _, arg := range primary {
-		appendOrReplace(arg)
-	}
-	for _, arg := range secondary {
-		appendOrReplace(arg)
-	}
-	return result
-}
-
 type localLicenseState struct {
 	MaxProfileLimit int      `json:"maxProfileLimit"`
 	UsedCDKeys      []string `json:"usedCDKeys"`
@@ -445,11 +417,3 @@ func getUserAgentOverride(debugPort int) (string, map[string]any, error) {
 }
 
 const stealthJS = `Object.defineProperty(navigator, 'webdriver', {get: () => undefined});`
-
-func proxyURLHost(proxyConfig string) string {
-	u, err := url.Parse(proxyConfig)
-	if err == nil && u.Host != "" {
-		return u.Host
-	}
-	return proxyConfig
-}

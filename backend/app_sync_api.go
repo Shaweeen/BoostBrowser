@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"boost-browser/backend/internal/logger"
@@ -29,6 +31,7 @@ var syncState struct {
 }
 
 var syncSessionMu sync.Mutex
+var syncSnapshotGeneration uint64
 
 // SyncProfileInfo 同步页面的实例信息
 type SyncProfileInfo struct {
@@ -42,10 +45,33 @@ type SyncProfileInfo struct {
 	BadgeNumber int    `json:"badgeNumber"`
 }
 
+// SyncSnapshot returns profiles and session state from one serialized boundary.
+// The UI must not combine a newly scanned window list with status from an older
+// Start/Stop generation.
+type SyncSnapshot struct {
+	Profiles   []SyncProfileInfo      `json:"profiles"`
+	Status     map[string]interface{} `json:"status"`
+	Generation uint64                 `json:"generation"`
+}
+
+func (a *App) GetSyncSnapshot() SyncSnapshot {
+	syncSessionMu.Lock()
+	defer syncSessionMu.Unlock()
+	return SyncSnapshot{
+		Profiles:   a.getSyncProfilesLocal(),
+		Status:     a.getSyncStatusLocal(),
+		Generation: atomic.LoadUint64(&syncSnapshotGeneration),
+	}
+}
+
 // GetSyncProfiles 获取所有可用于同步的实例列表
 func (a *App) GetSyncProfiles() []SyncProfileInfo {
-	// 同步面板直接读取共享状态并接管存活窗口。它不再依赖主客户端
-	// Bridge，因此主客户端崩溃或 watchdog 重启不会让同步面板失联退出。
+	// 同步面板直接读取共享状态并接管存活窗口，因此主客户端崩溃或
+	// watchdog 重启不会让同步面板失联退出。
+	// Serialize collection with Start/Stop so a fast refresh can never rebuild
+	// window data while the previous session is still releasing hooks/workers.
+	syncSessionMu.Lock()
+	defer syncSessionMu.Unlock()
 	return a.getSyncProfilesLocal()
 }
 
@@ -237,6 +263,7 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	syncState.followerIds = validFollowerIds
 	syncState.active = true
 	syncState.mu.Unlock()
+	atomic.AddUint64(&syncSnapshotGeneration, 1)
 
 	log.Info("输入同步已启动",
 		logger.F("master", masterProfileId),
@@ -272,6 +299,7 @@ func (a *App) stopInputSyncLocal() error {
 	if syncer != nil {
 		syncer.Stop()
 	}
+	atomic.AddUint64(&syncSnapshotGeneration, 1)
 
 	log.Info("输入同步已停止")
 	return nil
@@ -364,12 +392,27 @@ func (a *App) SyncTileWindows(profileIds []string, masterProfileId string, layou
 }
 
 func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, layoutMode string) (*TileWindowsResult, error) {
+	syncSessionMu.Lock()
+	defer syncSessionMu.Unlock()
+
 	// The main management client is a separate process from the sync assistant.
 	// Minimise it before arranging browser windows so it cannot cover the grid.
 	minimizeMainClientWindow()
 
-	a.browserMgr.Mutex.Lock()
-	defer a.browserMgr.Mutex.Unlock()
+	// Window movement and coordinate replay must never overlap. Invalidate
+	// queued actions, suspend dispatch while geometry changes, then allow a
+	// short DWM settle interval before accepting new input.
+	syncState.mu.Lock()
+	layoutSyncer := syncState.syncer
+	layoutActive := syncState.active && layoutSyncer != nil
+	syncState.mu.Unlock()
+	if layoutActive {
+		layoutSyncer.BeginLayoutUpdate()
+		defer func() {
+			time.Sleep(35 * time.Millisecond)
+			layoutSyncer.EndLayoutUpdate()
+		}()
+	}
 
 	// Reuse the exact HWNDs already validated by the active sync engine. Chrome
 	// can transfer its top-level frame to a sibling process, so resolving again
@@ -391,6 +434,9 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	}
 	syncState.mu.Unlock()
 
+	a.browserMgr.Mutex.Lock()
+	defer a.browserMgr.Mutex.Unlock()
+
 	// 收集运行中的实例窗口
 	type winInfo struct {
 		hwnd      windows.HWND
@@ -408,6 +454,13 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 			continue
 		}
 		seenProfileIDs[pid] = struct{}{}
+		profile, profileExists := a.browserMgr.Profiles[pid]
+		if profileExists && profile.Pid > 0 {
+			// The fixed 1400x600 size is only a startup template. Once the user
+			// explicitly arranges environments, startup retries must never move
+			// or resize those windows again.
+			cancelBrowserWindowBoundsEnforcement(profile.Pid)
+		}
 		if hwnd := activeWindows[pid]; hwnd != 0 && isWindow(hwnd) {
 			if _, duplicate := seenWindows[hwnd]; duplicate {
 				continue
@@ -416,8 +469,7 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 			wins = append(wins, winInfo{hwnd: hwnd, profileId: pid})
 			continue
 		}
-		profile, ok := a.browserMgr.Profiles[pid]
-		if !ok || !profile.Running || profile.Pid <= 0 {
+		if !profileExists || !profile.Running || profile.Pid <= 0 {
 			continue
 		}
 		hwnd, err := findProcessTreeWindow(profile.Pid)

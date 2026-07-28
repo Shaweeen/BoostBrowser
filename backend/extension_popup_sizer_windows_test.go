@@ -4,6 +4,21 @@ package backend
 
 import "testing"
 
+func TestExplicitLayoutCancelsStartupWindowTemplate(t *testing.T) {
+	const pid = 987654
+	session := &startupWindowBoundsSession{}
+	startupWindowBoundsSessions.Store(pid, session)
+	t.Cleanup(func() { startupWindowBoundsSessions.Delete(pid) })
+
+	cancelBrowserWindowBoundsEnforcement(pid)
+	if !session.cancelled.Load() {
+		t.Fatal("explicit layout must cancel the startup-only window template")
+	}
+	if _, exists := startupWindowBoundsSessions.Load(pid); exists {
+		t.Fatal("cancelled startup bounds session must be released")
+	}
+}
+
 func TestConstrainSyncWalletPopupUsesCompactResponsiveBounds(t *testing.T) {
 	x, y, width, height, changed := constrainSyncPopupRectForTitle(
 		"Rabby Wallet Notification",
@@ -19,6 +34,34 @@ func TestConstrainSyncWalletPopupUsesCompactResponsiveBounds(t *testing.T) {
 	}
 	if x < 2 || y < 2 || x+width > 818 || y+height > 558 {
 		t.Fatalf("popup escaped owner bounds: x=%d y=%d width=%d height=%d", x, y, width, height)
+	}
+}
+
+func TestWalletPopupWidthAndHeightAreClampedIndependently(t *testing.T) {
+	_, _, width, height, changed := constrainSyncPopupRectForTitle(
+		"Rabby Wallet Notification",
+		winRect{Left: 20, Top: 20, Right: 1460, Bottom: 640},
+		winRect{Left: 0, Top: 0, Right: 1600, Bottom: 900},
+		2,
+	)
+	if !changed {
+		t.Fatal("wide wallet popup should remove unused horizontal canvas")
+	}
+	if width != extensionPopupTargetWidth || height != extensionPopupTargetHeight {
+		t.Fatalf("wallet popup must use content bounds without proportional scaling: %dx%d", width, height)
+	}
+}
+
+func TestWalletPopupCanResolveOwnerThroughChromeProcessTree(t *testing.T) {
+	owner := syncPopupOwnerWindow{hwnd: 10, pid: 100, rect: winRect{Left: 0, Top: 0, Right: 800, Bottom: 600}}
+	search := &syncPopupBoundsSearch{
+		owners:              []syncPopupOwnerWindow{owner},
+		processOwners:       map[int]int{777: 100},
+		processOwnersLoaded: true,
+	}
+	resolved, ok := search.findProcessTreeOwner(777)
+	if !ok || resolved.hwnd != owner.hwnd {
+		t.Fatalf("wallet notification child process did not resolve to its browser owner: %+v", resolved)
 	}
 }
 
@@ -46,6 +89,18 @@ func TestWalletPopupTitleClassification(t *testing.T) {
 	}
 	if isStrongExtensionPopupTitle("The crypto wallet for DeFi | MetaMask") {
 		t.Fatal("wallet website title must not be classified as a strong popup")
+	}
+	for _, title := range []string{
+		"MetaMask Notification - BrowserStudio",
+		"Rabby Wallet - Boost Browser",
+		"Petra - BrowserStudio",
+	} {
+		if !isKnownWalletPopupProductTitle(title) {
+			t.Fatalf("%q should be recognized as a wallet product popup", title)
+		}
+	}
+	if isKnownWalletPopupProductTitle("Wallet news - BrowserStudio") {
+		t.Fatal("unknown browser title must not be classified as a wallet product popup")
 	}
 }
 

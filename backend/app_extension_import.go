@@ -578,10 +578,6 @@ func validateExtensionDownloadURL(rawURL string) error {
 	return nil
 }
 
-func isBlockedExtensionDownloadHost(host string) bool {
-	return isBlockedRemoteHostname(host)
-}
-
 func downloadExtensionPayload(downloadURL string) ([]byte, error) {
 	const maxExtensionDownloadBytes = 128 * 1024 * 1024
 	client := newPublicRemoteHTTPClient(90*time.Second, false)

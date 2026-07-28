@@ -49,12 +49,16 @@ type InputSyncer struct {
 	randomDelayMaxMs   int32
 	randomDelayMu      sync.Mutex
 	randomDelayNext    map[windows.HWND]time.Time
+	cdpPortLocks       sync.Map
+	layoutUpdating     int32
+	popupUpdating      int32
 
 	mouseHook    uintptr
 	keyHook      uintptr
 	stopCh       chan struct{}
 	stopOnce     sync.Once
 	hookThreadID uint32
+	workerWG     sync.WaitGroup
 
 	lastMoveTime          int64 // Unix nano
 	pageKeyboardFocus     int32 // last master click was inside the renderer
@@ -335,6 +339,9 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	s.stopOnce = sync.Once{}
 	s.cdpKeyQueue = make(chan cdpKeyEvent, 512)
 	s.pageInputQueue = make(chan pageInputEvent, 512)
+	s.randomDelayMu.Lock()
+	s.randomDelayNext = make(map[windows.HWND]time.Time)
+	s.randomDelayMu.Unlock()
 	ready := make(chan error, 1)
 
 	// 重置诊断计数器
@@ -371,13 +378,13 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 
 	activeInputSyncer.Store(s)
 	s.mu.Unlock()
-	go s.cdpKeyDispatchLoop(s.stopCh, s.cdpKeyQueue)
-	go s.pageInputDispatchLoop(s.stopCh, s.pageInputQueue)
-	go s.syncPopupBoundsLoop(s.stopCh)
+	s.runWorker(func() { s.cdpKeyDispatchLoop(s.stopCh, s.cdpKeyQueue) })
+	s.runWorker(func() { s.pageInputDispatchLoop(s.stopCh, s.pageInputQueue) })
+	s.runWorker(func() { s.syncPopupBoundsLoop(s.stopCh) })
 
 	// 安装全局鼠标和键盘钩子。启动必须等待安装结果；旧逻辑在安装
 	// 失败时仍立即返回成功，前端因此会显示“同步中”但没有任何事件。
-	go func() {
+	s.runWorker(func() {
 		defer func() {
 			if r := recover(); r != nil {
 				activeInputSyncer.CompareAndSwap(s, nil)
@@ -392,7 +399,7 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 			}
 		}()
 		s.installHooks(ready)
-	}()
+	})
 
 	select {
 	case err := <-ready:
@@ -400,6 +407,7 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 			activeInputSyncer.CompareAndSwap(s, nil)
 			atomic.StoreInt32(&s.active, 0)
 			s.signalStop()
+			s.Stop()
 			return err
 		}
 		return nil
@@ -413,6 +421,7 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 		if hookThreadID != 0 {
 			user32dll.NewProc("PostThreadMessageW").Call(uintptr(hookThreadID), 0x0012, 0, 0)
 		}
+		s.Stop()
 		return fmt.Errorf("键鼠 Hook 安装超时，请重新启动同步助手")
 	}
 }
@@ -436,9 +445,13 @@ func (s *InputSyncer) StartWithURLSync(masterHwnd windows.HWND, followerHwnds []
 		return nil
 	}
 
-	// 启动 URL 同步协程
-	s.urlStopCh = make(chan struct{})
-	go func() {
+	// Capture an immutable stop channel for this worker. Reading the mutable
+	// field from the loop raced with Stop clearing it and could delay shutdown.
+	urlStopCh := make(chan struct{})
+	s.mu.Lock()
+	s.urlStopCh = urlStopCh
+	s.mu.Unlock()
+	s.runWorker(func() {
 		defer func() {
 			if r := recover(); r != nil {
 				logger.New("InputSyncer").Error("urlSyncLoop goroutine panic recovered",
@@ -446,8 +459,8 @@ func (s *InputSyncer) StartWithURLSync(masterHwnd windows.HWND, followerHwnds []
 				)
 			}
 		}()
-		s.urlSyncLoop()
-	}()
+		s.urlSyncLoop(urlStopCh)
+	})
 
 	log := logger.New("InputSyncer")
 	log.Info("CDP URL 同步已启动",
@@ -462,9 +475,11 @@ func (s *InputSyncer) StartWithURLSync(masterHwnd windows.HWND, followerHwnds []
 // Stop 停止输入同步
 func (s *InputSyncer) Stop() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if atomic.LoadInt32(&s.active) == 0 && s.mouseHook == 0 && s.keyHook == 0 && s.hookThreadID == 0 {
+	hadRuntime := atomic.LoadInt32(&s.active) != 0 ||
+		s.masterHwnd != 0 || len(s.followerHwnds) > 0 ||
+		s.mouseHook != 0 || s.keyHook != 0 || s.hookThreadID != 0
+	if !hadRuntime {
+		s.mu.Unlock()
 		return
 	}
 
@@ -473,6 +488,7 @@ func (s *InputSyncer) Stop() {
 		atomic.LoadInt32(&s.wheelCount), atomic.LoadInt32(&s.keyCount))
 
 	atomic.StoreInt32(&s.active, 0)
+	atomic.AddUint64(&s.dispatchGeneration, 1)
 	activeInputSyncer.CompareAndSwap(s, nil)
 	s.signalStop()
 
@@ -486,26 +502,81 @@ func (s *InputSyncer) Stop() {
 		s.urlStopCh = nil
 	}
 
-	// 卸载钩子
-	if s.mouseHook != 0 {
+	// Detach native resources while holding the state lock, then release the
+	// lock before waiting: worker shutdown paths also take s.mu.
+	mouseHook := s.mouseHook
+	keyHook := s.keyHook
+	hookThreadID := s.hookThreadID
+	s.mouseHook = 0
+	s.keyHook = 0
+	s.hookThreadID = 0
+	s.mu.Unlock()
+
+	if mouseHook != 0 {
 		procUnhookWindowsHookEx := user32dll.NewProc("UnhookWindowsHookEx")
-		procUnhookWindowsHookEx.Call(uintptr(s.mouseHook))
-		s.mouseHook = 0
+		procUnhookWindowsHookEx.Call(uintptr(mouseHook))
 	}
-	if s.keyHook != 0 {
+	if keyHook != 0 {
 		procUnhookWindowsHookEx := user32dll.NewProc("UnhookWindowsHookEx")
-		procUnhookWindowsHookEx.Call(uintptr(s.keyHook))
-		s.keyHook = 0
+		procUnhookWindowsHookEx.Call(uintptr(keyHook))
 	}
-	if s.hookThreadID != 0 {
+	if hookThreadID != 0 {
 		procPostThreadMessageW := user32dll.NewProc("PostThreadMessageW")
-		procPostThreadMessageW.Call(uintptr(s.hookThreadID), 0x0012, 0, 0) // WM_QUIT
-		s.hookThreadID = 0
+		procPostThreadMessageW.Call(uintptr(hookThreadID), 0x0012, 0, 0) // WM_QUIT
 	}
+
+	// Stop does not return until URL polling, popup confinement, input queues,
+	// and the native hook loop have all exited. This makes Stop a hard session
+	// boundary before the UI is allowed to refresh and collect new windows.
+	s.workerWG.Wait()
+	s.clearRuntimeState()
 
 	log := logger.New("InputSyncer")
 	log.Info("输入同步已停止")
 	s.lifecycle("sync-input-stop", fmt.Sprintf("clicks=%d", atomic.LoadInt32(&s.clickCount)), fmt.Sprintf("moves=%d", atomic.LoadInt32(&s.moveCount)), fmt.Sprintf("wheels=%d", atomic.LoadInt32(&s.wheelCount)), fmt.Sprintf("keys=%d", atomic.LoadInt32(&s.keyCount)))
+}
+
+func (s *InputSyncer) runWorker(worker func()) {
+	s.workerWG.Add(1)
+	go func() {
+		defer s.workerWG.Done()
+		worker()
+	}()
+}
+
+func (s *InputSyncer) clearRuntimeState() {
+	s.mu.Lock()
+	s.masterHwnd = 0
+	s.followerHwnds = nil
+	s.masterPid = 0
+	s.masterDebug = 0
+	s.followerDebug = nil
+	s.cdpKeyQueue = nil
+	s.pageInputQueue = nil
+	s.lastSyncURL = ""
+	s.lastFocusedEditableState = ""
+	s.mu.Unlock()
+
+	s.followerMu.Lock()
+	s.followerSnapshot = nil
+	s.followerMu.Unlock()
+
+	s.randomDelayMu.Lock()
+	clear(s.randomDelayNext)
+	s.randomDelayMu.Unlock()
+
+	atomic.StoreInt32(&s.paused, 0)
+	atomic.StoreInt32(&s.escapeDown, 0)
+	atomic.StoreInt32(&s.mouseEnabled, 0)
+	atomic.StoreInt32(&s.keyEnabled, 0)
+	atomic.StoreInt32(&s.randomDelayEnabled, 0)
+	atomic.StoreInt32(&s.randomDelayMinMs, 0)
+	atomic.StoreInt32(&s.randomDelayMaxMs, 0)
+	atomic.StoreInt32(&s.pageKeyboardFocus, 0)
+	atomic.StoreInt32(&s.pointerInsideMaster, 0)
+	atomic.StoreInt32(&s.activePageMouseButton, 0)
+	atomic.StoreInt32(&s.layoutUpdating, 0)
+	atomic.StoreInt32(&s.popupUpdating, 0)
 }
 
 func (s *InputSyncer) signalStop() {
@@ -545,18 +616,53 @@ func (s *InputSyncer) togglePausedFromEscape() bool {
 		}
 		handler := s.pauseChanged
 		// Never write logs or call Wails/UI work on the low-level hook thread.
-		go func() {
+		s.runWorker(func() {
 			s.lifecycle("sync-input-pause", fmt.Sprintf("paused=%t", paused), "source=escape")
 			if handler != nil {
 				handler(paused)
 			}
-		}()
+		})
 		return paused
 	}
 }
 
 func (s *InputSyncer) canDispatch() bool {
-	return atomic.LoadInt32(&s.active) == 1 && atomic.LoadInt32(&s.paused) == 0
+	return atomic.LoadInt32(&s.active) == 1 &&
+		atomic.LoadInt32(&s.paused) == 0 &&
+		atomic.LoadInt32(&s.layoutUpdating) == 0 &&
+		atomic.LoadInt32(&s.popupUpdating) == 0
+}
+
+// BeginLayoutUpdate creates a hard boundary between window movement and input
+// coordinate mapping. Events queued against the previous geometry are dropped.
+func (s *InputSyncer) BeginLayoutUpdate() {
+	atomic.StoreInt32(&s.layoutUpdating, 1)
+	atomic.AddUint64(&s.dispatchGeneration, 1)
+	atomic.StoreInt32(&s.activePageMouseButton, 0)
+}
+
+func (s *InputSyncer) EndLayoutUpdate() {
+	atomic.AddUint64(&s.dispatchGeneration, 1)
+	atomic.StoreInt32(&s.layoutUpdating, 0)
+}
+
+func (s *InputSyncer) withCDPPortLock(debugPort int, action func()) {
+	if action == nil {
+		return
+	}
+	if debugPort <= 0 {
+		if s.canDispatch() {
+			action()
+		}
+		return
+	}
+	value, _ := s.cdpPortLocks.LoadOrStore(debugPort, &sync.Mutex{})
+	lock := value.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+	if s.canDispatch() {
+		action()
+	}
 }
 
 // SetConfig 更新同步配置
@@ -674,7 +780,6 @@ func (s *InputSyncer) PointerInsideMaster() bool {
 
 var procGetAncestor = user32dll.NewProc("GetAncestor")
 var procWindowFromPoint = user32dll.NewProc("WindowFromPoint")
-var procSendMessageTimeoutW = user32dll.NewProc("SendMessageTimeoutW")
 var procGetGUIThreadInfo = user32dll.NewProc("GetGUIThreadInfo")
 var procGetKeyboardLayout = user32dll.NewProc("GetKeyboardLayout")
 var procGetKeyboardState = user32dll.NewProc("GetKeyboardState")
@@ -979,17 +1084,12 @@ func mapChromeInputTarget(screenX, screenY int, masterMain, followerMain windows
 	return followerSurface, lparam, ok
 }
 
-func sendChromeUIMouseMessage(hwnd windows.HWND, msg, wparam, lparam uintptr, popupSurface bool) {
-	// Chrome menus are separate top-level widgets. Synchronous delivery makes
-	// hover/submenu state advance before the following click is replayed.
-	// Main-frame toolbar traffic stays asynchronous so many tiled followers
-	// cannot stall the low-level hook thread while the pointer is moving.
-	if !popupSurface {
-		procPostMessageW.Call(uintptr(hwnd), msg, wparam, lparam)
-		return
-	}
-	const smtoAbortIfHung = 0x0002
-	procSendMessageTimeoutW.Call(uintptr(hwnd), msg, wparam, lparam, smtoAbortIfHung, 120, 0)
+func sendChromeUIMouseMessage(hwnd windows.HWND, msg, wparam, lparam uintptr, _ bool) {
+	// Never synchronously wait for a Chrome surface from a low-level hook.
+	// PostMessage preserves per-window ordering (hover before click) without
+	// allowing one hung popup to stall every follower or make Windows remove
+	// the hook for exceeding its callback timeout.
+	procPostMessageW.Call(uintptr(hwnd), msg, wparam, lparam)
 }
 
 func chromeKeyboardTarget(mainHwnd windows.HWND) windows.HWND {
@@ -1730,28 +1830,30 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
 				wg.Add(1)
 				go func(debugPort int, follower windows.HWND) {
 					s.dispatchWithRandomDelayComplete(follower, func() {
-						if debugPort <= 0 || !hasMasterTarget {
-							s.dispatchPageKeyFallback(follower, event)
-							return
-						}
-						followerTarget, ok := matchingFollowerCDPTarget(masterTarget, debugPort, true)
-						if !ok {
-							return
-						}
-						if event.down && event.character != 0 && event.modifiers&3 == 0 {
-							if _, err := cdpCallTarget(followerTarget, "Input.insertText", map[string]any{"text": string(event.character)}); err != nil {
+						s.withCDPPortLock(debugPort, func() {
+							if debugPort <= 0 || !hasMasterTarget {
+								s.dispatchPageKeyFallback(follower, event)
+								return
+							}
+							followerTarget, ok := matchingFollowerCDPTarget(masterTarget, debugPort, true)
+							if !ok {
+								return
+							}
+							if event.down && event.character != 0 && event.modifiers&3 == 0 {
+								if _, err := cdpCallTarget(followerTarget, "Input.insertText", map[string]any{"text": string(event.character)}); err != nil {
+									s.dispatchPageKeyFallback(follower, event)
+								}
+								return
+							}
+							params := map[string]any{
+								"type":                  map[bool]string{true: "keyDown", false: "keyUp"}[event.down],
+								"windowsVirtualKeyCode": int(event.vk), "nativeVirtualKeyCode": int(event.vk),
+								"modifiers": event.modifiers, "key": cdpKeyName(event.vk),
+							}
+							if _, err := cdpCallTarget(followerTarget, "Input.dispatchKeyEvent", params); err != nil {
 								s.dispatchPageKeyFallback(follower, event)
 							}
-							return
-						}
-						params := map[string]any{
-							"type":                  map[bool]string{true: "keyDown", false: "keyUp"}[event.down],
-							"windowsVirtualKeyCode": int(event.vk), "nativeVirtualKeyCode": int(event.vk),
-							"modifiers": event.modifiers, "key": cdpKeyName(event.vk),
-						}
-						if _, err := cdpCallTarget(followerTarget, "Input.dispatchKeyEvent", params); err != nil {
-							s.dispatchPageKeyFallback(follower, event)
-						}
+						})
 					}, wg.Done)
 				}(port, hwnd)
 			}
@@ -1855,10 +1957,6 @@ func (s *InputSyncer) dispatchPageMouseViaCDPNow(msg uint32, screenX, screenY in
 				s.dispatchPageMouseFallback(hwnd, msg, screenX, screenY)
 				return
 			}
-			followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, true)
-			if !ok {
-				return
-			}
 			fl, ft, fr, fb := getWindowRect(render)
 			x, y := rx*float64(fr-fl), ry*float64(fb-ft)
 			buttons := 0
@@ -1866,11 +1964,17 @@ func (s *InputSyncer) dispatchPageMouseViaCDPNow(msg uint32, screenX, screenY in
 				_, buttons = pageMouseButton(msg)
 			}
 			s.dispatchWithRandomDelay(hwnd, func() {
-				if _, err := cdpCallTarget(followerTarget, "Input.dispatchMouseEvent", map[string]any{
-					"type": eventType, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": 1,
-				}); err != nil {
-					s.dispatchPageMouseFallback(hwnd, msg, screenX, screenY)
-				}
+				s.withCDPPortLock(port, func() {
+					followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, true)
+					if !ok {
+						return
+					}
+					if _, err := cdpCallTarget(followerTarget, "Input.dispatchMouseEvent", map[string]any{
+						"type": eventType, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": 1,
+					}); err != nil {
+						s.dispatchPageMouseFallback(hwnd, msg, screenX, screenY)
+					}
+				})
 			})
 		}(port, hwnd)
 	}
@@ -1939,15 +2043,17 @@ func (s *InputSyncer) dispatchPageMouseMoveViaCDPNow(screenX, screenY int, butto
 			if !ok {
 				return
 			}
-			followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, false)
-			if !ok {
-				return
-			}
 			fl, ft, fr, fb := getWindowRect(render)
 			x, y := rx*float64(fr-fl), ry*float64(fb-ft)
 			s.dispatchWithRandomDelay(hwnd, func() {
-				_, _ = cdpCallTarget(followerTarget, "Input.dispatchMouseEvent", map[string]any{
-					"type": "mouseMoved", "x": x, "y": y, "button": button, "buttons": buttons,
+				s.withCDPPortLock(port, func() {
+					followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, false)
+					if !ok {
+						return
+					}
+					_, _ = cdpCallTarget(followerTarget, "Input.dispatchMouseEvent", map[string]any{
+						"type": "mouseMoved", "x": x, "y": y, "button": button, "buttons": buttons,
+					})
 				})
 			})
 		}(port, hwnd)
@@ -2010,19 +2116,21 @@ func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY in
 				s.dispatchPageWheelFallback(hwnd, msg, screenX, screenY, delta, keyState)
 				return
 			}
-			followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, true)
-			if !ok {
-				return
-			}
 			fl, ft, fr, fb := getWindowRect(render)
 			x, y := rx*float64(fr-fl), ry*float64(fb-ft)
 			s.dispatchWithRandomDelay(hwnd, func() {
-				if _, err := cdpCallTarget(followerTarget, "Input.dispatchMouseEvent", map[string]any{
-					"type": "mouseWheel", "x": x, "y": y,
-					"deltaX": deltaX, "deltaY": deltaY, "modifiers": modifiers,
-				}); err != nil {
-					s.dispatchPageWheelFallback(hwnd, msg, screenX, screenY, delta, keyState)
-				}
+				s.withCDPPortLock(port, func() {
+					followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, true)
+					if !ok {
+						return
+					}
+					if _, err := cdpCallTarget(followerTarget, "Input.dispatchMouseEvent", map[string]any{
+						"type": "mouseWheel", "x": x, "y": y,
+						"deltaX": deltaX, "deltaY": deltaY, "modifiers": modifiers,
+					}); err != nil {
+						s.dispatchPageWheelFallback(hwnd, msg, screenX, screenY, delta, keyState)
+					}
+				})
 			})
 		}(port, hwnd)
 	}
@@ -2122,18 +2230,6 @@ func isKeyDown(vk uint32) bool {
 	return r1&0x8000 != 0
 }
 
-func buildKeyLParam(sc uint32, isExtended bool, isUp bool) uintptr {
-	var lparam uintptr
-	lparam = uintptr(sc) << 16
-	if isExtended {
-		lparam |= 1 << 24
-	}
-	if isUp {
-		lparam |= 1<<30 | 1<<31
-	}
-	return lparam
-}
-
 var procToUnicodeEx = user32dll.NewProc("ToUnicodeEx")
 
 func toUnicode(vk uint16, sc uint16, isExtended bool) rune {
@@ -2226,12 +2322,12 @@ func syncLog(format string, args ...interface{}) {
 // CDP URL 同步
 // ============================================================================
 
-func (s *InputSyncer) urlSyncLoop() {
+func (s *InputSyncer) urlSyncLoop(stopCh <-chan struct{}) {
 	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-s.urlStopCh:
+		case <-stopCh:
 			return
 		case <-ticker.C:
 		}
@@ -2266,7 +2362,9 @@ func (s *InputSyncer) urlSyncLoop() {
 						inputWG.Add(1)
 						go func(debugPort int) {
 							defer inputWG.Done()
-							s.applyFollowerFocusedEditableState(debugPort, state)
+							s.withCDPPortLock(debugPort, func() {
+								s.applyFollowerFocusedEditableState(debugPort, state)
+							})
 						}(port)
 					}
 					inputWG.Wait()
@@ -2284,7 +2382,9 @@ func (s *InputSyncer) urlSyncLoop() {
 						wg.Add(1)
 						go func(debugPort int) {
 							defer wg.Done()
-							s.navigateFollower(debugPort, url)
+							s.withCDPPortLock(debugPort, func() {
+								s.navigateFollower(debugPort, url)
+							})
 						}(port)
 					}
 				}
@@ -2381,19 +2481,4 @@ func (s *InputSyncer) navigateFollower(debugPort int, url string) {
 
 func isAboutBlank(url string) bool {
 	return url == "about:blank" || url == "about:blank#" || url == ""
-}
-
-func toFloat64(v interface{}) (float64, bool) {
-	switch n := v.(type) {
-	case float64:
-		return n, true
-	case float32:
-		return float64(n), true
-	case int:
-		return float64(n), true
-	case int64:
-		return float64(n), true
-	default:
-		return 0, false
-	}
 }

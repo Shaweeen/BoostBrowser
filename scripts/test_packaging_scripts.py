@@ -127,7 +127,10 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertNotIn("browser:instance:stopped", page)
         self.assertNotIn("visibilitychange", page)
         self.assertIn("const releaseCollectedSyncData", page)
-        self.assertIn("const freshProfiles = await loadProfiles()", page)
+        self.assertIn("const snapshot = await getSyncSnapshot()", page)
+        self.assertIn("if (loadProfilesPromiseRef.current) return loadProfilesPromiseRef.current", page)
+        self.assertNotIn("const freshProfiles = await loadProfiles()", page)
+        self.assertIn("func (a *App) GetSyncSnapshot() SyncSnapshot", backend)
         self.assertIn("a.reconcileBrowserRuntimeStateOnce()", backend)
         self.assertNotIn("reconcileSyncRuntimeStateAsync", backend)
 
@@ -270,8 +273,16 @@ class PackagingScriptsTest(unittest.TestCase):
         text = raw.decode("ascii")
         self.assertIn("docs/DELETION_LEDGER.md", text)
         self.assertIn("LedgerDeletionThreshold", text)
+        self.assertIn("LedgerDeletionThreshold = 20", text)
+        self.assertIn("--diff-filter=D", text)
         self.assertIn("MaxNetGrowth", text)
         self.assertIn("Retired window-watcher code was reintroduced", text)
+
+        policy = self.read("docs/CHANGE_POLICY.md")
+        agents = self.read("AGENTS.md")
+        self.assertIn("Replace, then remove", policy)
+        self.assertIn("Recovery after an incorrect deletion", policy)
+        self.assertIn("Do not stack a new workaround", agents)
 
         ledger = self.read("docs/DELETION_LEDGER.md")
         for field in ["Last known revision", "Reason", "Replacement", "Verification", "Precise recovery"]:

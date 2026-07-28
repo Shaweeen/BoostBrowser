@@ -287,24 +287,6 @@ func overlayBadgeNumberNative(img *image.NRGBA, number int) {
 	}
 }
 
-func drawRoundedPill(img *image.NRGBA, x, y, w, h, r int, col color.NRGBA) {
-	if w <= 0 || h <= 0 {
-		return
-	}
-	if r > h/2 {
-		r = h / 2
-	}
-	for yy := y; yy < y+h; yy++ {
-		for xx := x + r; xx < x+w-r; xx++ {
-			if xx >= 0 && xx < img.Bounds().Dx() && yy >= 0 && yy < img.Bounds().Dy() {
-				img.Set(xx, yy, col)
-			}
-		}
-	}
-	drawCircle(img, x+r, y+r, r, col)
-	drawCircle(img, x+w-r-1, y+r, r, col)
-}
-
 // generateBadgeIconImage 生成固定的 Boost Browser 蓝色浏览器图标并叠加红色编号角标。
 // 不再使用 Chrome 窗口自身图标作为底图：切到系统最新版 Chrome 后，Chrome 会暴露
 // 多色官方图标；用户要求任务栏仍保持之前的蓝色 Chrome 类图标 + 红色编号 badge 样式。

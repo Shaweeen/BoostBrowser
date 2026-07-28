@@ -5,6 +5,7 @@ package backend
 import (
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -33,7 +34,35 @@ type syncPopupOwnerWindow struct {
 }
 
 type syncPopupBoundsSearch struct {
-	owners []syncPopupOwnerWindow
+	owners              []syncPopupOwnerWindow
+	processOwners       map[int]int
+	processOwnersLoaded bool
+}
+
+func (search *syncPopupBoundsSearch) findProcessTreeOwner(pid uint32) (syncPopupOwnerWindow, bool) {
+	if search == nil || pid == 0 {
+		return syncPopupOwnerWindow{}, false
+	}
+	if !search.processOwnersLoaded {
+		rootPIDs := make([]int, 0, len(search.owners))
+		for _, owner := range search.owners {
+			if owner.pid != 0 {
+				rootPIDs = append(rootPIDs, int(owner.pid))
+			}
+		}
+		search.processOwners = mapProcessTreeRoots(rootPIDs)
+		search.processOwnersLoaded = true
+	}
+	rootPID, ok := search.processOwners[int(pid)]
+	if !ok {
+		return syncPopupOwnerWindow{}, false
+	}
+	for _, owner := range search.owners {
+		if int(owner.pid) == rootPID {
+			return owner, true
+		}
+	}
+	return syncPopupOwnerWindow{}, false
 }
 
 var syncPopupBoundsEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lParam uintptr) uintptr {
@@ -64,6 +93,13 @@ var syncPopupBoundsEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lP
 		return 1
 	}
 	owner, ownerLinked, ok := findSyncPopupOwner(hwnd, search.owners)
+	lowerTitle := strings.ToLower(title)
+	if !ok && isCompactExtensionPopupTitle(lowerTitle) {
+		if processOwner, found := search.findProcessTreeOwner(windowPID(hwnd)); found {
+			owner = processOwner
+			ok = true
+		}
+	}
 	if !ok || !isSyncPopupSurfaceCandidate(title, popupRect, owner.rect, ownerLinked) {
 		return 1
 	}
@@ -85,9 +121,14 @@ var syncPopupBoundsEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lP
 })
 
 func constrainSyncPopupRectForTitle(title string, popup, owner winRect, inset int) (x, y, width, height int, changed bool) {
+	// Secondary surfaces never inherit the 1400x600 startup template and are
+	// never aspect-ratio scaled. Generic menus keep their natural size and are
+	// only clamped into the owner's current (possibly tiled) rectangle. Known
+	// wallet pages independently cap width/height to remove blank canvas while
+	// retaining a complete, scrollable application viewport.
 	x, y, width, height, changed = constrainSyncPopupRect(popup, owner, inset)
 	lowerTitle := strings.ToLower(strings.TrimSpace(title))
-	if !looksLikeWalletExtensionPopup(lowerTitle) && !isStrongExtensionPopupTitle(lowerTitle) && !isKnownWalletPopupProductTitle(lowerTitle) {
+	if !isCompactExtensionPopupTitle(lowerTitle) {
 		return
 	}
 
@@ -159,9 +200,13 @@ func (s *InputSyncer) syncPopupBoundsLoop(stop <-chan struct{}) {
 }
 
 func (s *InputSyncer) constrainSyncPopupSurfaces() {
-	if s == nil || !s.IsActive() || s.IsPaused() {
+	if s == nil || !s.IsActive() || s.IsPaused() || atomic.LoadInt32(&s.layoutUpdating) != 0 {
 		return
 	}
+	if !atomic.CompareAndSwapInt32(&s.popupUpdating, 0, 1) {
+		return
+	}
+	defer atomic.StoreInt32(&s.popupUpdating, 0)
 	mainWindows := append([]windows.HWND{s.masterHwnd}, s.getFollowerSnapshot()...)
 	owners := make([]syncPopupOwnerWindow, 0, len(mainWindows))
 	seen := make(map[windows.HWND]struct{}, len(mainWindows))
@@ -231,12 +276,12 @@ func isSyncPopupSurfaceCandidate(title string, popupRect, ownerRect winRect, own
 	if ownerLinked {
 		return true
 	}
-	if looksLikeMainBrowserWindowTitle(lowerTitle) && !isStrongExtensionPopupTitle(lowerTitle) && !isKnownWalletPopupProductTitle(lowerTitle) {
+	if looksLikeMainBrowserWindowTitle(lowerTitle) && !isDefinitiveExtensionPopupTitle(lowerTitle) {
 		return false
 	}
 	// Empty-title Aura widgets cover Chrome menus, comboboxes and nested menu
 	// surfaces. Titled prompt/notification windows are also valid sync popups.
-	return lowerTitle == "" || isStrongExtensionPopupTitle(lowerTitle) || isKnownWalletPopupProductTitle(lowerTitle) || width < ownerWidth || height < ownerHeight
+	return lowerTitle == "" || isDefinitiveExtensionPopupTitle(lowerTitle) || width < ownerWidth || height < ownerHeight
 }
 
 func constrainSyncPopupRect(popup, owner winRect, inset int) (x, y, width, height int, changed bool) {

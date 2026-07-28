@@ -79,6 +79,20 @@ func (a *App) reconcileBrowserRuntimeStateOnce() {
 		return
 	}
 
+	// Resolve every currently tracked Chromium root in one process/window pass.
+	// The old per-profile lookup repeated Toolhelp + EnumWindows for every open
+	// environment, making a manual refresh increasingly slow and more likely to
+	// observe an inconsistent window set while users close/reopen instances.
+	currentPIDs := make([]int, 0)
+	a.browserMgr.Mutex.Lock()
+	for _, profile := range a.browserMgr.Profiles {
+		if profile != nil && profile.Running && profile.Pid > 0 {
+			currentPIDs = append(currentPIDs, profile.Pid)
+		}
+	}
+	a.browserMgr.Mutex.Unlock()
+	currentWindows := findProcessTreeWindows(currentPIDs)
+
 	type update struct {
 		profile *BrowserProfile
 		kind    string
@@ -123,10 +137,8 @@ func (a *App) reconcileBrowserRuntimeStateOnce() {
 			// Chrome may hand the visible top-level frame to a sibling process that
 			// shares the same user-data-dir. A live launcher PID is therefore not
 			// enough: keep it only while it still resolves to a real browser frame.
-			if profile.Pid > 0 {
-				if _, windowErr := findProcessTreeWindow(profile.Pid); windowErr == nil {
-					continue
-				}
+			if profile.Pid > 0 && currentWindows[profile.Pid] != 0 {
+				continue
 			}
 			if !exists {
 				continue

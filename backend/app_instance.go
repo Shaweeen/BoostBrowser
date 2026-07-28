@@ -1134,16 +1134,6 @@ func ensureNewWindowLaunchArg(args []string) []string {
 	return append(args, "--new-window")
 }
 
-func appendLaunchTargets(args []string, profile *BrowserProfile, startURLs []string, skipDefaultStartURLs bool) []string {
-	if len(startURLs) > 0 {
-		return append(args, startURLs...)
-	}
-	if !skipDefaultStartURLs {
-		return browser.BuildLaunchArgs(args, profile)
-	}
-	return args
-}
-
 // buildTargetURLs returns only URLs explicitly requested for this launch.
 // We intentionally do not restore last tabs or open verification/ad pages by
 // default; new instances should start from a clean blank page.

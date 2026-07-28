@@ -5,6 +5,8 @@ package backend
 import (
 	"boost-browser/backend/internal/logger"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -24,15 +26,36 @@ type winRect struct {
 	Bottom int32
 }
 
+type startupWindowBoundsSession struct {
+	cancelled atomic.Bool
+}
+
+var startupWindowBoundsSessions sync.Map
+
+func cancelBrowserWindowBoundsEnforcement(pid int) {
+	if pid <= 0 {
+		return
+	}
+	if value, ok := startupWindowBoundsSessions.LoadAndDelete(pid); ok {
+		value.(*startupWindowBoundsSession).cancelled.Store(true)
+	}
+}
+
 // enforceBrowserWindowBounds runs for a short bounded startup period. Chrome
 // can apply a persisted maximised show-state after parsing --window-size, so a
 // final SW_RESTORE + SetWindowPos is required to guarantee a normal 1400x600
-// top-level frame without introducing a permanent window watcher.
+// top-level frame without introducing a permanent window watcher. Any explicit
+// tile/stack/horizontal action cancels this startup-only template immediately.
 func enforceBrowserWindowBounds(pid, width, height int) {
 	if pid <= 0 || width <= 0 || height <= 0 {
 		return
 	}
+	session := &startupWindowBoundsSession{}
+	if previous, loaded := startupWindowBoundsSessions.Swap(pid, session); loaded {
+		previous.(*startupWindowBoundsSession).cancelled.Store(true)
+	}
 	go func() {
+		defer startupWindowBoundsSessions.CompareAndDelete(pid, session)
 		defer func() {
 			if r := recover(); r != nil {
 				logger.New("BrowserWindow").Error("startup bounds enforcement panic recovered",
@@ -42,8 +65,14 @@ func enforceBrowserWindowBounds(pid, width, height int) {
 			}
 		}()
 		for attempt := 0; attempt < 4; attempt++ {
+			if session.cancelled.Load() {
+				return
+			}
 			hwnd, err := findProcessTreeWindow(pid)
 			if err == nil && hwnd != 0 {
+				if session.cancelled.Load() {
+					return
+				}
 				procShowWindow.Call(uintptr(hwnd), swRestore)
 				procSetWindowPos.Call(uintptr(hwnd), 0, 80, 80, uintptr(width), uintptr(height), SWP_NOZORDER|SWP_SHOWWINDOW)
 			}
@@ -144,38 +173,25 @@ func looksLikeMainBrowserWindowTitle(title string) bool {
 
 func isKnownWalletPopupProductTitle(title string) bool {
 	t := strings.TrimSpace(strings.ToLower(title))
-	knownProductTitles := []string{
-		"okx wallet - browserstudio",
-		"petra - browserstudio",
-		"petra wallet - browserstudio",
-		"metamask - browserstudio",
-		"metamask notification - browserstudio",
-		"phantom - browserstudio",
-		"phantom wallet - browserstudio",
-		"rabby - browserstudio",
-		"rabby wallet - browserstudio",
-		"bitget wallet - browserstudio",
-		"keplr - browserstudio",
-		"keplr wallet - browserstudio",
-		"okx wallet - boost browser",
-		"petra - boost browser",
-		"petra wallet - boost browser",
-		"metamask - boost browser",
-		"metamask notification - boost browser",
-		"phantom - boost browser",
-		"phantom wallet - boost browser",
-		"rabby - boost browser",
-		"rabby wallet - boost browser",
-		"bitget wallet - boost browser",
-		"keplr - boost browser",
-		"keplr wallet - boost browser",
-	}
-	for _, known := range knownProductTitles {
-		if t == known {
-			return true
+	for _, suffix := range []string{" - browserstudio", " - boost browser"} {
+		if !strings.HasSuffix(t, suffix) {
+			continue
 		}
+		product := strings.TrimSpace(strings.TrimSuffix(t, suffix))
+		product = strings.TrimSpace(strings.TrimSuffix(product, " notification"))
+		return isExactKnownWalletPopupTitle(product)
 	}
 	return false
+}
+
+func isCompactExtensionPopupTitle(title string) bool {
+	return looksLikeWalletExtensionPopup(title) ||
+		isStrongExtensionPopupTitle(title) ||
+		isKnownWalletPopupProductTitle(title)
+}
+
+func isDefinitiveExtensionPopupTitle(title string) bool {
+	return isStrongExtensionPopupTitle(title) || isKnownWalletPopupProductTitle(title)
 }
 
 func looksLikeServiceWorkerDevToolsTitle(title string) bool {

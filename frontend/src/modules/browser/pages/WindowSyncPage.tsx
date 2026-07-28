@@ -18,7 +18,7 @@ import { Button, Input, Select, toast } from '../../../shared/components'
 import { ExitWindowSyncPanel, IsWindowSyncPanelMode } from '../../../wailsjs/go/main/App'
 import { EventsOn, ScreenGetAll, WindowCenter, WindowGetPosition, WindowSetAlwaysOnTop, WindowSetMinSize, WindowSetPosition, WindowSetSize, WindowShow, WindowUnminimise } from '../../../wailsjs/runtime/runtime'
 import {
-  getSyncProfiles,
+  getSyncSnapshot,
   getSyncStatus,
   startInputSync,
   stopInputSync,
@@ -74,6 +74,7 @@ export function WindowSyncPage() {
   const [masterId, setMasterId] = useState<string | null>(null)
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
   const [starting, setStarting] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [tileLayout, setTileLayout] = useState<TileLayoutMode>('grid')
   const [filterMode, setFilterMode] = useState<FilterMode>('all')
@@ -88,12 +89,17 @@ export function WindowSyncPage() {
   const [resumeNoticeVisible, setResumeNoticeVisible] = useState(false)
 
   const loadProfilesSeq = useRef(0)
-  const loadProfiles = useCallback(async (): Promise<SyncProfileInfo[]> => {
+  const loadProfilesPromiseRef = useRef<Promise<SyncProfileInfo[]> | null>(null)
+  const startingRef = useRef(false)
+  const stoppingRef = useRef(false)
+  const loadProfiles = useCallback((): Promise<SyncProfileInfo[]> => {
+    if (loadProfilesPromiseRef.current) return loadProfilesPromiseRef.current
     const seq = ++loadProfilesSeq.current
     setRefreshing(true)
-
-    try {
-      const [list, status] = await Promise.all([getSyncProfiles(), getSyncStatus()])
+    const request = (async () => {
+      const snapshot = await getSyncSnapshot()
+      const list = snapshot.profiles
+      const status = snapshot.status
       const sorted = [...list].sort(compareProfileName)
       if (seq !== loadProfilesSeq.current) return sorted
 
@@ -127,18 +133,24 @@ export function WindowSyncPage() {
       })
       setMasterId(prev => (prev && availableIds.has(prev) ? prev : null))
       return sorted
-    } finally {
+    })().finally(() => {
       if (seq === loadProfilesSeq.current) setRefreshing(false)
-    }
+      if (loadProfilesPromiseRef.current === request) loadProfilesPromiseRef.current = null
+    })
+    loadProfilesPromiseRef.current = request
+    return request
   }, [])
 
   const releaseCollectedSyncData = useCallback(() => {
     loadProfilesSeq.current += 1
+    loadProfilesPromiseRef.current = null
     setProfiles([])
     setSelectedIds(new Set())
     setMasterId(null)
     setSyncStatus(null)
     setDelayPreset(null)
+    setFilterMode('all')
+    setFilterOpen(false)
     setRefreshing(false)
   }, [])
 
@@ -430,10 +442,9 @@ export function WindowSyncPage() {
     })
   }
 
-  const setAsMaster = async (id: string) => {
-    if (isSyncing) return
-    const freshProfiles = await loadProfiles()
-    if (!freshProfiles.some(item => item.profileId === id && item.status === 'running')) {
+  const setAsMaster = (id: string) => {
+    if (isSyncing || startingRef.current || stoppingRef.current) return
+    if (!profiles.some(item => item.profileId === id && item.status === 'running')) {
       toast.error('该环境窗口已关闭，请重新选择主控')
       return
     }
@@ -441,28 +452,30 @@ export function WindowSyncPage() {
     setSelectedIds(prev => new Set([...prev, id]))
   }
 
-  const handleSelectAllVisible = async () => {
-    if (isSyncing) return
-    const freshProfiles = await loadProfiles()
-    const visibleIds = freshProfiles.filter(item => item.status === 'running').map(item => item.profileId)
+  const handleSelectAllVisible = () => {
+    if (isSyncing || startingRef.current || stoppingRef.current) return
+    const visibleIds = profiles.filter(item => item.status === 'running').map(item => item.profileId)
     if (visibleIds.length === 0) {
       toast.error('没有检测到已打开的环境窗口')
       return
     }
-    const allSelected = visibleIds.every(id => selectedIds.has(id))
-    if (allSelected) {
-      const next = new Set(selectedIds)
-      visibleIds.forEach(id => next.delete(id))
-      if (masterId && !next.has(masterId)) {
-        setMasterId(null)
+    setSelectedIds(prev => {
+      const allSelected = visibleIds.every(id => prev.has(id))
+      const next = new Set(prev)
+      if (allSelected) {
+        visibleIds.forEach(id => next.delete(id))
+        if (masterId && !next.has(masterId)) {
+          setMasterId(null)
+        }
+      } else {
+        visibleIds.forEach(id => next.add(id))
       }
-      setSelectedIds(next)
-      return
-    }
-    setSelectedIds(prev => new Set([...prev, ...visibleIds]))
+      return next
+    })
   }
 
   const handleStartSync = async () => {
+    if (startingRef.current || stoppingRef.current || isSyncing) return
     if (!masterId) {
       toast.error('请先指定主控环境')
       return
@@ -472,35 +485,47 @@ export function WindowSyncPage() {
       toast.error('请至少再选 1 个跟随环境')
       return
     }
+    startingRef.current = true
     setStarting(true)
-    const err = await startInputSync(masterId, followers)
-    if (err) {
+    try {
+      const err = await startInputSync(masterId, followers)
+      if (err) {
+        toast.error(`启动同步失败：${err}`)
+        await loadProfiles()
+        return
+      }
+      const status = await getSyncStatus()
+      if (status) {
+        setSyncStatus(status)
+        setSelectedIds(new Set([status.masterId, ...(status.followerIds || [])].filter(Boolean)))
+        setMasterId(status.masterId)
+      }
+      setPanelPresentation('compact')
+      setShowSyncControls(false)
+    } finally {
+      startingRef.current = false
       setStarting(false)
-      toast.error(`启动同步失败：${err}`)
-      await loadProfiles()
-      return
     }
-    const status = await getSyncStatus()
-    if (status) {
-      setSyncStatus(status)
-      setSelectedIds(new Set([status.masterId, ...(status.followerIds || [])].filter(Boolean)))
-      setMasterId(status.masterId)
-    }
-    setStarting(false)
-    setPanelPresentation('compact')
-    setShowSyncControls(false)
   }
 
   const handleStopSync = async () => {
-    const err = await stopInputSync()
-    if (err) {
-      toast.error(`停止同步失败：${err}`)
-      return
+    if (stoppingRef.current || startingRef.current) return
+    stoppingRef.current = true
+    setStopping(true)
+    try {
+      const err = await stopInputSync()
+      if (err) {
+        toast.error(`停止同步失败：${err}`)
+        return
+      }
+      setShowSyncControls(false)
+      setPanelPresentation('compact')
+      setToolbarMenu(null)
+      releaseCollectedSyncData()
+    } finally {
+      stoppingRef.current = false
+      setStopping(false)
     }
-    setShowSyncControls(false)
-    setPanelPresentation('compact')
-    setToolbarMenu(null)
-    releaseCollectedSyncData()
   }
 
   const handleDelayPresetChange = async (preset: DelayPreset) => {
@@ -628,6 +653,7 @@ export function WindowSyncPage() {
               type="button"
               className="inline-flex h-9 items-center justify-center self-center rounded-full border border-[#c8d0dc] bg-white px-3 text-sm font-medium text-[#344054] shadow-[0_8px_18px_rgba(16,24,40,0.08)] transition hover:bg-[#eef2f7] hover:text-[#111827]"
               onClick={() => void loadProfiles()}
+              disabled={refreshing || starting || stopping}
               style={{ ['--wails-draggable' as any]: 'no-drag' }}
             >
               <RefreshCw className="mr-1.5 h-4 w-4" />刷新
@@ -781,6 +807,7 @@ export function WindowSyncPage() {
               type="button"
               className="inline-flex h-8 shrink-0 items-center justify-center self-center rounded-full border border-[#e49aa6] bg-[#d74c68] px-3 text-[13px] font-semibold text-white shadow-[0_8px_20px_rgba(215,76,104,0.24)] transition hover:bg-[#e05c76]"
               onClick={() => void handleStopSync()}
+              disabled={stopping}
               style={{ ['--wails-draggable' as any]: 'no-drag' }}
             >
               重新配置
@@ -974,7 +1001,7 @@ export function WindowSyncPage() {
             </div>
 
             <div className="ml-auto flex flex-wrap items-center gap-2 text-sm">
-              <button type="button" className="inline-flex h-9 items-center rounded-xl bg-[#4b1620] px-3.5 text-sm font-medium text-[#ff9db0] hover:bg-[#5a1b27]" onClick={() => void handleStopSync()}>
+              <button type="button" disabled={stopping} className="inline-flex h-9 items-center rounded-xl bg-[#4b1620] px-3.5 text-sm font-medium text-[#ff9db0] hover:bg-[#5a1b27] disabled:opacity-60" onClick={() => void handleStopSync()}>
                 停止同步
               </button>
 
@@ -1035,7 +1062,7 @@ export function WindowSyncPage() {
               </button>
 
               <div className="flex items-center gap-2">
-                <Button variant="secondary" size="sm" onClick={() => void loadProfiles()} loading={refreshing}>
+                <Button variant="secondary" size="sm" onClick={() => void loadProfiles()} loading={refreshing} disabled={starting || stopping}>
                   <RefreshCw className="h-4 w-4" />刷新
                 </Button>
 
@@ -1199,7 +1226,7 @@ export function WindowSyncPage() {
                   开始同步
                 </Button>
               ) : !compactRunningMode ? (
-                <Button variant="danger" className="h-11 w-full max-w-[320px] text-base" onClick={() => void handleStopSync()}>
+                <Button variant="danger" className="h-11 w-full max-w-[320px] text-base" onClick={() => void handleStopSync()} loading={stopping}>
                   停止同步
                 </Button>
               ) : null}

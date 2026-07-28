@@ -444,26 +444,6 @@ func parseClashYAMLToMapping(src string) (map[string]any, error) {
 	return node, nil
 }
 
-func splitHostPort(hostport string) (string, int) {
-	if strings.HasPrefix(hostport, "[") {
-		if idx := strings.LastIndex(hostport, "]:"); idx >= 0 {
-			host := hostport[1:idx]
-			port := 0
-			fmt.Sscanf(hostport[idx+2:], "%d", &port)
-			return host, port
-		}
-		return strings.Trim(hostport, "[]"), 0
-	}
-	idx := strings.LastIndex(hostport, ":")
-	if idx < 0 {
-		return hostport, 0
-	}
-	host := hostport[:idx]
-	port := 0
-	fmt.Sscanf(hostport[idx+1:], "%d", &port)
-	return host, port
-}
-
 func DetectWorkingStandardProxyConfig(src string, cfg *SpeedTestConfig) (string, error) {
 	return detectWorkingStandardProxyConfigWithDialer(src, cfg, nil)
 }
