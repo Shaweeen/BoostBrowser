@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestPatchChromePreferencesFileDisablesSessionRestore(t *testing.T) {
@@ -187,33 +188,36 @@ func TestPlanStartupPageCleanupKeepsOneNaturalBlank(t *testing.T) {
 	}
 }
 
-func TestCloseUnwantedStartupPagesUsesOneSnapshotAndReleases(t *testing.T) {
+func TestCloseUnwantedStartupPagesDuringLaunchClosesDelayedTargetsAndReleases(t *testing.T) {
 	calls := 0
 	fetch := func() ([]cdpTarget, error) {
 		calls++
 		targets := []cdpTarget{
 			{ID: "blank-1", Type: "page", URL: "about:blank"},
 			{ID: "blank-2", Type: "page", URL: "about:blank"},
-			{ID: "metamask-auto", Type: "page", URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/home.html#/onboarding/welcome"},
 		}
-		if calls >= 2 {
+		if calls == 2 {
 			targets = append(targets, cdpTarget{
-				ID: "metamask-user", Type: "page",
-				URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/home.html#/unlock",
+				ID: "metamask-auto", Type: "page",
+				URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/home.html#/onboarding/welcome",
 			})
 		}
 		return targets, nil
 	}
 	closed := map[string]bool{}
-	closedExtensions, closedBlanks := closeUnwantedStartupPagesOnce(
+	pauses := 0
+	closedExtensions, closedBlanks := closeUnwantedStartupPagesDuringLaunch(
 		fetch,
 		func(targetID string) error {
 			closed[targetID] = true
 			return nil
 		},
+		func(time.Duration) { pauses++ },
+		8,
+		2,
 	)
-	if calls != 1 {
-		t.Fatalf("startup cleanup must read exactly one target snapshot: calls=%d", calls)
+	if calls != 4 {
+		t.Fatalf("startup cleanup must include the delayed target and release after quiet passes: calls=%d", calls)
 	}
 	if closedExtensions != 1 || closedBlanks != 1 {
 		t.Fatalf("unexpected close counts: extension=%d blanks=%d", closedExtensions, closedBlanks)
@@ -226,7 +230,31 @@ func TestCloseUnwantedStartupPagesUsesOneSnapshotAndReleases(t *testing.T) {
 	if closed["blank-1"] {
 		t.Fatal("the browser core's first natural blank page must remain")
 	}
-	if closed["metamask-user"] {
-		t.Fatal("a target created after the startup snapshot must never be controlled")
+	if pauses != calls-1 {
+		t.Fatalf("startup cleanup pause count mismatch: pauses=%d calls=%d", pauses, calls)
+	}
+}
+
+func TestCloseUnwantedStartupPagesDuringLaunchHasHardPassLimit(t *testing.T) {
+	fetches := 0
+	pauses := 0
+	closedExtensions, closedBlanks := closeUnwantedStartupPagesDuringLaunch(
+		func() ([]cdpTarget, error) {
+			fetches++
+			return []cdpTarget{{ID: "blank-1", Type: "page", URL: "about:blank"}}, nil
+		},
+		func(string) error {
+			t.Fatal("the only natural blank must never be closed")
+			return nil
+		},
+		func(time.Duration) { pauses++ },
+		3,
+		2,
+	)
+	if closedExtensions != 0 || closedBlanks != 0 {
+		t.Fatalf("unexpected close counts: extension=%d blanks=%d", closedExtensions, closedBlanks)
+	}
+	if fetches != 3 || pauses != 2 {
+		t.Fatalf("bounded startup cleanup mismatch: fetches=%d pauses=%d", fetches, pauses)
 	}
 }

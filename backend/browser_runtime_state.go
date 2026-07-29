@@ -175,6 +175,11 @@ func (a *App) waitBrowserDebugReadyAsync(profileId string, debugPort int, timeou
 		logger.F("profile_id", profileId),
 		logger.F("debug_port", debugPort),
 	)
+	// This is the mutually exclusive delayed-ready startup path. The browser is
+	// still minimized and has not been handed to the user, so run the same
+	// bounded startup-tab finalizer used by the normal ready path before any
+	// window restore or user interaction can occur.
+	finalizeBrowserStartupTabs(debugPort, profileId)
 	// 延迟就绪后也注入反检测脚本 + 启动 Turnstile 自动点击
 	// CloakBrowser 内核完全跳过：内核层已处理身份/反检测，
 	// wrapper 再走 CDP 注入会触发 nodriver / Browser Tampering 检测。
@@ -201,8 +206,6 @@ func (a *App) waitBrowserDebugReadyAsync(profileId string, debugPort int, timeou
 	}
 
 	if snapshot.Pid > 0 {
-		// 调试接口延迟就绪时，启动调用已经把浏览器交给用户。这里不得再补扫
-		// 或关闭任何标签，否则会误伤用户/网页刚拉起的钱包扩展页面。
 		enforceBrowserWindowBounds(snapshot.Pid, 1400, 600)
 	}
 

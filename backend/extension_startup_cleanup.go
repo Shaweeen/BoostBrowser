@@ -147,14 +147,22 @@ type startupPageCloseAction struct {
 	kind     startupPageCloseKind
 }
 
+const (
+	startupPageCleanupObservationWindow = 2500 * time.Millisecond
+	startupPageCleanupPollInterval      = 100 * time.Millisecond
+	startupPageCleanupQuietPasses       = 6
+)
+
 func finalizeBrowserStartupTabs(debugPort int, profileId string) {
 	if debugPort <= 0 {
 		return
 	}
-	// Run immediately after this new browser process reaches stable debug-ready,
-	// before BrowserStudio navigates any explicit URL and before the minimized
-	// window is handed to the user. Take exactly one target snapshot, keep the
-	// core's first natural blank and extension workers, and close only automatic
+	// Run inside this browser process's startup transaction, before
+	// BrowserStudio navigates an explicit URL and before the minimized window is
+	// handed to the user. Wallet extensions can create onboarding pages after
+	// the debug endpoint first becomes ready, especially during a large batch
+	// launch, so observe only this short bounded startup window. Keep the core's
+	// first natural blank and extension workers, and close only automatic
 	// extension pages plus extra natural blanks. No DOM, form or page content is
 	// read, and no cleanup owner survives this function.
 	browserWsURL, err := getBrowserWebSocketURL(debugPort)
@@ -166,12 +174,16 @@ func finalizeBrowserStartupTabs(debugPort int, profileId string) {
 		return
 	}
 	defer browserClient.close()
-	closedExtensions, closedBlanks := closeUnwantedStartupPagesOnce(
+	maxPasses := int(startupPageCleanupObservationWindow/startupPageCleanupPollInterval) + 1
+	closedExtensions, closedBlanks := closeUnwantedStartupPagesDuringLaunch(
 		func() ([]cdpTarget, error) { return listCDPTargets(debugPort) },
 		func(targetID string) error {
 			_, closeErr := browserClient.call("Target.closeTarget", map[string]any{"targetId": targetID}, 1500*time.Millisecond)
 			return closeErr
 		},
+		time.Sleep,
+		maxPasses,
+		startupPageCleanupQuietPasses,
 	)
 	if closedExtensions > 0 || closedBlanks > 0 {
 		logger.New("Browser").Info("启动页面已收敛为唯一空白页",
@@ -189,30 +201,61 @@ func finalizeBrowserStartupTabs(debugPort int, profileId string) {
 	// deliberately used an offscreen --window-position, which is no longer done.
 }
 
-func closeUnwantedStartupPagesOnce(
+func closeUnwantedStartupPagesDuringLaunch(
 	fetch func() ([]cdpTarget, error),
 	closeTarget func(string) error,
+	pause func(time.Duration),
+	maxPasses int,
+	quietPassesAfterExtension int,
 ) (int, int) {
-	if fetch == nil || closeTarget == nil {
+	if fetch == nil || closeTarget == nil || maxPasses <= 0 {
 		return 0, 0
 	}
-	targets, err := fetch()
-	if err != nil {
-		return 0, 0
+	if quietPassesAfterExtension <= 0 {
+		quietPassesAfterExtension = 1
 	}
 
-	actions := planStartupPageCleanup(targets)
+	closedTargetIDs := make(map[string]struct{})
 	closedExtensions := 0
 	closedBlanks := 0
-	for _, action := range actions {
-		if closeTarget(action.targetID) != nil {
-			continue
+	extensionClosed := false
+	quietPasses := 0
+
+	for pass := 0; pass < maxPasses; pass++ {
+		targets, err := fetch()
+		closedExtensionThisPass := false
+		if err == nil {
+			for _, action := range planStartupPageCleanup(targets) {
+				if _, alreadyClosed := closedTargetIDs[action.targetID]; alreadyClosed {
+					continue
+				}
+				if closeTarget(action.targetID) != nil {
+					continue
+				}
+				closedTargetIDs[action.targetID] = struct{}{}
+				switch action.kind {
+				case startupPageCloseExtension:
+					closedExtensions++
+					extensionClosed = true
+					closedExtensionThisPass = true
+				case startupPageCloseExtraBlank:
+					closedBlanks++
+				}
+			}
 		}
-		switch action.kind {
-		case startupPageCloseExtension:
-			closedExtensions++
-		case startupPageCloseExtraBlank:
-			closedBlanks++
+
+		if extensionClosed {
+			if closedExtensionThisPass || err != nil {
+				quietPasses = 0
+			} else {
+				quietPasses++
+				if quietPasses >= quietPassesAfterExtension {
+					break
+				}
+			}
+		}
+		if pass+1 < maxPasses && pause != nil {
+			pause(startupPageCleanupPollInterval)
 		}
 	}
 	return closedExtensions, closedBlanks

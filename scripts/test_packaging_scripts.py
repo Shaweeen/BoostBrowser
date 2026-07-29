@@ -149,6 +149,7 @@ class PackagingScriptsTest(unittest.TestCase):
         popup_bounds = self.read("backend/sync_popup_confinement_windows.go")
         startup_tabs = self.read("backend/extension_startup_cleanup.go")
         launch_args = self.read("backend/browser_launch_args.go")
+        runtime_state = self.read("backend/browser_runtime_state.go")
 
         self.assertNotIn('args = append(args, "--window-size=1400,600")', launch)
         self.assertNotIn('args = append(args, "about:blank")', launch)
@@ -167,17 +168,18 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertNotIn("if !ok && isCompactExtensionPopupTitle", popup_bounds)
         self.assertIn("WM_MOUSEWHEEL", self.read("backend/app_input_syncer.go"))
         self.assertIn("WM_MOUSEHWHEEL", self.read("backend/app_input_syncer.go"))
-        self.assertIn("closeUnwantedStartupPagesOnce", startup_tabs)
+        self.assertIn("closeUnwantedStartupPagesDuringLaunch", startup_tabs)
+        self.assertNotIn("closeUnwantedStartupPagesOnce", startup_tabs)
         self.assertIn("planStartupPageCleanup", startup_tabs)
-        self.assertNotIn("extensionStartupSettleDelay", startup_tabs)
+        self.assertIn("startupPageCleanupObservationWindow", startup_tabs)
+        self.assertIn("startupPageCleanupPollInterval", startup_tabs)
+        self.assertIn("startupPageCleanupQuietPasses", startup_tabs)
         self.assertIn("startupPageCloseExtraBlank", startup_tabs)
         self.assertNotIn("settleBrowserStartupTabs", startup_tabs)
         self.assertIn("shouldCloseAutomaticExtensionStartupTarget", startup_tabs)
         self.assertNotIn("startupTargetMatchesProtectedURL", startup_tabs)
         self.assertIn("No DOM, form or page content is", startup_tabs)
         self.assertIn("read, and no cleanup owner survives this function", startup_tabs)
-        self.assertNotIn("extensionStartupCleanupWindow", startup_tabs)
-        self.assertNotIn("extensionStartupProbeDelay", startup_tabs)
         self.assertNotIn("for {", startup_tabs)
         self.assertNotIn("Target.setDiscoverTargets", startup_tabs)
         self.assertNotIn("automaticExtensionStartupGuardDuration", startup_tabs)
@@ -190,9 +192,13 @@ class PackagingScriptsTest(unittest.TestCase):
             launch.index("finalizeBrowserStartupTabs(stableDebugPort, profileId)"),
             launch.index("navigateToTargetURLs(stableDebugPort"),
         )
-        self.assertNotIn(
-            "finalizeBrowserStartupTabs",
-            self.read("backend/browser_runtime_state.go"),
+        self.assertEqual(
+            runtime_state.count("finalizeBrowserStartupTabs(debugPort, profileId)"),
+            1,
+        )
+        self.assertLess(
+            runtime_state.index("finalizeBrowserStartupTabs(debugPort, profileId)"),
+            runtime_state.index("enforceBrowserWindowBounds(snapshot.Pid, 1400, 600)"),
         )
 
     def test_extension_distribution_is_explicit_and_never_profile_or_startup_driven(self):
