@@ -142,11 +142,17 @@ func TestAutomaticExtensionStartupCleanupKeepsBlankAndWebPages(t *testing.T) {
 		{Type: "page", URL: "about:blank"},
 		{Type: "page", URL: "chrome://newtab/"},
 		{Type: "page", URL: "https://example.com/"},
-		{Type: "page", URL: "chrome-extension://wallet/popup.html", OpenerID: "user-opened-page"},
 		{Type: "service_worker", URL: "chrome-extension://wallet/background.js"},
 	} {
 		if shouldCloseAutomaticExtensionStartupTarget(target) {
 			t.Fatalf("blank, web and extension background targets must remain: %#v", target)
 		}
+	}
+	if !shouldCloseAutomaticExtensionStartupTarget(cdpTarget{
+		Type:     "page",
+		URL:      "chrome-extension://wallet/onboarding.html",
+		OpenerID: "extension-background-target",
+	}) {
+		t.Fatal("startup sweep must close extension-created pages even when Chrome reports an opener")
 	}
 }

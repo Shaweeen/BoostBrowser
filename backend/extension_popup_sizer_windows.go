@@ -3,11 +3,7 @@
 package backend
 
 import (
-	"boost-browser/backend/internal/logger"
 	"strings"
-	"sync"
-	"sync/atomic"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -22,61 +18,22 @@ type winRect struct {
 	Bottom int32
 }
 
-type startupWindowBoundsSession struct {
-	cancelled atomic.Bool
-}
-
-var startupWindowBoundsSessions sync.Map
-
-func cancelBrowserWindowBoundsEnforcement(pid int) {
-	if pid <= 0 {
-		return
-	}
-	if value, ok := startupWindowBoundsSessions.LoadAndDelete(pid); ok {
-		value.(*startupWindowBoundsSession).cancelled.Store(true)
-	}
-}
-
-// enforceBrowserWindowBounds runs for a short bounded startup period. A final
-// SW_RESTORE + SetWindowPos gives only the initial top-level browser frame the
+// enforceBrowserWindowBounds performs one startup-only SW_RESTORE + SetWindowPos
+// after extension startup pages have been removed. It gives only the initial
+// top-level browser frame the
 // 1400x600 startup template without passing a process-wide --window-size flag
-// that Chrome could reuse for later extension windows. Any explicit
-// tile/stack/horizontal action cancels this startup-only template immediately.
+// that Chrome could reuse for later extension windows. There is no retry worker,
+// timer or window state registry.
 func enforceBrowserWindowBounds(pid, width, height int) {
 	if pid <= 0 || width <= 0 || height <= 0 {
 		return
 	}
-	session := &startupWindowBoundsSession{}
-	if previous, loaded := startupWindowBoundsSessions.Swap(pid, session); loaded {
-		previous.(*startupWindowBoundsSession).cancelled.Store(true)
+	hwnd, err := findProcessTreeWindow(pid)
+	if err != nil || hwnd == 0 {
+		return
 	}
-	go func() {
-		defer startupWindowBoundsSessions.CompareAndDelete(pid, session)
-		defer func() {
-			if r := recover(); r != nil {
-				logger.New("BrowserWindow").Error("startup bounds enforcement panic recovered",
-					logger.F("pid", pid),
-					logger.F("error", r),
-				)
-			}
-		}()
-		for attempt := 0; attempt < 4; attempt++ {
-			if session.cancelled.Load() {
-				return
-			}
-			hwnd, err := findProcessTreeWindow(pid)
-			if err == nil && hwnd != 0 {
-				if session.cancelled.Load() {
-					return
-				}
-				procShowWindow.Call(uintptr(hwnd), swRestore)
-				procSetWindowPos.Call(uintptr(hwnd), 0, 80, 80, uintptr(width), uintptr(height), SWP_NOZORDER|SWP_SHOWWINDOW)
-			}
-			if attempt < 3 {
-				time.Sleep(350 * time.Millisecond)
-			}
-		}
-	}()
+	procShowWindow.Call(uintptr(hwnd), swRestore)
+	procSetWindowPos.Call(uintptr(hwnd), 0, 80, 80, uintptr(width), uintptr(height), SWP_NOZORDER|SWP_SHOWWINDOW)
 }
 
 func isStrongExtensionPopupTitle(title string) bool {

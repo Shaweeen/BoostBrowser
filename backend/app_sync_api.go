@@ -479,12 +479,6 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 		}
 		seenProfileIDs[pid] = struct{}{}
 		profile, profileExists := a.browserMgr.Profiles[pid]
-		if profileExists && profile.Pid > 0 {
-			// The fixed 1400x600 size is only a startup template. Once the user
-			// explicitly arranges environments, startup retries must never move
-			// or resize those windows again.
-			cancelBrowserWindowBoundsEnforcement(profile.Pid)
-		}
 		if hwnd := activeWindows[pid]; hwnd != 0 && isWindow(hwnd) {
 			if _, duplicate := seenWindows[hwnd]; duplicate {
 				continue

@@ -4,21 +4,6 @@ package backend
 
 import "testing"
 
-func TestExplicitLayoutCancelsStartupWindowTemplate(t *testing.T) {
-	const pid = 987654
-	session := &startupWindowBoundsSession{}
-	startupWindowBoundsSessions.Store(pid, session)
-	t.Cleanup(func() { startupWindowBoundsSessions.Delete(pid) })
-
-	cancelBrowserWindowBoundsEnforcement(pid)
-	if !session.cancelled.Load() {
-		t.Fatal("explicit layout must cancel the startup-only window template")
-	}
-	if _, exists := startupWindowBoundsSessions.Load(pid); exists {
-		t.Fatal("cancelled startup bounds session must be released")
-	}
-}
-
 func TestSyncPopupUsesCurrentArrangedOwnerBounds(t *testing.T) {
 	x, y, width, height, changed := constrainSyncPopupRect(
 		winRect{Left: 20, Top: 20, Right: 1460, Bottom: 920},
@@ -148,6 +133,6 @@ func TestAuxiliaryIMEWindowTitleOrClassIsExcluded(t *testing.T) {
 		}
 	}
 	if isAuxiliaryIMEWindowTitleOrClass("Moss - Boost Browser", "Chrome_WidgetWin_1") {
-		t.Fatal("normal browser window should not be treated as an auxiliary IME window")
+		t.Fatal("normal browser window should not be treated as auxiliary IME window")
 	}
 }

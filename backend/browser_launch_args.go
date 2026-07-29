@@ -38,6 +38,7 @@ var managedWindowPlacementArgSpecs = []managedLaunchArgSpec{
 	{prefix: "--window-size", takesValue: true},
 	{prefix: "--window-position", takesValue: true},
 	{prefix: "--start-maximized", takesValue: false},
+	{prefix: "--start-minimized", takesValue: false},
 	{prefix: "--start-fullscreen", takesValue: false},
 	{prefix: "--kiosk", takesValue: false},
 }
@@ -149,4 +150,12 @@ func appendLaunchArgIfMissing(args []string, want string) []string {
 		}
 	}
 	return append(args, want)
+}
+
+// preparePrimaryEnvironmentLaunchArgs keeps startup presentation policy in one
+// place. Preferences own the single about:blank page; the process command line
+// contributes no URL and only starts the initial Windows frame minimized until
+// the one-shot extension-page cleanup completes.
+func preparePrimaryEnvironmentLaunchArgs(args []string) []string {
+	return appendLaunchArgIfMissing(args, "--start-minimized")
 }

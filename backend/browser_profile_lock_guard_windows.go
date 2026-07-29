@@ -18,6 +18,13 @@ func ensureBrowserUserDataDirReadyForFreshLaunch(chromeBinaryPath string, userDa
 	if userDataDir == "" {
 		return nil
 	}
+	// A normal clean shutdown leaves no Singleton artifacts. Avoid spawning
+	// PowerShell/CIM for that overwhelmingly common path, especially while many
+	// environments are being launched together. If any artifact exists we keep
+	// the full live-owner check before removing it.
+	if !browserSingletonArtifactsPresent(userDataDir) {
+		return nil
+	}
 	if err := failIfUserDataDirOwnedByLiveBrowser(userDataDir); err != nil {
 		return err
 	}
@@ -77,7 +84,7 @@ if ($matches.Count -gt 0) {
 
 func clearBrowserSingletonArtifacts(userDataDir string) error {
 	var errs []string
-	for _, name := range []string{"SingletonLock", "SingletonCookie", "SingletonSocket"} {
+	for _, name := range browserSingletonArtifactNames {
 		artifactPath := filepath.Join(userDataDir, name)
 		if err := os.Remove(artifactPath); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, fmt.Sprintf("%s: %v", artifactPath, err))

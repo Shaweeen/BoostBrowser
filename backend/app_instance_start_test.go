@@ -52,6 +52,25 @@ func TestEnsureNewWindowLaunchArgAddsFlagOnce(t *testing.T) {
 	}
 }
 
+func TestBuildTargetURLsStartsBlankByDefault(t *testing.T) {
+	t.Parallel()
+
+	profile := &BrowserProfile{LastTabs: []string{"https://last.example/one", "https://last.example/two"}}
+	if got := buildTargetURLs(profile, nil, false); len(got) != 0 {
+		t.Fatalf("expected a clean blank launch, got=%v", got)
+	}
+}
+
+func TestBuildTargetURLsUsesOnlyExplicitStartURLs(t *testing.T) {
+	t.Parallel()
+
+	profile := &BrowserProfile{LastTabs: []string{"https://last.example/"}}
+	explicit := []string{"https://explicit.example/"}
+	if got := buildTargetURLs(profile, explicit, false); !reflect.DeepEqual(got, explicit) {
+		t.Fatalf("expected explicit URLs, got=%v", got)
+	}
+}
+
 func TestIsBrowserProfileLive(t *testing.T) {
 	t.Parallel()
 
@@ -451,6 +470,7 @@ func TestSanitizeManagedWindowPlacementArgsRemovesWindowSizeAndPosition(t *testi
 		"--window-size=1600,900",
 		"--window-position", "20,40",
 		"--start-maximized",
+		"--start-minimized",
 		"--start-fullscreen",
 		"--kiosk",
 		"https://example.com",
@@ -461,7 +481,7 @@ func TestSanitizeManagedWindowPlacementArgsRemovesWindowSizeAndPosition(t *testi
 		t.Fatalf("sanitizeManagedWindowPlacementArgs args mismatch: got=%v want=%v", got, wantArgs)
 	}
 
-	wantRemoved := []string{"--window-size", "--window-position", "--start-maximized", "--start-fullscreen", "--kiosk"}
+	wantRemoved := []string{"--window-size", "--window-position", "--start-maximized", "--start-minimized", "--start-fullscreen", "--kiosk"}
 	if !reflect.DeepEqual(removed, wantRemoved) {
 		t.Fatalf("sanitizeManagedWindowPlacementArgs removed mismatch: got=%v want=%v", removed, wantRemoved)
 	}
@@ -474,6 +494,25 @@ func TestAppendChromeTestingInfobarSuppressArgAddsTestTypeAndDisableInfobars(t *
 	want := []string{"--user-data-dir=D:\\profiles\\demo", "--test-type", "--disable-infobars"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("appendChromeTestingInfobarSuppressArg mismatch: got=%v want=%v", got, want)
+	}
+}
+
+func TestPreparePrimaryEnvironmentLaunchArgsStartsMinimizedWithoutAddingBlankURL(t *testing.T) {
+	t.Parallel()
+
+	got := preparePrimaryEnvironmentLaunchArgs([]string{"--user-data-dir=D:\\profiles\\demo"})
+	want := []string{"--user-data-dir=D:\\profiles\\demo", "--start-minimized"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("primary startup args mismatch: got=%v want=%v", got, want)
+	}
+	got = preparePrimaryEnvironmentLaunchArgs(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("primary startup args must not duplicate the minimized flag: got=%v want=%v", got, want)
+	}
+	for _, arg := range got {
+		if arg == "about:blank" {
+			t.Fatal("Preferences own the single blank startup page; command line must not add another")
+		}
 	}
 }
 

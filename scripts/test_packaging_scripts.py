@@ -149,8 +149,12 @@ class PackagingScriptsTest(unittest.TestCase):
         startup_tabs = self.read("backend/extension_startup_cleanup.go")
 
         self.assertNotIn('args = append(args, "--window-size=1400,600")', launch)
+        self.assertNotIn('args = append(args, "about:blank")\n\n\tcmd := exec.Command', launch)
+        self.assertIn("preparePrimaryEnvironmentLaunchArgs(args)", launch)
         self.assertIn("enforceBrowserWindowBounds(profile.Pid, 1400, 600)", launch)
-        self.assertIn("startup-only template", startup_bounds)
+        self.assertIn("startup-only", startup_bounds)
+        self.assertNotIn("startupWindowBoundsSession", startup_bounds)
+        self.assertNotIn("time.Sleep", startup_bounds)
         self.assertNotIn("extensionPopupTargetWidth", popup_bounds)
         self.assertNotIn("extensionPopupTargetHeight", popup_bounds)
         self.assertIn("syncPopupConfinementEnabled(s.IsActive(), s.IsPaused()", popup_bounds)
@@ -171,7 +175,6 @@ class PackagingScriptsTest(unittest.TestCase):
     def test_backend_cloak_helpers_restore_windows_build_symbols(self):
         text = self.read("backend/cloak_integration_helpers.go")
         for symbol in [
-            "func resolveCloakGeoArgs",
             "func isCloakCore",
             "func buildEffectiveFingerprintArgs",
             "func seedDefaultSearchEngine",
@@ -182,6 +185,22 @@ class PackagingScriptsTest(unittest.TestCase):
             "func (a *App) StartInstanceWithParams",
         ]:
             self.assertIn(symbol, text)
+        self.assertNotIn("func resolveCloakGeoArgs", text)
+
+    def test_environment_startup_has_no_obsolete_background_tab_collector(self):
+        runtime_state = self.read("backend/browser_runtime_state.go")
+        instance = self.read("backend/app_instance.go")
+        lock_guard = self.read("backend/browser_profile_lock_guard_windows.go")
+
+        self.assertNotIn("startLastTabsTracker", runtime_state)
+        self.assertNotIn("stopLastTabsTracker", instance)
+        self.assertNotIn("captureRestorableTabsViaCDP", instance)
+        self.assertNotIn("stopWindowBoundsTrackerAndFinalize", instance)
+        self.assertIn("browserSingletonArtifactsPresent(userDataDir)", lock_guard)
+        self.assertLess(
+            lock_guard.index("browserSingletonArtifactsPresent(userDataDir)"),
+            lock_guard.index("failIfUserDataDirOwnedByLiveBrowser(userDataDir)"),
+        )
 
     def test_main_runtime_helpers_restore_clean_checkout_build_symbols(self):
         text = self.read("main_runtime_helpers.go")

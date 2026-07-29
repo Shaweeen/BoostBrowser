@@ -96,13 +96,6 @@ func (a *App) markProfileRunningLocked(profileId string, profile *BrowserProfile
 	if debugReady && a.launchServer != nil {
 		a.launchServer.SetActiveProfile(profile)
 	}
-	// crashprobe: 窗口 bounds 持续轮询先继续停用；last tabs 恢复按最小能力重新打开，
-	// 仅周期抓取普通 http(s) 标签页，避免 Chrome 原生 session restore 被禁用后
-	// 直接关窗场景丢失可恢复标签页。
-	if debugReady && debugPort > 0 {
-		// a.startWindowBoundsTracker(profileId, debugPort)
-		a.startLastTabsTracker(profileId, debugPort)
-	}
 	a.persistBrowserRuntimeSnapshotLocked()
 }
 
@@ -138,11 +131,6 @@ func (a *App) setProfileDebugReady(profileId string, debugPort int) (*BrowserPro
 
 	if snapshot != nil && snapshot.DebugReady && a.launchServer != nil {
 		a.launchServer.SetActiveProfile(snapshot)
-	}
-	// crashprobe: 窗口 bounds 持续轮询先继续停用；last tabs 恢复按最小能力重新打开。
-	if changed && snapshot != nil && snapshot.DebugReady {
-		// a.startWindowBoundsTracker(profileId, debugPort)
-		a.startLastTabsTracker(profileId, debugPort)
 	}
 	return snapshot, changed
 }
@@ -215,6 +203,7 @@ func (a *App) waitBrowserDebugReadyAsync(profileId string, debugPort int, timeou
 	if snapshot.Pid > 0 {
 		// 与正常启动路径相同：每次启动仅在准备完成后清理一次，函数返回即释放。
 		finalizeBrowserStartupTabs(debugPort, snapshot.Pid, profileId)
+		enforceBrowserWindowBounds(snapshot.Pid, 1400, 600)
 	}
 
 	a.emitBrowserInstanceUpdated(snapshot)

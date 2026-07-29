@@ -35,11 +35,11 @@ type Profile struct {
 	UpdatedAt          string   `json:"updatedAt"`
 	LastStartAt        string   `json:"lastStartAt"`
 	LastStopAt         string   `json:"lastStopAt"`
-	// LastTabs 记录该实例上一次运行时打开过的普通网页标签页。
-	// 下次手动启动实例时优先恢复这些 URL。
+	// LastTabs is retained for backward-compatible profile/data import. Current
+	// launches intentionally start blank and do not poll or overwrite this data.
 	LastTabs []string `json:"lastTabs"`
-	// LastWindow* 记录该实例上一次关闭时窗口的位置和尺寸。
-	// 0 表示从未保存过，下次启动会回退到默认 1280x900 居中。
+	// LastWindow* is retained for old profile/data compatibility. Current
+	// launches use the managed startup template and do not poll these values.
 	LastWindowX      int `json:"lastWindowX"`
 	LastWindowY      int `json:"lastWindowY"`
 	LastWindowWidth  int `json:"lastWindowWidth"`

@@ -193,7 +193,6 @@ func closeAutomaticExtensionStartupPages(debugPort int) int {
 
 func shouldCloseAutomaticExtensionStartupTarget(target cdpTarget) bool {
 	return strings.EqualFold(strings.TrimSpace(target.Type), "page") &&
-		strings.TrimSpace(target.OpenerID) == "" &&
 		isExtensionStartupURL(target.URL)
 }
 

@@ -455,15 +455,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		args = filtered
 	}
 
-	// CloakBrowser 内核：通过代理 IP 反推 timezone/locale，避免
-	// "VPN: timezone mismatch" 误判（fingerprint.com Smart Signals）。
-	//   - 有代理：查询 ipapi.co/json，把得到的 timezone + 主语言追加为
-	//     --fingerprint-timezone / --fingerprint-locale / --lang
-	//   - 无代理 / direct://：不追加，让浏览器跟随系统时区+语言
-	//
-	// 注意：profile 里旧的 stale 值（用户曾经写死的 Asia/Shanghai / zh-CN 之类）
-	// 在 cloak 模式必须被 geoip 覆盖，否则代理切到日本 IP 还跑 Asia/Shanghai
-	// 时区，fingerprint.com 直接判 VPN timezone mismatch 红灯。
 	if isCloakSelectedCore {
 		// 默认开启 chrome://flags / extension-mime-request-handling = "Always prompt for install"。
 		// 不开这个 flag，cloak 内核里从 chromewebstore.google.com 下载 .crx 不会自动弹
@@ -474,25 +465,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				logger.F("profile_id", profileId),
 				logger.F("user_data_dir", userDataDir),
 				logger.F("error", err.Error()),
-			)
-		}
-
-		if geoArgs := resolveCloakGeoArgs(effectiveProxy); len(geoArgs) > 0 {
-			geoKeys := make(map[string]struct{}, len(geoArgs))
-			for _, ga := range geoArgs {
-				geoKeys[launchArgKey(ga)] = struct{}{}
-			}
-			filtered := args[:0]
-			for _, existing := range args {
-				if _, isGeoOverride := geoKeys[launchArgKey(existing)]; isGeoOverride {
-					continue
-				}
-				filtered = append(filtered, existing)
-			}
-			args = append(filtered, geoArgs...)
-			log.Info("CloakBrowser 内核已根据代理 IP 注入 timezone/locale（覆盖 stale 值）",
-				logger.F("profile_id", profileId),
-				logger.F("geo_args", strings.Join(geoArgs, " ")),
 			)
 		}
 
@@ -508,14 +480,18 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	if len(removedWindowArgs) > 0 {
 		logManagedLaunchArgOverrides(log, profileId, "final.windowPlacement", removedWindowArgs)
 	}
-	// 不在启动参数中传入目标 URL，让浏览器先以 about:blank 启动。
+	// Preferences 是初始 about:blank 的唯一来源；这里不再重复附加 URL。
+	// Windows 环境先最小化完成扩展启动页的一次性清理，再恢复初始窗口，
+	// 避免钱包欢迎页/解锁页在前台闪现。
+	args = preparePrimaryEnvironmentLaunchArgs(args)
+	// 不在启动参数中传入目标 URL，让浏览器按 Preferences 的单个
+	// about:blank 启动。
 	// 等 CDP 就绪后先注入 stealth + UA override（确保 Sec-CH-UA 和 navigator.userAgentData
 	// 在目标页面首次请求前就正确），然后再通过 CDP Page.navigate 导航到目标 URL。
 	// 这解决了 Chrome Web Store 首次请求时 Sec-CH-UA 仍为 "Chromium" 导致
 	// 显示「切换到 Chrome」横幅的问题。
 	targetURLs := buildTargetURLs(profile, normalizedStartURLs, skipDefaultStartURLs)
 	displayNumber := resolveBadgeDisplayNumber(profileId, profile.ProfileName, a.browserMgr.Profiles)
-	args = append(args, "about:blank")
 
 	cmd := exec.Command(chromeBinaryPath, args...)
 	cmd.Dir = filepath.Dir(chromeBinaryPath)
@@ -567,8 +543,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				logger.F("max_attempts", maxStartAttempts),
 				logger.F("args", strings.Join(args, " ")),
 			)
-			enforceBrowserWindowBounds(profile.Pid, 1400, 600)
-
 			// 任务栏 badge 数字直接来自实例名字里的数字段：
 			//   名字 "1"        → badge 1
 			//   名字 "11"       → badge 11
@@ -625,6 +599,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			// 顶层标签，保留 about:blank。函数返回时 CDP 连接已经释放；后续用户点击
 			// 扩展、浏览网页和执行同步均不存在后台监听或控制。
 			finalizeBrowserStartupTabs(stableDebugPort, profile.Pid, profileId)
+			enforceBrowserWindowBounds(profile.Pid, 1400, 600)
 
 			// crashprobe: 临时停用实例启动后的 Turnstile 自动点击监控，继续收缩每实例后台
 			// CDP 监控/注入链路，验证是否仍会出现 watchdog exit_code=2。
@@ -1147,18 +1122,6 @@ func (a *App) markProfileStoppedLocked(profileId string, profile *BrowserProfile
 	if profile == nil {
 		return
 	}
-	// 清空 DebugPort 之前最后抓一次当前普通网页标签页。手动点“关闭实例”时可以即时保存，
-	// 用户直接关浏览器窗口时则由运行期 tracker 兜底保存最近一次状态。
-	if profile.DebugPort > 0 {
-		if tabs := captureRestorableTabsViaCDP(profile.DebugPort); len(tabs) > 0 {
-			a.updateProfileLastTabsLocked(profile, tabs)
-		}
-	}
-	stopLastTabsTracker(profileId)
-
-	// 先尝试拿到最新一次窗口 bounds 并写入 profile + 落盘。
-	// 必须在清空 DebugPort 之前调用，因为 finalize 会用 tracker 里记的 debugPort。
-	a.stopWindowBoundsTrackerAndFinalize(profileId, profile)
 
 	profile.Running = false
 	profile.DebugReady = false
