@@ -13,9 +13,15 @@ import (
 	"boost-browser/backend/internal/logger"
 )
 
+const (
+	extensionStartupLoadTimeout      = 2 * time.Second
+	extensionStartupCompletionWindow = 500 * time.Millisecond
+	extensionStartupProbeDelay       = 75 * time.Millisecond
+)
+
 // sanitizeChromeStartupPreferences selects one fixed blank startup page without
-// deleting session files or extension data. A separate one-shot startup cleanup
-// closes extension-created tabs once the environment debug endpoint is ready.
+// deleting session files or extension data. A bounded startup barrier closes
+// extension-created tabs after assigned extension targets finish loading.
 func sanitizeChromeStartupPreferences(userDataDir string) {
 	if strings.TrimSpace(userDataDir) == "" {
 		return
@@ -64,17 +70,15 @@ func patchChromePreferencesFile(path string) error {
 	}
 
 	sessionPrefs := ensureJSONMap(prefs, "session")
-	// 4 = open configured URLs. Use about:blank explicitly instead of Chrome's
-	// New Tab Page (5), because Google Chrome/Cloak can turn NTP/session restore
-	// into google.com/sorry or other large white startup pages that cover the
-	// environment list/user workspace.
-	if sessionPrefs["restore_on_startup"] != float64(4) {
-		sessionPrefs["restore_on_startup"] = 4
+	// The command line is the only owner of the single about:blank target.
+	// Keeping about:blank here as a configured startup URL makes Chrome create
+	// its initial target plus a second configured target.
+	if sessionPrefs["restore_on_startup"] != float64(5) {
+		sessionPrefs["restore_on_startup"] = 5
 		changed = true
 	}
-	startupURLs, ok := sessionPrefs["startup_urls"].([]any)
-	if !ok || len(startupURLs) != 1 || startupURLs[0] != "about:blank" {
-		sessionPrefs["startup_urls"] = []any{"about:blank"}
+	if _, exists := sessionPrefs["startup_urls"]; exists {
+		delete(sessionPrefs, "startup_urls")
 		changed = true
 	}
 
@@ -137,17 +141,17 @@ func ensureJSONMap(parent map[string]any, key string) map[string]any {
 	return created
 }
 
-func finalizeBrowserStartupTabs(debugPort int, pid int, profileId string) {
+func finalizeBrowserStartupTabs(debugPort int, pid int, profileId string, launchArgs []string) {
 	if debugPort <= 0 {
 		return
 	}
 	// Extensions remain installed and enabled, but their onboarding/unlock
-	// pages must not take over every environment at process startup. The
-	// explicit about:blank bootstrap tab remains as the only default page.
-	// This is deliberately a single startup sweep: the CDP connection is closed
-	// before this function returns, so normal browsing and later user extension
-	// clicks have no background observer or controller.
-	if closed := closeAutomaticExtensionStartupPages(debugPort); closed > 0 {
+	// pages must not take over every environment at process startup. The bounded
+	// startup barrier ends after the assigned extensions have exposed their CDP
+	// targets (or the deadline expires), closes their top-level pages once, and
+	// releases every HTTP/CDP connection before returning. No worker, listener,
+	// timer or target registry remains after the environment is shown.
+	if closed := closeAutomaticExtensionStartupPages(debugPort, managedExtensionIDsFromLaunchArgs(launchArgs)); closed > 0 {
 		logger.New("Browser").Info("已关闭扩展自动启动页面",
 			logger.F("profile_id", profileId),
 			logger.F("count", closed),
@@ -163,12 +167,27 @@ func finalizeBrowserStartupTabs(debugPort int, pid int, profileId string) {
 	_ = pid
 }
 
-func closeAutomaticExtensionStartupPages(debugPort int) int {
-	targets, err := listCDPTargets(debugPort)
-	if err != nil {
+func managedExtensionIDsFromLaunchArgs(args []string) map[string]bool {
+	ids := map[string]bool{}
+	for _, dir := range activeLoadExtensionDirs(args) {
+		if id := extractExtensionID(dir); id != "" {
+			ids[id] = true
+		}
+	}
+	return ids
+}
+
+func closeAutomaticExtensionStartupPages(debugPort int, expectedExtensionIDs map[string]bool) int {
+	targets := awaitAssignedExtensionStartupTargets(
+		func() ([]cdpTarget, error) { return listCDPTargets(debugPort) },
+		expectedExtensionIDs,
+		extensionStartupLoadTimeout,
+		extensionStartupCompletionWindow,
+		extensionStartupProbeDelay,
+	)
+	if len(targets) == 0 {
 		return 0
 	}
-
 	browserWsURL, err := getBrowserWebSocketURL(debugPort)
 	if err != nil {
 		return 0
@@ -189,6 +208,93 @@ func closeAutomaticExtensionStartupPages(debugPort int) int {
 		}
 	}
 	return closed
+}
+
+func awaitAssignedExtensionStartupTargets(
+	fetch func() ([]cdpTarget, error),
+	expectedExtensionIDs map[string]bool,
+	timeout time.Duration,
+	completionWindow time.Duration,
+	probeDelay time.Duration,
+) []cdpTarget {
+	if fetch == nil {
+		return nil
+	}
+	if timeout <= 0 || len(expectedExtensionIDs) == 0 {
+		targets, _ := fetch()
+		return targets
+	}
+	if completionWindow < 0 {
+		completionWindow = 0
+	}
+	if probeDelay <= 0 {
+		probeDelay = 25 * time.Millisecond
+	}
+
+	deadline := time.Now().Add(timeout)
+	var latest []cdpTarget
+
+	for {
+		if targets, err := fetch(); err == nil {
+			latest = targets
+			if allAssignedExtensionsObserved(targets, expectedExtensionIDs) {
+				remaining := time.Until(deadline)
+				if remaining > 0 {
+					if remaining > completionWindow {
+						remaining = completionWindow
+					}
+					time.Sleep(remaining)
+				}
+				if finalTargets, err := fetch(); err == nil {
+					latest = finalTargets
+				}
+				return latest
+			}
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return latest
+		}
+		if remaining < probeDelay {
+			time.Sleep(remaining)
+		} else {
+			time.Sleep(probeDelay)
+		}
+	}
+}
+
+func allAssignedExtensionsObserved(targets []cdpTarget, expectedExtensionIDs map[string]bool) bool {
+	if len(expectedExtensionIDs) == 0 {
+		return true
+	}
+	observed := map[string]bool{}
+	for _, target := range targets {
+		if id := extensionIDFromTargetURL(target.URL); id != "" {
+			observed[id] = true
+		}
+	}
+	for id := range expectedExtensionIDs {
+		if !observed[strings.ToLower(strings.TrimSpace(id))] {
+			return false
+		}
+	}
+	return true
+}
+
+func extensionIDFromTargetURL(rawURL string) string {
+	const prefix = "chrome-extension://"
+	value := strings.ToLower(strings.TrimSpace(rawURL))
+	if !strings.HasPrefix(value, prefix) {
+		return ""
+	}
+	value = strings.TrimPrefix(value, prefix)
+	if slash := strings.IndexByte(value, '/'); slash >= 0 {
+		value = value[:slash]
+	}
+	if chromeWebStoreIDPattern.MatchString(value) && len(value) == 32 {
+		return value
+	}
+	return ""
 }
 
 func shouldCloseAutomaticExtensionStartupTarget(target cdpTarget) bool {

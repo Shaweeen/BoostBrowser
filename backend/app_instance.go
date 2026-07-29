@@ -480,12 +480,9 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	if len(removedWindowArgs) > 0 {
 		logManagedLaunchArgOverrides(log, profileId, "final.windowPlacement", removedWindowArgs)
 	}
-	// Preferences 是初始 about:blank 的唯一来源；这里不再重复附加 URL。
-	// Windows 环境先最小化完成扩展启动页的一次性清理，再恢复初始窗口，
-	// 避免钱包欢迎页/解锁页在前台闪现。
+	// 命令行是唯一的 about:blank 来源；Preferences 不再配置 startup_urls，
+	// 避免 Chrome 初始 target 与配置 URL 各生成一个空白标签。
 	args = preparePrimaryEnvironmentLaunchArgs(args)
-	// 不在启动参数中传入目标 URL，让浏览器按 Preferences 的单个
-	// about:blank 启动。
 	// 等 CDP 就绪后先注入 stealth + UA override（确保 Sec-CH-UA 和 navigator.userAgentData
 	// 在目标页面首次请求前就正确），然后再通过 CDP Page.navigate 导航到目标 URL。
 	// 这解决了 Chrome Web Store 首次请求时 Sec-CH-UA 仍为 "Chromium" 导致
@@ -598,7 +595,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			// 本次环境启动的准备步骤完成后只执行一次启动页收尾：关闭扩展自行打开的
 			// 顶层标签，保留 about:blank。函数返回时 CDP 连接已经释放；后续用户点击
 			// 扩展、浏览网页和执行同步均不存在后台监听或控制。
-			finalizeBrowserStartupTabs(stableDebugPort, profile.Pid, profileId)
+			finalizeBrowserStartupTabs(stableDebugPort, profile.Pid, profileId, args)
 			enforceBrowserWindowBounds(profile.Pid, 1400, 600)
 
 			// crashprobe: 临时停用实例启动后的 Turnstile 自动点击监控，继续收缩每实例后台

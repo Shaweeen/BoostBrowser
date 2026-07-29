@@ -497,11 +497,16 @@ func TestAppendChromeTestingInfobarSuppressArgAddsTestTypeAndDisableInfobars(t *
 	}
 }
 
-func TestPreparePrimaryEnvironmentLaunchArgsStartsMinimizedWithoutAddingBlankURL(t *testing.T) {
+func TestPreparePrimaryEnvironmentLaunchArgsOwnsExactlyOneBlankURL(t *testing.T) {
 	t.Parallel()
 
-	got := preparePrimaryEnvironmentLaunchArgs([]string{"--user-data-dir=D:\\profiles\\demo"})
-	want := []string{"--user-data-dir=D:\\profiles\\demo", "--start-minimized"}
+	got := preparePrimaryEnvironmentLaunchArgs([]string{
+		"--user-data-dir=D:\\profiles\\demo",
+		"about:blank",
+		"chrome-extension://wallet/home.html",
+		"https://stale-start.example/",
+	})
+	want := []string{"--user-data-dir=D:\\profiles\\demo", "--start-minimized", "about:blank"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("primary startup args mismatch: got=%v want=%v", got, want)
 	}
@@ -509,10 +514,14 @@ func TestPreparePrimaryEnvironmentLaunchArgsStartsMinimizedWithoutAddingBlankURL
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("primary startup args must not duplicate the minimized flag: got=%v want=%v", got, want)
 	}
+	blankCount := 0
 	for _, arg := range got {
-		if arg == "about:blank" {
-			t.Fatal("Preferences own the single blank startup page; command line must not add another")
+		if strings.EqualFold(strings.TrimSpace(arg), "about:blank") {
+			blankCount++
 		}
+	}
+	if blankCount != 1 {
+		t.Fatalf("command line must own exactly one blank startup page, got=%v", got)
 	}
 }
 

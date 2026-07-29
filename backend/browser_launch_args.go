@@ -153,9 +153,33 @@ func appendLaunchArgIfMissing(args []string, want string) []string {
 }
 
 // preparePrimaryEnvironmentLaunchArgs keeps startup presentation policy in one
-// place. Preferences own the single about:blank page; the process command line
-// contributes no URL and only starts the initial Windows frame minimized until
-// the one-shot extension-page cleanup completes.
+// place. Raw profile/API launch arguments may contain positional URLs left by
+// older builds; those are not allowed to become a second startup owner. Explicit
+// product start URLs are opened later through CDP.
 func preparePrimaryEnvironmentLaunchArgs(args []string) []string {
-	return appendLaunchArgIfMissing(args, "--start-minimized")
+	out := make([]string, 0, len(args)+2)
+	for _, arg := range args {
+		if isBrowserStartupTargetArg(arg) {
+			continue
+		}
+		out = append(out, arg)
+	}
+	out = appendLaunchArgIfMissing(out, "--start-minimized")
+	return append(out, "about:blank")
+}
+
+func isBrowserStartupTargetArg(arg string) bool {
+	value := strings.ToLower(strings.TrimSpace(arg))
+	for _, prefix := range []string{
+		"about:",
+		"chrome:",
+		"chrome-extension:",
+		"http:",
+		"https:",
+	} {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
 }
