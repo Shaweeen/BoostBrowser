@@ -47,7 +47,7 @@ func TestPausedInputKeepsPopupConfinement(t *testing.T) {
 	}
 }
 
-func TestWalletPopupCanResolveOwnerThroughChromeProcessTree(t *testing.T) {
+func TestAnyPopupCanResolveOwnerThroughChromeProcessTree(t *testing.T) {
 	owner := syncPopupOwnerWindow{hwnd: 10, pid: 100, rect: winRect{Left: 0, Top: 0, Right: 800, Bottom: 600}}
 	search := &syncPopupBoundsSearch{
 		owners:              []syncPopupOwnerWindow{owner},
@@ -56,7 +56,36 @@ func TestWalletPopupCanResolveOwnerThroughChromeProcessTree(t *testing.T) {
 	}
 	resolved, ok := search.findProcessTreeOwner(777)
 	if !ok || resolved.hwnd != owner.hwnd {
-		t.Fatalf("wallet notification child process did not resolve to its browser owner: %+v", resolved)
+		t.Fatalf("Chrome child-process popup did not resolve to its browser owner: %+v", resolved)
+	}
+}
+
+func TestSyncPopupPlacementNeverPromotesDesktopTopmost(t *testing.T) {
+	geometryOnly := syncPopupPlacementFlags(true, false)
+	if geometryOnly&SWP_NOZORDER == 0 {
+		t.Fatal("geometry-only update must preserve an already correct owner-relative Z-order")
+	}
+	if geometryOnly&SWP_NOACTIVATE == 0 {
+		t.Fatal("popup placement must not steal focus")
+	}
+
+	zOrderOnly := syncPopupPlacementFlags(false, true)
+	if zOrderOnly&SWP_NOZORDER != 0 {
+		t.Fatal("owner-relative placement must be allowed to repair Z-order")
+	}
+	if zOrderOnly&SWP_NOMOVE == 0 || zOrderOnly&SWP_NOSIZE == 0 {
+		t.Fatal("Z-order-only repair must preserve the extension's current geometry")
+	}
+	if HWND_NOTOPMOST == HWND_TOP {
+		t.Fatal("topmost demotion must not use the normal HWND_TOP insertion handle")
+	}
+}
+
+func TestOtherExtensionPromptCandidateUsesOwnerBounds(t *testing.T) {
+	owner := winRect{Left: 0, Top: 0, Right: 600, Bottom: 500}
+	popup := winRect{Left: 520, Top: 50, Right: 920, Bottom: 450}
+	if !isSyncPopupSurfaceCandidate("Permission request", popup, owner, false) {
+		t.Fatal("non-wallet extension prompt must be contained after process-tree ownership is resolved")
 	}
 }
 

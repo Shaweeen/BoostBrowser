@@ -18,9 +18,14 @@ func (a *App) reconcileProfileProxyBindings() {
 	a.browserMgr.Mutex.Lock()
 	defer a.browserMgr.Mutex.Unlock()
 
+	originals := make(map[string]*BrowserProfile, len(a.browserMgr.Profiles))
 	changedCount := 0
 	reboundCount := 0
-	for _, profile := range a.browserMgr.Profiles {
+	for profileID, profile := range a.browserMgr.Profiles {
+		if profile == nil {
+			continue
+		}
+		originals[profileID] = copyBrowserProfileSnapshot(profile)
 		changed, boundInPool, mode := a.browserMgr.ResolveProfileProxyBinding(profile)
 		if changed {
 			profile.UpdatedAt = time.Now().Format(time.RFC3339)
@@ -41,6 +46,11 @@ func (a *App) reconcileProfileProxyBindings() {
 		return
 	}
 	if err := a.browserMgr.SaveProfiles(); err != nil {
+		for profileID, original := range originals {
+			if current := a.browserMgr.Profiles[profileID]; current != nil {
+				*current = *original
+			}
+		}
 		log.Error("实例代理绑定修复持久化失败", logger.F("error", err.Error()))
 		return
 	}

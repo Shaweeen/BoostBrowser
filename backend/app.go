@@ -56,6 +56,7 @@ type App struct {
 	forceQuit          bool       // 强制退出标志，用于跳过 OnBeforeClose 的拦截
 	quitMode           quitMode   // 退出模式：全量退出 / 仅退出应用
 	maintenanceMu      sync.Mutex // 维护类操作（初始化/导入/导出）互斥锁
+	browserCloseMu     sync.Mutex // 环境关闭按 Profile ID/PID 串行确认写盘
 	bridgeMu           sync.Mutex
 	xrayBridgeRefs     map[string]string
 	rabbyImportMu      sync.Mutex
@@ -789,7 +790,7 @@ func (a *App) BrowserProfileDelete(profileId string) error {
 }
 
 // BrowserProfileDeleteWithCache retains the legacy signature for existing
-// clients. Deleting an environment now always removes its owned browser data.
+// clients. Browser data is archived for user-confirmed recovery.
 func (a *App) BrowserProfileDeleteWithCache(profileId string, _ bool) error {
 	return a.deleteBrowserProfileAndOwnedData(profileId)
 }
@@ -803,31 +804,15 @@ func (a *App) deleteBrowserProfileAndOwnedData(profileId string) error {
 		return err
 	}
 
-	cleanupErrors := make([]string, 0, 2)
+	cleanupErrors := make([]string, 0, 1)
 	if err := a.removeDeletedProfileExtensionReferences(profileId); err != nil {
-		cleanupErrors = append(cleanupErrors, err.Error())
-	}
-	if err := a.removeDeletedProfileSnapshots(profileId); err != nil {
 		cleanupErrors = append(cleanupErrors, err.Error())
 	}
 	// Publish the authoritative main-client environment list after deletion so
 	// the sync assistant cannot retain the removed profile in a later refresh.
 	a.PrepareWindowSyncRuntimeSnapshot()
 	if len(cleanupErrors) > 0 {
-		return fmt.Errorf("环境与浏览器数据已删除，但附加记录清理失败：%s", strings.Join(cleanupErrors, "；"))
-	}
-	return nil
-}
-
-func (a *App) removeDeletedProfileSnapshots(profileId string) error {
-	base := filepath.Clean(a.resolveAppPath(filepath.Join("data", "snapshots")))
-	target := filepath.Clean(filepath.Join(base, profileId))
-	rel, err := filepath.Rel(base, target)
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("快照目录越界，已取消清理")
-	}
-	if err := os.RemoveAll(target); err != nil {
-		return fmt.Errorf("删除环境快照失败: %w", err)
+		return fmt.Errorf("环境已删除且数据已归档，但附加记录清理失败：%s", strings.Join(cleanupErrors, "；"))
 	}
 	return nil
 }

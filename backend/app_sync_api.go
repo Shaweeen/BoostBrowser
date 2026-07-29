@@ -657,23 +657,11 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 
 // SyncCloseAll 关闭所有已选中实例
 func (a *App) SyncCloseAll(profileIds []string) []string {
-	a.browserMgr.Mutex.Lock()
-	defer a.browserMgr.Mutex.Unlock()
-
 	closed := make([]string, 0)
-	for _, pid := range profileIds {
-		profile, ok := a.browserMgr.Profiles[pid]
-		if !ok || !profile.Running {
-			continue
+	for _, profileID := range profileIds {
+		if _, err := a.BrowserInstanceStop(profileID); err == nil {
+			closed = append(closed, profileID)
 		}
-		if a.browserMgr.BrowserProcesses[pid] != nil && a.browserMgr.BrowserProcesses[pid].Process != nil {
-			a.browserMgr.BrowserProcesses[pid].Process.Kill()
-		}
-		profile.Running = false
-		profile.Pid = 0
-		profile.DebugPort = 0
-		profile.DebugReady = false
-		closed = append(closed, pid)
 	}
 	return closed
 }

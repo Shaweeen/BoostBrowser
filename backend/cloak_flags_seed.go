@@ -1,23 +1,24 @@
 package backend
 
 import (
+	"boost-browser/backend/internal/fsutil"
+	"boost-browser/backend/internal/logger"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"boost-browser/backend/internal/logger"
 )
 
 // cloak 内核默认启用的 chrome://flags 实验。
 // 每项是 chrome://flags 里的 internal name + 选项 index（@N）。
 //
 // extension-mime-request-handling@2  => "Always prompt for install"
-//   作用：从任意 https 站点下载到 .crx 时，直接弹原生"添加扩展程序？"对话框。
-//   配合 chromium-web-store helper 扩展，让 chromewebstore.google.com 上
-//   "添加至 Chrome"按钮 → 下载 .crx → 自动弹安装框，不需要用户手动拖拽到
-//   chrome://extensions。
+//
+//	作用：从任意 https 站点下载到 .crx 时，直接弹原生"添加扩展程序？"对话框。
+//	配合 chromium-web-store helper 扩展，让 chromewebstore.google.com 上
+//	"添加至 Chrome"按钮 → 下载 .crx → 自动弹安装框，不需要用户手动拖拽到
+//	chrome://extensions。
 var cloakDefaultLabsExperiments = []string{
 	"extension-mime-request-handling@2",
 }
@@ -105,14 +106,8 @@ func ensureCloakLocalStateFlags(userDataDir string) error {
 		return fmt.Errorf("Local State 序列化失败: %w", err)
 	}
 
-	// 原子写：先写 .tmp 再 rename，避免 chromium 启动早期读到半截内容。
-	tmpPath := lsPath + ".tmp"
-	if err := os.WriteFile(tmpPath, out, 0o644); err != nil {
-		return fmt.Errorf("写入 Local State 临时文件失败: %w", err)
-	}
-	if err := os.Rename(tmpPath, lsPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename Local State 失败: %w", err)
+	if err := fsutil.WriteFileAtomic(lsPath, out, 0o644); err != nil {
+		return fmt.Errorf("原子写入 Local State 失败: %w", err)
 	}
 
 	log.Info("已写入 cloak 默认 chrome://flags",

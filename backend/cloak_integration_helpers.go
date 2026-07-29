@@ -3,6 +3,7 @@ package backend
 import (
 	"boost-browser/backend/internal/browser"
 	appconfig "boost-browser/backend/internal/config"
+	"boost-browser/backend/internal/fsutil"
 	"boost-browser/backend/internal/launchcode"
 	"crypto/sha1"
 	"database/sql"
@@ -183,7 +184,7 @@ func normalizeSearchPreferences(prefsPath string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(prefsPath, out, 0o644)
+	return fsutil.WriteFileAtomic(prefsPath, out, 0o644)
 }
 
 func (a *App) isProfileUsingCloakCore(profileId string) bool {

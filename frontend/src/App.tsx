@@ -348,6 +348,8 @@ type StartupDataStatus = {
   activeDataPath?: string
   existingData?: boolean
   autoRecovered?: number
+  recoveryCount?: number
+  recoveryPath?: string
   message?: string
 }
 
@@ -358,7 +360,7 @@ function StartupDataCompatibilityNotice() {
     let cancelled = false
     GetStartupDataCompatibilityStatus()
       .then((value) => {
-        if (!cancelled && Number(value?.autoRecovered || 0) > 0) setStatus(value)
+        if (!cancelled && (Number(value?.autoRecovered || 0) > 0 || Number(value?.recoveryCount || 0) > 0)) setStatus(value)
       })
       .catch(() => {})
     return () => { cancelled = true }
@@ -378,6 +380,12 @@ function StartupDataCompatibilityNotice() {
           <div>
             <p className="font-medium text-[var(--color-text-primary)]">{status?.message}</p>
             <p className="mt-1">自动恢复环境：{status?.autoRecovered || 0} 个</p>
+            {(status?.recoveryCount || 0) > 0 && (
+              <>
+                <p className="mt-1">等待用户确认恢复：{status?.recoveryCount || 0} 个</p>
+                <p className="mt-1 break-all text-xs text-[var(--color-text-muted)]">恢复归档：{status?.recoveryPath}</p>
+              </>
+            )}
             <p className="mt-1 break-all text-xs text-[var(--color-text-muted)]">数据目录：{status?.activeDataPath}</p>
           </div>
         </div>

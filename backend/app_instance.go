@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	stdruntime "runtime"
 	"sort"
 	"strings"
 	"time"
@@ -134,6 +133,11 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			return nil, fmt.Errorf("该环境正在执行钱包批量导入，请等待完成")
 		}
 	}
+	if err := a.browserMgr.ValidateUserDataDirOwnership(profileId); err != nil {
+		startErr := fmt.Errorf("实例启动失败：%w", err)
+		log.Error("环境数据目录所有权冲突", logger.F("profile_id", profileId), logger.F("reason", startErr.Error()))
+		return nil, startErr
+	}
 	a.browserMgr.Mutex.Lock()
 	managerLocked := true
 	unlockManager := func() {
@@ -192,9 +196,15 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	logManagedLaunchArgOverrides(log, profileId, "profile.launchArgs.windowPlacement", managedWindowPlacementArgs)
 	logManagedLaunchArgOverrides(log, profileId, "start.extraLaunchArgs", managedExtraArgs)
 
-	proxyChanged := a.browserMgr.ApplyDefaults(profile)
-	if proxyChanged {
-		_ = a.browserMgr.SaveProfiles()
+	profileBeforeDefaults := copyBrowserProfileSnapshot(profile)
+	profileChanged := a.browserMgr.ApplyDefaults(profile)
+	if profileChanged {
+		if err := a.browserMgr.SaveProfiles(); err != nil {
+			*profile = *profileBeforeDefaults
+			startErr := fmt.Errorf("实例启动失败：保存环境身份与代理默认值失败，已恢复原配置：%w", err)
+			profile.LastError = startErr.Error()
+			return profile, startErr
+		}
 	}
 
 	chromeBinaryPath, err := a.browserMgr.ResolveChromeBinary(profile)
@@ -526,7 +536,14 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			readyProfile, _ := a.setProfileDebugReady(profileId, stableDebugPort)
 			if readyProfile == nil {
 				startErr := fmt.Errorf("实例启动已取消：环境在浏览器就绪前被关闭或删除")
-				_ = a.stopBrowserProcess(cmd)
+				if !tryCloseBrowserViaCDP(stableDebugPort, 5*time.Second) ||
+					!waitEnvironmentDataFlush(stableDebugPort, cmd.Process.Pid, userDataDir, 10*time.Second) {
+					log.Error("取消启动的浏览器未通过写盘关闭确认，未执行强制终止",
+						logger.F("profile_id", profileId),
+						logger.F("pid", cmd.Process.Pid),
+						logger.F("debug_port", stableDebugPort),
+					)
+				}
 				return profile, startErr
 			}
 			profile = readyProfile
@@ -738,6 +755,9 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 
 func (a *App) BrowserInstanceStop(profileId string) (*BrowserProfile, error) {
 	log := logger.New("Browser")
+	a.browserCloseMu.Lock()
+	defer a.browserCloseMu.Unlock()
+
 	a.rabbyImportMu.Lock()
 	blocked := a.rabbyImportActive[profileId]
 	a.rabbyImportMu.Unlock()
@@ -745,39 +765,97 @@ func (a *App) BrowserInstanceStop(profileId string) (*BrowserProfile, error) {
 		return nil, fmt.Errorf("该环境正在执行钱包批量导入，请等待完成后再关闭")
 	}
 	a.browserMgr.Mutex.Lock()
-	defer a.browserMgr.Mutex.Unlock()
-
 	profile, exists := a.browserMgr.Profiles[profileId]
 	if !exists {
+		a.browserMgr.Mutex.Unlock()
 		return nil, fmt.Errorf("profile not found")
 	}
-
 	cmd := a.browserMgr.BrowserProcesses[profileId]
 	debugPort := profile.DebugPort
-	if tryCloseBrowserViaCDP(debugPort, 5*time.Second) {
+	pid := profile.Pid
+	if cmd != nil && cmd.Process != nil && cmd.Process.Pid > 0 {
+		pid = cmd.Process.Pid
+	}
+	userDataDir := a.browserMgr.ResolveUserDataDir(profile)
+	profileSnapshot := copyBrowserProfileSnapshot(profile)
+	wasRunning := profile.Running || debugPort > 0 || pid > 0 || cmd != nil
+	if !wasRunning {
+		snapshot := copyBrowserProfileSnapshot(profile)
+		a.browserMgr.Mutex.Unlock()
+		return snapshot, nil
+	}
+	if debugPort <= 0 && pid <= 0 && cmd == nil && !browserSingletonArtifactsPresent(userDataDir) {
 		a.markProfileStoppedLocked(profileId, profile)
-		log.Info("实例停止", logger.F("profile_id", profileId), logger.F("method", "cdp"), logger.F("debug_port", debugPort))
-		return profile, nil
+		snapshot := copyBrowserProfileSnapshot(profile)
+		a.browserMgr.Mutex.Unlock()
+		return snapshot, nil
 	}
+	a.browserMgr.Mutex.Unlock()
 
-	if cmd != nil && cmd.Process != nil {
-		if err := a.stopBrowserProcess(cmd); err != nil {
-			log.Error("实例停止失败", logger.F("profile_id", profileId), logger.F("error", err))
-			profile.LastError = err.Error()
-			return profile, err
+	closeRequestedAt := time.Now()
+	if err := a.browserMgr.WriteProfileDataPointer(profileSnapshot, "closing", pid, closeRequestedAt); err != nil {
+		err = fmt.Errorf("环境关闭前无法保存数据指向，已取消关闭以保护 Cookie、扩展和钱包数据: %w", err)
+		a.browserMgr.Mutex.Lock()
+		if current := a.browserMgr.Profiles[profileId]; current != nil {
+			current.LastError = err.Error()
 		}
+		a.browserMgr.Mutex.Unlock()
+		return nil, err
 	}
 
-	if debugPort > 0 && canConnectDebugPort(debugPort, 250*time.Millisecond) {
-		err := fmt.Errorf("实例停止失败：浏览器仍在运行（调试端口 %d 仍可访问）", debugPort)
-		log.Error("实例停止失败", logger.F("profile_id", profileId), logger.F("debug_port", debugPort), logger.F("reason", err.Error()))
-		profile.LastError = err.Error()
-		return profile, err
+	method := "cdp"
+	gracefulRequested := tryCloseBrowserViaCDP(debugPort, 5*time.Second)
+	if !gracefulRequested {
+		method = "os-soft-close"
+		gracefulRequested = requestSoftProcessStopPID(pid) == nil
+	}
+	if !gracefulRequested || !waitEnvironmentDataFlush(debugPort, pid, userDataDir, 15*time.Second) {
+		err := fmt.Errorf("环境关闭未完成写盘确认；为保护 Cookie、扩展和钱包数据，未强制终止浏览器，请稍后重试")
+		a.browserMgr.Mutex.Lock()
+		if current := a.browserMgr.Profiles[profileId]; current != nil {
+			current.LastError = err.Error()
+		}
+		a.browserMgr.Mutex.Unlock()
+		log.Error("实例停止失败",
+			logger.F("profile_id", profileId),
+			logger.F("pid", pid),
+			logger.F("debug_port", debugPort),
+			logger.F("reason", err.Error()),
+		)
+		return nil, err
 	}
 
-	a.markProfileStoppedLocked(profileId, profile)
-	log.Info("实例停止", logger.F("profile_id", profileId))
-	return profile, nil
+	closedAt := time.Now()
+	pointerErr := a.browserMgr.WriteProfileDataPointer(profileSnapshot, "closed", pid, closedAt)
+	a.browserMgr.Mutex.Lock()
+	current, exists := a.browserMgr.Profiles[profileId]
+	if !exists || current == nil {
+		a.browserMgr.Mutex.Unlock()
+		return nil, fmt.Errorf("profile not found")
+	}
+	if current.Running || current.DebugPort > 0 || current.Pid > 0 || a.browserMgr.BrowserProcesses[profileId] != nil {
+		a.markProfileStoppedLocked(profileId, current)
+	}
+	current.LastStopAt = closedAt.Format(time.RFC3339)
+	if pointerErr != nil {
+		current.LastError = fmt.Sprintf("环境数据已由浏览器正常写盘，但数据指向索引保存失败: %v", pointerErr)
+	}
+	snapshot := copyBrowserProfileSnapshot(current)
+	a.browserMgr.Mutex.Unlock()
+	if pointerErr != nil {
+		log.Error("环境数据已写盘但关闭索引保存失败",
+			logger.F("profile_id", profileId),
+			logger.F("pid", pid),
+			logger.F("error", pointerErr.Error()),
+		)
+		return snapshot, pointerErr
+	}
+	log.Info("实例停止并完成数据写盘确认",
+		logger.F("profile_id", profileId),
+		logger.F("pid", pid),
+		logger.F("method", method),
+	)
+	return snapshot, nil
 }
 
 func (a *App) BrowserInstanceRestart(profileId string) (*BrowserProfile, error) {
@@ -925,7 +1003,7 @@ func (a *App) BrowserInstanceStatus(profileId string) (*BrowserProfile, error) {
 	if !exists {
 		return nil, fmt.Errorf("profile not found")
 	}
-	return profile, nil
+	return copyBrowserProfileSnapshot(profile), nil
 }
 
 func (a *App) BrowserInstanceOpenUrl(profileId string, targetUrl string) bool {
@@ -996,6 +1074,40 @@ func (a *App) waitBrowserProcess(profileId string, monitor *browserProcessMonito
 	a.browserMgr.Mutex.Lock()
 	profile, exists = a.browserMgr.Profiles[profileId]
 	wasRunning = exists && profile.Running
+	var closeSnapshot *BrowserProfile
+	closePID := 0
+	if exists {
+		profileName = profile.ProfileName
+		closeSnapshot = copyBrowserProfileSnapshot(profile)
+		closePID = profile.Pid
+	}
+	a.browserMgr.Mutex.Unlock()
+
+	// A user closing the Chromium frame directly bypasses BrowserInstanceStop.
+	// The process monitor therefore records the same clean-close pointer once
+	// the process and profile lock are gone. It does not read browser content.
+	if wasRunning && err == nil && closeSnapshot != nil {
+		a.browserCloseMu.Lock()
+		a.browserMgr.Mutex.Lock()
+		current := a.browserMgr.Profiles[profileId]
+		stillNeedsCloseRecord := current != nil && current.Running
+		a.browserMgr.Mutex.Unlock()
+		dataDir := a.browserMgr.ResolveUserDataDir(closeSnapshot)
+		if stillNeedsCloseRecord && waitEnvironmentDataFlush(closeSnapshot.DebugPort, closePID, dataDir, 5*time.Second) {
+			closedAt := time.Now()
+			if pointerErr := a.browserMgr.WriteProfileDataPointer(closeSnapshot, "closed", closePID, closedAt); pointerErr != nil {
+				log.Error("用户关闭环境后数据指向保存失败",
+					logger.F("profile_id", profileId),
+					logger.F("error", pointerErr.Error()),
+				)
+			}
+		}
+		a.browserCloseMu.Unlock()
+	}
+
+	a.browserMgr.Mutex.Lock()
+	profile, exists = a.browserMgr.Profiles[profileId]
+	wasRunning = exists && profile.Running
 	if exists {
 		profileName = profile.ProfileName
 		a.markProfileStoppedLocked(profileId, profile)
@@ -1052,13 +1164,46 @@ func (a *App) waitDetachedBrowser(profileId string, debugPort int) {
 			return
 		}
 		profileName = profile.ProfileName
+		closeSnapshot := copyBrowserProfileSnapshot(profile)
+		a.browserMgr.Mutex.Unlock()
+
+		// A detached launcher has no process handle to wait on. The debug
+		// endpoint and Chromium Singleton lock are therefore the authoritative
+		// close barrier before publishing the stopped state and clean pointer.
+		a.browserCloseMu.Lock()
+		a.browserMgr.Mutex.Lock()
+		current := a.browserMgr.Profiles[profileId]
+		stillClosing := current != nil && current.Running && current.DebugPort == debugPort
+		a.browserMgr.Mutex.Unlock()
+		var closeErr error
+		if stillClosing {
+			dataDir := a.browserMgr.ResolveUserDataDir(closeSnapshot)
+			if waitEnvironmentDataFlush(debugPort, 0, dataDir, 5*time.Second) {
+				closeErr = a.browserMgr.WriteProfileDataPointer(closeSnapshot, "closed", 0, time.Now())
+			} else {
+				closeErr = fmt.Errorf("浏览器已退出，但环境数据锁未在期限内释放，未标记为完整写盘")
+			}
+		}
+
+		a.browserMgr.Mutex.Lock()
+		profile, exists = a.browserMgr.Profiles[profileId]
+		if !exists || !profile.Running || profile.DebugPort != debugPort {
+			a.browserMgr.Mutex.Unlock()
+			a.browserCloseMu.Unlock()
+			return
+		}
+		if closeErr != nil {
+			profile.LastError = closeErr.Error()
+		}
 		a.markProfileStoppedLocked(profileId, profile)
 		a.browserMgr.Mutex.Unlock()
+		a.browserCloseMu.Unlock()
 
 		log.Info("检测到浏览器调试端口关闭，实例已停止",
 			logger.F("profile_id", profileId),
 			logger.F("profile_name", profileName),
 			logger.F("debug_port", debugPort),
+			logger.F("data_flush_confirmed", closeErr == nil),
 		)
 		if a.ctx != nil {
 			runtime.EventsEmit(a.ctx, "browser:instance:stopped", profileId)
@@ -1076,6 +1221,27 @@ func tryCloseBrowserViaCDP(debugPort int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if !canConnectDebugPort(debugPort, 250*time.Millisecond) {
+			return true
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return false
+}
+
+func waitEnvironmentDataFlush(debugPort, pid int, userDataDir string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		debugClosed := debugPort <= 0 || !canConnectDebugPort(debugPort, 200*time.Millisecond)
+		processClosed := pid <= 0
+		if pid > 0 {
+			alive, err := isProcessAlivePID(pid)
+			processClosed = err == nil && !alive
+		}
+		profileUnlocked := !browserSingletonArtifactsPresent(userDataDir)
+		if debugClosed && processClosed && profileUnlocked {
+			// Give Chromium's completed close handlers one final scheduling turn
+			// after the process and profile lock have both disappeared.
+			time.Sleep(150 * time.Millisecond)
 			return true
 		}
 		time.Sleep(150 * time.Millisecond)
@@ -1200,99 +1366,6 @@ func (a *App) openBrowserWindowForRunningProfile(profile *BrowserProfile, extraL
 		_ = cmd.Wait()
 	}()
 	return nil
-}
-
-func (a *App) stopBrowserProcess(cmd *exec.Cmd) error {
-	return a.stopProcessCmd(cmd)
-}
-
-func (a *App) stopProcessCmd(cmd *exec.Cmd) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
-	}
-
-	// Windows 下优先非强制 taskkill，尽量让 Chromium 走正常退出路径，减少“恢复页面”提示。
-	if stdruntime.GOOS == "windows" {
-		if err := a.stopProcessPID(cmd.Process.Pid); err == nil {
-			return nil
-		}
-	}
-
-	err := cmd.Process.Kill()
-	if err == nil || isProcessAlreadyFinished(err) {
-		return nil
-	}
-	return err
-}
-
-func (a *App) stopProcessPID(pid int) error {
-	if pid <= 0 {
-		return nil
-	}
-	if stdruntime.GOOS == "windows" {
-		softKillCmd := exec.Command("taskkill", "/PID", fmt.Sprintf("%d", pid), "/T")
-		hideWindow(softKillCmd)
-		if err := softKillCmd.Run(); err == nil && waitProcessExitWindows(pid, 3*time.Second) {
-			return nil
-		}
-		forceKillCmd := exec.Command("taskkill", "/F", "/PID", fmt.Sprintf("%d", pid), "/T")
-		hideWindow(forceKillCmd)
-		if err := forceKillCmd.Run(); err != nil {
-			return err
-		}
-		_ = waitProcessExitWindows(pid, 2*time.Second)
-		return nil
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	if err := process.Kill(); err != nil && !isProcessAlreadyFinished(err) {
-		return err
-	}
-	return nil
-}
-
-func isProcessAlreadyFinished(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(strings.TrimSpace(err.Error()))
-	if msg == "" {
-		return false
-	}
-	if strings.Contains(msg, "process already finished") {
-		return true
-	}
-	if strings.Contains(msg, "not found") {
-		return true
-	}
-	if strings.Contains(msg, "no process") {
-		return true
-	}
-	if strings.Contains(msg, "不存在") {
-		return true
-	}
-	return false
-}
-
-func waitProcessExitWindows(pid int, timeout time.Duration) bool {
-	if pid <= 0 {
-		return true
-	}
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		alive, err := isProcessAliveWindows(pid)
-		if err == nil && !alive {
-			return true
-		}
-		time.Sleep(150 * time.Millisecond)
-	}
-	alive, err := isProcessAliveWindows(pid)
-	if err != nil {
-		return false
-	}
-	return !alive
 }
 
 // navigateToTargetURLs 通过 CDP 将浏览器导航到目标 URL。

@@ -192,6 +192,9 @@ func TestUpdateProfileAPIUpdatesFieldsAndAutoLaunches(t *testing.T) {
 	if updated.ProfileName != "buyer-new" || updated.ProxyId != "proxy-us" || updated.ProxyConfig != "socks5://127.0.0.1:1080" {
 		t.Fatalf("更新未生效: %+v", updated)
 	}
+	if updated.UserDataDir != profile.UserDataDir {
+		t.Fatalf("更新接口不得重映射用户数据目录: before=%q after=%q", profile.UserDataDir, updated.UserDataDir)
+	}
 	if updated.GroupId != "group-sales-us" || updated.LaunchCode != "BUYER_NEW" || !updated.Running {
 		t.Fatalf("更新后的分组/launchCode/运行状态错误: %+v", updated)
 	}

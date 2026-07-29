@@ -154,12 +154,13 @@ export function BrowserEditPage() {
           <FormItem label="环境名称" required>
             <Input value={formData.profileName} onChange={e => handleChange('profileName', e.target.value)} placeholder="请输入环境名称" />
           </FormItem>
-          <FormItem label="用户数据目录（留空自动生成）">
+          <FormItem label={isCreate ? '用户数据目录（留空自动生成）' : '用户数据目录（环境数据身份，只读）'}>
             <div className="flex gap-2">
               <Input
                 value={formData.userDataDir}
-                onChange={e => handleChange('userDataDir', e.target.value)}
+                onChange={isCreate ? e => handleChange('userDataDir', e.target.value) : undefined}
                 placeholder="留空自动生成"
+                readOnly={!isCreate}
                 className="flex-1"
               />
               <Button variant="secondary" size="sm" onClick={handleOpenUserDataDir} title="在资源管理器中打开">

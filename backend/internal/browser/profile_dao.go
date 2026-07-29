@@ -13,6 +13,7 @@ type ProfileDAO interface {
 	List() ([]*Profile, error)
 	GetById(profileId string) (*Profile, error)
 	Upsert(profile *Profile) error
+	UpsertMany(profiles []*Profile) error
 	Delete(profileId string) error
 }
 
@@ -75,6 +76,17 @@ func (d *SQLiteProfileDAO) GetById(profileId string) (*Profile, error) {
 
 // Upsert 新增或更新实例配置
 func (d *SQLiteProfileDAO) Upsert(profile *Profile) error {
+	return upsertProfile(d.db, profile)
+}
+
+type profileExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func upsertProfile(exec profileExecer, profile *Profile) error {
+	if profile == nil {
+		return fmt.Errorf("保存实例配置失败: 实例为空")
+	}
 	fingerprintArgs, _ := json.Marshal(profile.FingerprintArgs)
 	launchArgs, _ := json.Marshal(profile.LaunchArgs)
 	lastTabs, _ := json.Marshal(profile.LastTabs)
@@ -89,7 +101,7 @@ func (d *SQLiteProfileDAO) Upsert(profile *Profile) error {
 		profile.UpdatedAt = now
 	}
 
-	_, err := d.db.Exec(`
+	_, err := exec.Exec(`
 		INSERT INTO browser_profiles
 		  (profile_id, profile_name, user_data_dir, core_id, fingerprint_args,
 		   proxy_id, proxy_config, proxy_bind_source_id, proxy_bind_source_url, proxy_bind_name, proxy_bind_updated_at,
@@ -126,6 +138,28 @@ func (d *SQLiteProfileDAO) Upsert(profile *Profile) error {
 	)
 	if err != nil {
 		return fmt.Errorf("保存实例配置失败: %w", err)
+	}
+	return nil
+}
+
+// UpsertMany atomically persists a coordinated multi-profile action such as
+// explicit extension distribution. No subset becomes visible if one row fails.
+func (d *SQLiteProfileDAO) UpsertMany(profiles []*Profile) error {
+	if len(profiles) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("开始保存实例事务失败: %w", err)
+	}
+	defer tx.Rollback()
+	for _, profile := range profiles {
+		if err := upsertProfile(tx, profile); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交实例事务失败: %w", err)
 	}
 	return nil
 }

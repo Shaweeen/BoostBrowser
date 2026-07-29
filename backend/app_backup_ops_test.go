@@ -1,11 +1,27 @@
 package backend
 
 import (
+	"boost-browser/backend/internal/browser"
 	"boost-browser/backend/internal/config"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestBackupRunningProfilesBlocksMutableDataMaintenance(t *testing.T) {
+	app := &App{
+		browserMgr: &browser.Manager{
+			Profiles: map[string]*browser.Profile{
+				"stopped": {ProfileId: "stopped", Running: false},
+				"running": {ProfileId: "running", Running: true},
+			},
+		},
+	}
+	running := app.backupRunningProfiles()
+	if len(running) != 1 || running[0] != "running" {
+		t.Fatalf("运行环境识别错误: %+v", running)
+	}
+}
 
 func TestBackupEnsureZipSuffix(t *testing.T) {
 	if got := backupEnsureZipSuffix("c:/tmp/a.zip"); got != "c:/tmp/a.zip" {

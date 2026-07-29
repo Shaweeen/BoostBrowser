@@ -36,6 +36,30 @@ func TestBuildChromeUAFromFingerprintArgs(t *testing.T) {
 	}
 }
 
+func TestBrowserStartRestoresProfileDefaultsWhenPersistenceFails(t *testing.T) {
+	root := t.TempDir()
+	app := NewApp(root)
+	cfg := config.DefaultConfig()
+	app.browserMgr = browser.NewManager(cfg, root)
+	app.browserMgr.ProfileDAO = failingExtensionProfileDAO{}
+	profile := &browser.Profile{
+		ProfileId:   "profile-1",
+		ProfileName: "one",
+		UserDataDir: "profile-1",
+		UpdatedAt:   "before",
+	}
+	app.browserMgr.Profiles[profile.ProfileId] = profile
+
+	if _, err := app.browserInstanceStartInternal(profile.ProfileId, nil, nil, true, false, false); err == nil ||
+		!strings.Contains(err.Error(), "保存环境身份与代理默认值失败") {
+		t.Fatalf("unexpected start result: %v", err)
+	}
+	got := app.browserMgr.Profiles[profile.ProfileId]
+	if len(got.FingerprintArgs) != 0 || len(got.LaunchArgs) != 0 || got.CoreId != "" || got.UpdatedAt != "before" {
+		t.Fatalf("failed start leaked generated defaults into memory: %+v", got)
+	}
+}
+
 func TestEnsureNewWindowLaunchArgAddsFlagOnce(t *testing.T) {
 	t.Parallel()
 
@@ -112,6 +136,23 @@ func TestIsBrowserProfileLiveKeepsPendingDebugProcessAlive(t *testing.T) {
 	}
 	if !isBrowserProfileLive(profile, cmd) {
 		t.Fatal("期望调试接口未就绪但进程仍存活时识别为运行中实例")
+	}
+}
+
+func TestWaitEnvironmentDataFlushRequiresProfileLockRelease(t *testing.T) {
+	userDataDir := t.TempDir()
+	lockPath := filepath.Join(userDataDir, "SingletonLock")
+	if err := os.WriteFile(lockPath, []byte("active"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if waitEnvironmentDataFlush(0, 0, userDataDir, 250*time.Millisecond) {
+		t.Fatal("close barrier must not certify saved data while the profile lock exists")
+	}
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	if !waitEnvironmentDataFlush(0, 0, userDataDir, time.Second) {
+		t.Fatal("close barrier should pass after process/debug/profile locks are released")
 	}
 }
 

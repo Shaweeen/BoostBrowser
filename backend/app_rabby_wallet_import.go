@@ -438,7 +438,11 @@ func (a *App) startWalletImportProfile(spec walletImportSpec, row rabbyWalletImp
 	if started == nil || !started.Running || !started.DebugReady || started.DebugPort <= 0 {
 		return 0, fmt.Errorf("环境 #%d %s 已启动但调试接口未就绪，请关闭该环境后重试", snapshot.EnvironmentNumber, snapshot.ProfileName)
 	}
-	if actualStorageID := walletProfileStorageID(started.UserDataDir, started.ProfileId); !strings.EqualFold(actualStorageID, row.StorageID) {
+	actualUserDataDir := a.browserMgr.ResolveUserDataDir(started)
+	if !strings.EqualFold(filepath.ToSlash(filepath.Clean(actualUserDataDir)), filepath.ToSlash(filepath.Clean(snapshot.UserDataDir))) {
+		return 0, fmt.Errorf("环境 #%d %s 的物理数据目录已变化，已停止导入以保护钱包数据", snapshot.EnvironmentNumber, snapshot.ProfileName)
+	}
+	if actualStorageID := walletProfileStorageID(actualUserDataDir, started.ProfileId); !strings.EqualFold(actualStorageID, row.StorageID) {
 		return 0, fmt.Errorf("环境 #%d %s 的数据文件夹 ID 验证失败，已停止导入", snapshot.EnvironmentNumber, snapshot.ProfileName)
 	}
 	return started.DebugPort, nil
@@ -472,15 +476,16 @@ func (a *App) rabbyProfileSnapshot() map[string]RabbyWalletImportPreviewRow {
 		if profile == nil {
 			continue
 		}
+		resolvedUserDataDir := a.browserMgr.ResolveUserDataDir(profile)
 		out[id] = RabbyWalletImportPreviewRow{
 			EnvironmentNumber: resolveBadgeDisplayNumber(id, profile.ProfileName, a.browserMgr.Profiles),
 			ProfileID:         id,
 			ProfileName:       profile.ProfileName,
-			StorageID:         walletProfileStorageID(profile.UserDataDir, id),
+			StorageID:         walletProfileStorageID(resolvedUserDataDir, id),
 			Running:           profile.Running,
 			DebugPort:         profile.DebugPort,
 			DebugReady:        profile.DebugReady,
-			UserDataDir:       a.browserMgr.ResolveUserDataDir(profile),
+			UserDataDir:       resolvedUserDataDir,
 		}
 	}
 	return out
@@ -1047,6 +1052,13 @@ func importMnemonicIntoFreshRabby(debugPort int, mnemonic, password string) (str
 	address, _ := addressValue.(string)
 	if !rabbyAddressPattern.MatchString(address) {
 		return "", fmt.Errorf("Rabby 已完成导入，但公开地址校验失败")
+	}
+	if err := confirmWalletStateAfterReload(
+		pageClient,
+		"Rabby",
+		`new Promise((resolve) => chrome.storage.local.get('keyringState', (data) => resolve(Boolean(data && data.keyringState && data.keyringState.booted))))`,
+	); err != nil {
+		return "", err
 	}
 	return address, nil
 }

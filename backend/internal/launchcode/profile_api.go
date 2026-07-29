@@ -294,6 +294,13 @@ func (s *LaunchServer) createProfile(input browser.ProfileInput, requestedCode s
 }
 
 func (s *LaunchServer) updateProfile(profileID string, input browser.ProfileInput, requestedCode string, previous *browser.Profile) (*browser.Profile, string, int, string) {
+	// UserDataDir is the permanent storage identity for cookies, extension state,
+	// and wallet data. Older API clients may still send this create-only field on
+	// PUT, so preserve the existing value instead of remapping or rejecting the
+	// otherwise valid profile update.
+	if previous != nil {
+		input.UserDataDir = previous.UserDataDir
+	}
 	profile, err := s.updateProfileInternal(profileID, input)
 	if err != nil {
 		return nil, "", mapProfileWriteErrorStatus(err), err.Error()

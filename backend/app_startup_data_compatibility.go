@@ -1,6 +1,8 @@
 package backend
 
 import (
+	"boost-browser/backend/internal/browser"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,8 @@ type StartupDataCompatibilityStatus struct {
 	ActiveDataPath string `json:"activeDataPath"`
 	ExistingData   bool   `json:"existingData"`
 	AutoRecovered  int    `json:"autoRecovered"`
+	RecoveryCount  int    `json:"recoveryCount"`
+	RecoveryPath   string `json:"recoveryPath"`
 	Message        string `json:"message"`
 }
 
@@ -33,6 +37,17 @@ func (a *App) initializeActiveDataCompatibility(activeRoot string, existed bool)
 		}
 		a.setStartupDataCompatibilityStatus(status)
 		return
+	}
+	status.RecoveryPath = a.browserMgr.ProfileRecoveryArchiveRoot()
+	if archives, err := browser.ListProfileDataArchives(status.RecoveryPath); err == nil {
+		for _, archive := range archives {
+			if archive.DataAvailable {
+				status.RecoveryCount++
+			}
+		}
+		if status.RecoveryCount > 0 {
+			status.Message += fmt.Sprintf("；发现 %d 个由用户删除操作保留的环境恢复归档，等待你确认导入", status.RecoveryCount)
+		}
 	}
 
 	a.browserMgr.Mutex.Lock()

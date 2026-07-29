@@ -100,6 +100,25 @@ func clickWalletButtonByText(client *rabbyCDPClient, label string) error {
 	return nil
 }
 
+// confirmWalletStateAfterReload is the import commit barrier. A completion
+// screen alone is not durable evidence: wallet extensions may still be writing
+// their encrypted vault to chrome.storage. Requiring the non-secret initialized
+// predicate to survive a real page reload proves the extension can read its
+// state back from its own persistent storage before BrowserStudio reports
+// success or closes the import tab.
+func confirmWalletStateAfterReload(client *rabbyCDPClient, walletName, initializedExpression string) error {
+	if err := waitRabbyCondition(client, initializedExpression, 20*time.Second); err != nil {
+		return fmt.Errorf("%s 已完成界面流程，但加密钱包状态尚未持久化", walletName)
+	}
+	if _, err := client.call("Page.reload", map[string]any{"ignoreCache": true}, 8*time.Second); err != nil {
+		return fmt.Errorf("%s 持久化复核页面刷新失败", walletName)
+	}
+	if err := waitRabbyCondition(client, initializedExpression, 25*time.Second); err != nil {
+		return fmt.Errorf("%s 加密钱包状态未通过重载复核，未标记为导入成功", walletName)
+	}
+	return nil
+}
+
 func importMnemonicIntoFreshJupiter(debugPort int, mnemonic, password string) (string, error) {
 	url := "chrome-extension://" + jupiterExtensionID + "/popup.html#/onboard"
 	browserClient, pageClient, targetID, err := openWalletImportTarget(debugPort, url, "Jupiter")
@@ -166,6 +185,13 @@ func importMnemonicIntoFreshJupiter(debugPort int, mnemonic, password string) (s
 		if err := waitRabbyCondition(pageClient, `document.body.innerText.includes('Continue to jup.ag to start')`, 20*time.Second); err != nil {
 			return "", fmt.Errorf("Jupiter 完成页面加载超时")
 		}
+	}
+	if err := confirmWalletStateAfterReload(
+		pageClient,
+		"Jupiter",
+		`new Promise((resolve) => chrome.storage.local.getBytesInUse(null, (bytes) => resolve(Number(bytes) > 0 && !document.body.innerText.includes('Welcome to Jupiter Wallet'))))`,
+	); err != nil {
+		return "", err
 	}
 	if address != "" && !solanaAddressPattern.MatchString(address) {
 		address = ""
@@ -244,6 +270,13 @@ func importMnemonicIntoFreshMetaMask(debugPort int, mnemonic, password string) (
 			address, _ := addressValue.(string)
 			if address != "" && !ethereumAddressPattern.MatchString(address) {
 				address = ""
+			}
+			if err := confirmWalletStateAfterReload(
+				pageClient,
+				"MetaMask",
+				`new Promise((resolve) => chrome.storage.local.get('data', (stored) => resolve(Boolean(stored && stored.data))))`,
+			); err != nil {
+				return "", err
 			}
 			return address, nil
 		}

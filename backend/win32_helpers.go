@@ -30,15 +30,28 @@ const (
 	WM_CHAR        = 0x0102
 	WM_SYSKEYDOWN  = 0x0104
 	WM_SYSKEYUP    = 0x0105
+	WM_CLOSE       = 0x0010
 	MK_LBUTTON     = 0x0001
 	MK_RBUTTON     = 0x0002
 	MK_SHIFT       = 0x0004
 	MK_CONTROL     = 0x0008
 	MK_MBUTTON     = 0x0010
 	MK_NONE        = 0x0000
+	SWP_NOSIZE     = 0x0001
+	SWP_NOMOVE     = 0x0002
 	SWP_NOZORDER   = 0x0004
 	SWP_NOACTIVATE = 0x0010
 	SWP_SHOWWINDOW = 0x0040
+	GW_HWNDPREV    = 3
+	GW_OWNER       = 4
+	WS_EX_TOPMOST  = 0x00000008
+
+	// Win32 pseudo handles and signed GetWindowLong index encoded as uintptr.
+	// These forms compile consistently for Windows x64 without routing ordinary
+	// popup placement through a global HWND_TOPMOST band.
+	HWND_TOP       = uintptr(0)
+	HWND_NOTOPMOST = ^uintptr(1)
+	GWL_EXSTYLE    = ^uintptr(19)
 
 	// Virtual Key Codes
 	VK_CONTROL = 0x11
@@ -104,6 +117,7 @@ var (
 	procGetClassLongPtrW         = user32dll.NewProc("GetClassLongPtrW")
 	procGetWindowTextW           = user32dll.NewProc("GetWindowTextW")
 	procGetClassNameW            = user32dll.NewProc("GetClassNameW")
+	procGetWindowLongW           = user32dll.NewProc("GetWindowLongW")
 	procGetClientRect            = user32dll.NewProc("GetClientRect")
 	procClientToScreen           = user32dll.NewProc("ClientToScreen")
 	procMapVirtualKeyW           = user32dll.NewProc("MapVirtualKeyW")

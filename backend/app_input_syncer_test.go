@@ -270,6 +270,9 @@ func TestSyncPopupCandidateRejectsMainWindowAndDevTools(t *testing.T) {
 	if !isSyncPopupSurfaceCandidate("", popup, owner, false) {
 		t.Fatal("empty-title Chrome menu surface should be constrained")
 	}
+	if isSyncPopupSurfaceCandidate("", owner, owner, false) {
+		t.Fatal("full-size empty Chrome frame must not be adopted as a popup")
+	}
 }
 
 func TestSyncCDPTargetMatchPrefersCorrespondingPopup(t *testing.T) {

@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -256,9 +258,7 @@ func (a *App) LegacyDataRecoveryExecute(sessionID string) (*LegacyDataRecoveryRe
 
 	a.maintenanceMu.Lock()
 	defer a.maintenanceMu.Unlock()
-	a.browserMgr.Mutex.Lock()
-	running := len(a.browserMgr.BrowserProcesses)
-	a.browserMgr.Mutex.Unlock()
+	running := len(a.backupRunningProfiles())
 	if running > 0 {
 		return nil, fmt.Errorf("检测到 %d 个环境仍在运行；请全部关闭后再恢复，防止 Cookies 或账号数据损坏", running)
 	}
@@ -296,8 +296,12 @@ func (a *App) LegacyDataRecoveryExecute(sessionID string) (*LegacyDataRecoveryRe
 			profile.ProfileName = fmt.Sprintf("%s-%d", strings.TrimSpace(profile.ProfileName), candidate.EnvironmentNumber)
 		}
 		if err := browser.NewSQLiteProfileDAO(a.db.GetConn()).Upsert(&profile); err != nil {
-			rollbackData()
-			candidate.Status, candidate.Message = "failed", fmt.Sprintf("写入环境清单失败: %v", err)
+			rollbackErr := rollbackData()
+			if rollbackErr != nil {
+				candidate.Status, candidate.Message = "failed", fmt.Sprintf("写入环境清单失败: %v；自动恢复原数据失败: %v", err, rollbackErr)
+			} else {
+				candidate.Status, candidate.Message = "failed", fmt.Sprintf("写入环境清单失败，原数据已恢复: %v", err)
+			}
 			result.Failed++
 		} else {
 			if candidate.TargetProfile != nil {
@@ -339,41 +343,55 @@ func legacyRecoveredProfile(candidate *legacyDataRecoveryCandidate) browser.Prof
 	return profile
 }
 
-func legacyRestoreCandidateData(candidate *legacyDataRecoveryCandidate, backupRoot string) (func(), error) {
+func legacyRestoreCandidateData(candidate *legacyDataRecoveryCandidate, backupRoot string) (func() error, error) {
 	if candidate == nil {
-		return func() {}, fmt.Errorf("恢复项为空")
+		return func() error { return nil }, fmt.Errorf("恢复项为空")
 	}
 	if backupSamePath(candidate.SourceDir, candidate.DestinationDir) {
-		return func() {}, fmt.Errorf("备份目录与当前数据目录相同，已停止覆盖")
+		return func() error { return nil }, fmt.Errorf("备份目录与当前数据目录相同，已停止覆盖")
 	}
-	rollback := func() { _ = os.RemoveAll(candidate.DestinationDir) }
+	rollback := func() error {
+		if err := os.RemoveAll(candidate.DestinationDir); err != nil {
+			return fmt.Errorf("清理未完成恢复目录失败: %w", err)
+		}
+		return nil
+	}
 	if candidate.TargetProfile != nil && backupPathExists(candidate.DestinationDir) {
 		info, err := os.Lstat(candidate.DestinationDir)
 		if err != nil {
-			return func() {}, fmt.Errorf("检查当前数据目录失败: %w", err)
+			return func() error { return nil }, fmt.Errorf("检查当前数据目录失败: %w", err)
 		}
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return func() {}, fmt.Errorf("当前数据目录不是可安全覆盖的普通文件夹")
+			return func() error { return nil }, fmt.Errorf("当前数据目录不是可安全覆盖的普通文件夹")
 		}
 		backupDir := filepath.Join(backupRoot, "overwritten-data", legacySafeBackupName(candidate.TargetProfile.ProfileId))
 		if err := os.MkdirAll(filepath.Dir(backupDir), 0755); err != nil {
-			return func() {}, fmt.Errorf("创建覆盖回滚目录失败: %w", err)
+			return func() error { return nil }, fmt.Errorf("创建覆盖回滚目录失败: %w", err)
 		}
 		if backupPathExists(backupDir) {
-			return func() {}, fmt.Errorf("覆盖回滚目录已存在，已停止覆盖")
+			return func() error { return nil }, fmt.Errorf("覆盖回滚目录已存在，已停止覆盖")
 		}
 		if err := os.Rename(candidate.DestinationDir, backupDir); err != nil {
-			return func() {}, fmt.Errorf("备份当前数据目录失败，未执行覆盖: %w", err)
+			return func() error { return nil }, fmt.Errorf("备份当前数据目录失败，未执行覆盖: %w", err)
 		}
-		rollback = func() {
-			_ = os.RemoveAll(candidate.DestinationDir)
-			_ = os.Rename(backupDir, candidate.DestinationDir)
+		rollback = func() error {
+			var rollbackErrs []error
+			if err := os.RemoveAll(candidate.DestinationDir); err != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("清理未完成恢复目录失败: %w", err))
+			}
+			if _, err := os.Lstat(candidate.DestinationDir); err == nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("目标目录仍被占用，原数据保留在 %s", backupDir))
+			} else if !os.IsNotExist(err) {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("检查目标目录失败，原数据保留在 %s: %w", backupDir, err))
+			} else if err := os.Rename(backupDir, candidate.DestinationDir); err != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("恢复原数据失败，完整备份保留在 %s: %w", backupDir, err))
+			}
+			return errors.Join(rollbackErrs...)
 		}
 	}
 	stats := &backupMergeStats{}
 	if err := backupSyncDir(candidate.SourceDir, candidate.DestinationDir, false, stats, legacySkipRuntimeLockFile); err != nil {
-		rollback()
-		return func() {}, err
+		return func() error { return nil }, errors.Join(err, rollback())
 	}
 	return rollback, nil
 }
@@ -425,7 +443,7 @@ func legacyProfilesFromRawFolders(sourceRoot string) ([]*browser.Profile, error)
 	}
 	profiles := make([]*browser.Profile, 0, len(folders))
 	for _, folder := range folders {
-		profiles = append(profiles, legacyRawFolderProfile(folder))
+		profiles = append(profiles, legacyRawFolderProfile(sourceRoot, folder))
 	}
 	return profiles, nil
 }
@@ -475,7 +493,7 @@ func legacyMergeRawFolderProfiles(sourceRoot string, profiles []*browser.Profile
 		if known[backupNormalizePath(absolute)] {
 			continue
 		}
-		profiles = append(profiles, legacyRawFolderProfile(folder))
+		profiles = append(profiles, legacyRawFolderProfile(sourceRoot, folder))
 		added++
 	}
 	if added == 0 {
@@ -484,8 +502,46 @@ func legacyMergeRawFolderProfiles(sourceRoot string, profiles []*browser.Profile
 	return profiles, fmt.Sprintf("除 app.db 清单外，又从文件夹结构补充识别 %d 个环境", added)
 }
 
-func legacyRawFolderProfile(folder string) *browser.Profile {
+func legacyRawFolderProfile(sourceRoot, folder string) *browser.Profile {
 	normalized := filepath.Clean(folder)
+	if pointer, err := browser.ReadProfileDataPointer(filepath.Join(sourceRoot, normalized)); err == nil {
+		return &browser.Profile{
+			ProfileId:       pointer.ProfileID,
+			ProfileName:     pointer.ProfileName,
+			UserDataDir:     normalized,
+			CoreId:          pointer.CoreID,
+			FingerprintArgs: append([]string{}, pointer.FingerprintArgs...),
+			ProxyId:         pointer.ProxyID,
+			LaunchArgs:      append([]string{}, pointer.LaunchArgs...),
+			Tags:            append([]string{}, pointer.Tags...),
+			Keywords:        append([]string{}, pointer.Keywords...),
+			GroupId:         pointer.GroupID,
+			CreatedAt:       pointer.CreatedAt,
+			UpdatedAt:       pointer.UpdatedAt,
+			LastStopAt:      pointer.LastCleanCloseAt,
+		}
+	}
+	manifestPath := filepath.Join(sourceRoot, normalized+".profile.json")
+	if data, err := os.ReadFile(manifestPath); err == nil {
+		var manifest browser.ProfileDataArchiveManifest
+		if json.Unmarshal(data, &manifest) == nil && manifest.Version == 1 && manifest.ProfileID != "" &&
+			filepath.Clean(manifest.ArchivedDataDir) == normalized {
+			return &browser.Profile{
+				ProfileId:       manifest.ProfileID,
+				ProfileName:     manifest.ProfileName,
+				UserDataDir:     normalized,
+				CoreId:          manifest.CoreID,
+				FingerprintArgs: append([]string{}, manifest.FingerprintArgs...),
+				ProxyId:         manifest.ProxyID,
+				LaunchArgs:      append([]string{}, manifest.LaunchArgs...),
+				Tags:            append([]string{}, manifest.Tags...),
+				Keywords:        append([]string{}, manifest.Keywords...),
+				GroupId:         manifest.GroupID,
+				CreatedAt:       manifest.CreatedAt,
+				UpdatedAt:       manifest.UpdatedAt,
+			}
+		}
+	}
 	hash := sha256.Sum256([]byte(strings.ToLower(filepath.ToSlash(normalized))))
 	return &browser.Profile{
 		ProfileId:   "recovered-folder-" + hex.EncodeToString(hash[:8]),
@@ -572,7 +628,7 @@ func legacyLooksLikeChromeUserDataDir(dir string) bool {
 
 func legacySkipRawScanDirectory(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "default", "cache", "code cache", "gpucache", "dawncache", "shadercache", "grshadercache", "service worker", "crashpad", "extensions", "recovery-backups", "updates", "logs", "temp", "tmp":
+	case "default", "cache", "code cache", "gpucache", "dawncache", "shadercache", "grshadercache", "service worker", "crashpad", "extensions", "recovery-backups", browser.ProfileRecoveryDirectory, "updates", "logs", "temp", "tmp":
 		return true
 	default:
 		return strings.HasPrefix(strings.ToLower(strings.TrimSpace(name)), "profile ")

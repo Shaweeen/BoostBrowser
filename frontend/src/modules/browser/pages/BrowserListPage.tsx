@@ -708,7 +708,7 @@ export function BrowserListPage() {
       if (ids.length > 1) {
         setSelectedIds(new Set())
       }
-      toast.success(ids.length > 1 ? `已删除 ${ids.length} 个环境及全部所属数据` : '环境及全部所属数据已删除')
+      toast.success(ids.length > 1 ? `已删除 ${ids.length} 个环境，所属数据已进入恢复归档` : '环境已删除，所属数据已进入恢复归档')
       setDeleteModal({ open: false, ids: [], names: [] })
       await loadProfiles()
     } catch (error: any) {
@@ -1452,7 +1452,7 @@ export function BrowserListPage() {
             <p className="font-medium text-red-500 mb-1">
               确定删除 {deleteModal.ids.length} 个环境吗？
             </p>
-            <p>删除会同时清理该环境的浏览器数据、扩展与钱包存储、Cookie、缓存和快照。共享的扩展程序包不会影响其他环境。</p>
+            <p>删除只移除当前环境清单。浏览器数据、扩展与钱包存储、Cookie 和快照会保留在本机恢复归档，之后可由你确认导入；程序不会自动读取或恢复钱包内容。</p>
           </div>
           {deleteModal.names.length > 0 && (
             <div className="max-h-28 overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-2 text-xs text-[var(--color-text-muted)]">

@@ -3,6 +3,7 @@ package backend
 import (
 	"archive/zip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -131,7 +132,13 @@ func (a *App) getProfileForSnapshot(profileId string) (*BrowserProfile, error) {
 	if !exists {
 		return nil, fmt.Errorf("实例不存在: %s", profileId)
 	}
-	return profile, nil
+	snapshot := *profile
+	snapshot.FingerprintArgs = append([]string{}, profile.FingerprintArgs...)
+	snapshot.LaunchArgs = append([]string{}, profile.LaunchArgs...)
+	snapshot.LastTabs = append([]string{}, profile.LastTabs...)
+	snapshot.Tags = append([]string{}, profile.Tags...)
+	snapshot.Keywords = append([]string{}, profile.Keywords...)
+	return &snapshot, nil
 }
 
 // BrowserSnapshotCreate 创建快照
@@ -249,13 +256,32 @@ func (a *App) BrowserSnapshotRestore(profileId, snapshotId string) error {
 	_ = metaPath
 
 	userDataDir := a.browserMgr.ResolveUserDataDir(profile)
-	if err := os.RemoveAll(userDataDir); err != nil {
-		return fmt.Errorf("清空用户数据目录失败: %w", err)
+	parentDir := filepath.Dir(userDataDir)
+	baseName := filepath.Base(userDataDir)
+	stagingDir, err := os.MkdirTemp(parentDir, "."+baseName+".restore-")
+	if err != nil {
+		return fmt.Errorf("创建快照恢复暂存目录失败: %w", err)
 	}
-	if err := os.MkdirAll(userDataDir, 0755); err != nil {
-		return err
+	defer os.RemoveAll(stagingDir)
+	if err := unzipTo(zipPath, stagingDir); err != nil {
+		return fmt.Errorf("快照校验或解压失败，原环境数据未改动: %w", err)
 	}
-	return unzipTo(zipPath, userDataDir)
+
+	archiveMove, err := a.browserMgr.ArchiveProfileDataForReplacement(profileId, "snapshot_restore")
+	if err != nil {
+		return fmt.Errorf("归档当前环境数据失败，未执行恢复: %w", err)
+	}
+	if err := os.Rename(stagingDir, userDataDir); err != nil {
+		rollbackErr := archiveMove.Rollback()
+		if rollbackErr != nil {
+			return errors.Join(
+				fmt.Errorf("切换快照数据失败: %w", err),
+				fmt.Errorf("自动恢复原环境数据失败: %w", rollbackErr),
+			)
+		}
+		return fmt.Errorf("切换快照数据失败，原环境数据已恢复: %w", err)
+	}
+	return nil
 }
 
 // BrowserSnapshotDelete 删除快照
@@ -268,9 +294,18 @@ func (a *App) BrowserSnapshotDelete(profileId, snapshotId string) error {
 	if err != nil {
 		return err
 	}
-	_ = os.Remove(zipPath)
-	_ = os.Remove(metaPath)
-	return nil
+	var deleteErrs []error
+	// Remove the index first. If deleting the ZIP fails, the payload remains as
+	// an orphan that can still be recovered manually; the reverse order could
+	// leave a visible index pointing at a missing snapshot payload.
+	if err := os.Remove(metaPath); err != nil && !os.IsNotExist(err) {
+		deleteErrs = append(deleteErrs, fmt.Errorf("删除快照索引失败: %w", err))
+		return errors.Join(deleteErrs...)
+	}
+	if err := os.Remove(zipPath); err != nil && !os.IsNotExist(err) {
+		deleteErrs = append(deleteErrs, fmt.Errorf("删除快照文件失败，文件仍保留在 %s: %w", zipPath, err))
+	}
+	return errors.Join(deleteErrs...)
 }
 
 // findSnapshotFiles 在快照目录中找到指定 snapshotId 的 meta 和 zip 路径

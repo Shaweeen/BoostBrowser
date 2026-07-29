@@ -29,6 +29,9 @@ func (a *App) BackupInitializeSystem() (map[string]interface{}, error) {
 	a.maintenanceMu.Lock()
 	defer a.maintenanceMu.Unlock()
 
+	if running := a.backupRunningProfiles(); len(running) > 0 {
+		return nil, fmt.Errorf("初始化会替换环境数据，请先停止全部环境；当前仍运行 %d 个环境", len(running))
+	}
 	return a.backupInitializeLocked(true)
 }
 
@@ -39,6 +42,9 @@ func (a *App) BackupExportPackage() (map[string]interface{}, error) {
 
 	if a.ctx == nil {
 		return nil, fmt.Errorf("应用上下文未初始化")
+	}
+	if running := a.backupRunningProfiles(); len(running) > 0 {
+		return nil, fmt.Errorf("为保证 Cookie、扩展和钱包数据库备份一致，请先停止全部环境；当前仍运行 %d 个环境", len(running))
 	}
 	a.backupEmitExportProgress("starting", 0, "等待选择导出路径...")
 
@@ -87,6 +93,31 @@ func (a *App) BackupExportPackage() (map[string]interface{}, error) {
 	}, nil
 }
 
+func (a *App) backupRunningProfiles() []string {
+	if a == nil || a.browserMgr == nil {
+		return nil
+	}
+	a.browserMgr.Mutex.Lock()
+	defer a.browserMgr.Mutex.Unlock()
+	runningSet := make(map[string]struct{})
+	for profileID, profile := range a.browserMgr.Profiles {
+		if profile != nil && profile.Running {
+			runningSet[profileID] = struct{}{}
+		}
+	}
+	for profileID, cmd := range a.browserMgr.BrowserProcesses {
+		if cmd != nil && cmd.Process != nil {
+			runningSet[profileID] = struct{}{}
+		}
+	}
+	running := make([]string, 0, len(runningSet))
+	for profileID := range runningSet {
+		running = append(running, profileID)
+	}
+	sort.Strings(running)
+	return running
+}
+
 // BackupImportPackage 从 ZIP 加载配置与数据。
 // resetFirst=true: 先初始化，再全量导入。
 // resetFirst=false: 直接导入并执行判重合并。
@@ -96,6 +127,9 @@ func (a *App) BackupImportPackage(resetFirst bool) (map[string]interface{}, erro
 
 	if a.ctx == nil {
 		return nil, fmt.Errorf("应用上下文未初始化")
+	}
+	if running := a.backupRunningProfiles(); len(running) > 0 {
+		return nil, fmt.Errorf("导入会替换或合并 Cookie、扩展和钱包数据库，请先停止全部环境；当前仍运行 %d 个环境", len(running))
 	}
 	a.backupEmitImportProgress("starting", 0, "等待选择 ZIP 配置文件...")
 
@@ -397,17 +431,6 @@ func (a *App) backupImportFromPathLocked(zipPath string, resetFirst bool) (map[s
 }
 
 func (a *App) backupStopRuntimeForMaintenance() {
-	if a.browserMgr != nil {
-		a.browserMgr.Mutex.Lock()
-		for _, cmd := range a.browserMgr.BrowserProcesses {
-			if cmd != nil && cmd.Process != nil {
-				_ = a.stopProcessCmd(cmd)
-			}
-		}
-		a.browserMgr.BrowserProcesses = make(map[string]*exec.Cmd)
-		a.browserMgr.Mutex.Unlock()
-	}
-
 	if a.xrayMgr != nil {
 		a.xrayMgr.StopAll()
 	}
@@ -1087,8 +1110,9 @@ func (a *App) backupImportFileTrees(payloadRoot string, incomingCfg *config.Conf
 	userDataDst := a.backupResolveUserDataRoot(a.config)
 	if backupPathExists(userDataSrc) {
 		if resetFirst {
-			_ = os.RemoveAll(userDataDst)
-			if err := os.MkdirAll(userDataDst, 0755); err != nil {
+			if err := os.RemoveAll(userDataDst); err != nil {
+				report("browser_user_data_root", "浏览器用户数据根目录（若与 data 重合则自动去重）", fmt.Errorf("清理现有目录失败，已停止覆盖: %w", err))
+			} else if err := os.MkdirAll(userDataDst, 0755); err != nil {
 				report("browser_user_data_root", "浏览器用户数据根目录（若与 data 重合则自动去重）", err)
 			} else if err := backupSyncDir(userDataSrc, userDataDst, true, stats, backupShouldSkipDisposableData); err != nil {
 				report("browser_user_data_root", "浏览器用户数据根目录（若与 data 重合则自动去重）", err)
@@ -1104,8 +1128,9 @@ func (a *App) backupImportFileTrees(payloadRoot string, incomingCfg *config.Conf
 	chromeDst := a.resolveAppPath("chrome")
 	if backupPathExists(chromeSrc) {
 		if resetFirst {
-			_ = os.RemoveAll(chromeDst)
-			if err := os.MkdirAll(chromeDst, 0755); err != nil {
+			if err := os.RemoveAll(chromeDst); err != nil {
+				report("browser_core_root", "默认内核目录", fmt.Errorf("清理现有目录失败，已停止覆盖: %w", err))
+			} else if err := os.MkdirAll(chromeDst, 0755); err != nil {
 				report("browser_core_root", "默认内核目录", err)
 			} else if err := backupSyncDir(chromeSrc, chromeDst, true, stats, nil); err != nil {
 				report("browser_core_root", "默认内核目录", err)
@@ -1152,7 +1177,10 @@ func (a *App) backupImportFileTrees(payloadRoot string, incomingCfg *config.Conf
 			}
 			dst := targetExternal[i]
 			if resetFirst {
-				_ = os.RemoveAll(dst)
+				if err := os.RemoveAll(dst); err != nil {
+					report(componentID, "额外内核目录（来自配置 cores）", fmt.Errorf("清理现有目录失败，已停止覆盖: %w", err))
+					continue
+				}
 				if err := os.MkdirAll(dst, 0755); err != nil {
 					report(componentID, "额外内核目录（来自配置 cores）", err)
 					continue

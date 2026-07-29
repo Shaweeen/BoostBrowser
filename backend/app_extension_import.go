@@ -2,11 +2,13 @@ package backend
 
 import (
 	"archive/zip"
+	"boost-browser/backend/internal/fsutil"
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -102,6 +104,11 @@ func (a *App) BrowserProfileRemoveExtension(profileIds []string, downloadAddress
 	}
 
 	a.browserMgr.Mutex.Lock()
+	type previousProfileState struct {
+		launchArgs []string
+		updatedAt  string
+	}
+	previous := make(map[string]previousProfileState, len(profileIds))
 	updated := make([]string, 0, len(profileIds))
 	for _, id := range profileIds {
 		profile, ok := a.browserMgr.Profiles[id]
@@ -110,6 +117,10 @@ func (a *App) BrowserProfileRemoveExtension(profileIds []string, downloadAddress
 		}
 		nextArgs, changed := removeExtensionDirFromLaunchArgs(profile.LaunchArgs, extDir)
 		if changed {
+			previous[id] = previousProfileState{
+				launchArgs: append([]string{}, profile.LaunchArgs...),
+				updatedAt:  profile.UpdatedAt,
+			}
 			profile.LaunchArgs = nextArgs
 			profile.UpdatedAt = time.Now().Format(time.RFC3339)
 		}
@@ -130,6 +141,12 @@ func (a *App) BrowserProfileRemoveExtension(profileIds []string, downloadAddress
 		}
 	}
 	if err := a.browserMgr.SaveProfiles(); err != nil {
+		for id, state := range previous {
+			if profile := a.browserMgr.Profiles[id]; profile != nil {
+				profile.LaunchArgs = state.launchArgs
+				profile.UpdatedAt = state.updatedAt
+			}
+		}
 		a.browserMgr.Mutex.Unlock()
 		return nil, fmt.Errorf("保存实例扩展配置失败：%w", err)
 	}
@@ -199,7 +216,9 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 		}, nil
 	}
 	for _, id := range profileIds {
-		a.enableExtensionDeveloperModeForProfile(id)
+		if err := a.enableExtensionDeveloperModeForProfile(id); err != nil {
+			return nil, err
+		}
 	}
 
 	updated, err := a.bindExtensionDirToProfiles(profileIds, extDir)
@@ -281,7 +300,9 @@ func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionIm
 	updated := []string{}
 	if len(missing) > 0 {
 		for _, profileID := range missing {
-			a.enableExtensionDeveloperModeForProfile(profileID)
+			if err := a.enableExtensionDeveloperModeForProfile(profileID); err != nil {
+				return nil, err
+			}
 		}
 		updated, err = a.bindExtensionDirToProfiles(missing, extDir)
 		if err != nil {
@@ -740,17 +761,64 @@ func installUnpackedExtension(appRoot string, extID string, zipPayload []byte) (
 	previousVersion := readManifestVersionFromDir(extDir)
 
 	backupDir := extDir + ".previous"
-	_ = os.RemoveAll(backupDir)
-	if _, statErr := os.Stat(extDir); statErr == nil {
-		if err := os.Rename(extDir, backupDir); err != nil {
-			return "", "", "", fmt.Errorf("替换旧扩展目录失败：%w", err)
+	displacedBackupDir := ""
+	if _, statErr := os.Stat(backupDir); statErr == nil {
+		displacedBackupDir = filepath.Join(parent, fmt.Sprintf(".previous-%s-%d", safePathName(extID), time.Now().UnixNano()))
+		if err := os.Rename(backupDir, displacedBackupDir); err != nil {
+			return "", "", "", fmt.Errorf("暂存旧扩展回滚包失败：%w", err)
 		}
 	} else if !os.IsNotExist(statErr) {
-		return "", "", "", fmt.Errorf("检查旧扩展目录失败：%w", statErr)
+		return "", "", "", fmt.Errorf("检查扩展回滚包失败：%w", statErr)
+	}
+	restoreDisplacedBackup := func() error {
+		if displacedBackupDir == "" {
+			return nil
+		}
+		if _, err := os.Stat(backupDir); err == nil {
+			return fmt.Errorf("无法恢复旧扩展回滚包：目标已存在 %s", backupDir)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if err := os.Rename(displacedBackupDir, backupDir); err != nil {
+			return fmt.Errorf("恢复旧扩展回滚包失败：%w", err)
+		}
+		displacedBackupDir = ""
+		return nil
+	}
+	movedCurrent := false
+	if _, statErr := os.Stat(extDir); statErr == nil {
+		if err := os.Rename(extDir, backupDir); err != nil {
+			return "", "", "", errors.Join(
+				fmt.Errorf("替换旧扩展目录失败：%w", err),
+				restoreDisplacedBackup(),
+			)
+		}
+		movedCurrent = true
+	} else if !os.IsNotExist(statErr) {
+		return "", "", "", errors.Join(
+			fmt.Errorf("检查旧扩展目录失败：%w", statErr),
+			restoreDisplacedBackup(),
+		)
 	}
 	if err := os.Rename(stageDir, extDir); err != nil {
-		_ = os.Rename(backupDir, extDir)
-		return "", "", "", fmt.Errorf("安装扩展目录失败：%w", err)
+		var rollbackErr error
+		if movedCurrent {
+			if restoreErr := os.Rename(backupDir, extDir); restoreErr != nil {
+				rollbackErr = fmt.Errorf("恢复原扩展目录失败，原包仍位于 %s：%w", backupDir, restoreErr)
+			}
+		}
+		if rollbackErr == nil {
+			rollbackErr = restoreDisplacedBackup()
+		}
+		return "", "", "", errors.Join(
+			fmt.Errorf("安装扩展目录失败：%w", err),
+			rollbackErr,
+		)
+	}
+	if displacedBackupDir != "" {
+		if err := os.RemoveAll(displacedBackupDir); err != nil {
+			return "", "", "", fmt.Errorf("扩展已安装，但清理更早的程序包备份失败：%w", err)
+		}
 	}
 	// Keep one program-package rollback. Wallet secrets/state are never copied
 	// here: they remain inside each profile's Chrome user-data directory.
@@ -804,11 +872,20 @@ func validateUnpackedExtensionManifest(extDir string) error {
 func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) ([]string, error) {
 	a.browserMgr.Mutex.Lock()
 	defer a.browserMgr.Mutex.Unlock()
+	type previousProfileState struct {
+		launchArgs []string
+		updatedAt  string
+	}
+	previous := make(map[string]previousProfileState, len(profileIds))
 	updated := make([]string, 0, len(profileIds))
 	for _, id := range profileIds {
 		profile, ok := a.browserMgr.Profiles[id]
 		if !ok || profile == nil {
 			continue
+		}
+		previous[id] = previousProfileState{
+			launchArgs: append([]string{}, profile.LaunchArgs...),
+			updatedAt:  profile.UpdatedAt,
 		}
 		profile.LaunchArgs = addExtensionDirToLaunchArgs(profile.LaunchArgs, extDir)
 		profile.UpdatedAt = time.Now().Format(time.RFC3339)
@@ -818,6 +895,12 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) ([]
 		return nil, fmt.Errorf("未找到可更新的实例")
 	}
 	if err := a.browserMgr.SaveProfiles(); err != nil {
+		for id, state := range previous {
+			if profile := a.browserMgr.Profiles[id]; profile != nil {
+				profile.LaunchArgs = state.launchArgs
+				profile.UpdatedAt = state.updatedAt
+			}
+		}
 		return nil, fmt.Errorf("保存实例扩展配置失败：%w", err)
 	}
 	return updated, nil
@@ -826,6 +909,11 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) ([]
 func (a *App) removeExtensionDirFromProfilesExcept(extDir string, keepProfiles map[string]bool) ([]string, error) {
 	a.browserMgr.Mutex.Lock()
 	defer a.browserMgr.Mutex.Unlock()
+	type previousProfileState struct {
+		launchArgs []string
+		updatedAt  string
+	}
+	previous := make(map[string]previousProfileState)
 	updated := make([]string, 0, len(a.browserMgr.Profiles))
 	for id, profile := range a.browserMgr.Profiles {
 		if profile == nil {
@@ -838,6 +926,10 @@ func (a *App) removeExtensionDirFromProfilesExcept(extDir string, keepProfiles m
 		if !changed {
 			continue
 		}
+		previous[id] = previousProfileState{
+			launchArgs: append([]string{}, profile.LaunchArgs...),
+			updatedAt:  profile.UpdatedAt,
+		}
 		profile.LaunchArgs = nextArgs
 		profile.UpdatedAt = time.Now().Format(time.RFC3339)
 		updated = append(updated, id)
@@ -846,6 +938,12 @@ func (a *App) removeExtensionDirFromProfilesExcept(extDir string, keepProfiles m
 		return updated, nil
 	}
 	if err := a.browserMgr.SaveProfiles(); err != nil {
+		for id, state := range previous {
+			if profile := a.browserMgr.Profiles[id]; profile != nil {
+				profile.LaunchArgs = state.launchArgs
+				profile.UpdatedAt = state.updatedAt
+			}
+		}
 		return nil, fmt.Errorf("保存全局扩展配置失败：%w", err)
 	}
 	return updated, nil
@@ -889,27 +987,7 @@ func (a *App) saveGlobalExtensionRegistry(registry globalExtensionRegistry) erro
 		return fmt.Errorf("序列化全局扩展配置失败：%w", err)
 	}
 	path := a.globalExtensionRegistryPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("创建全局扩展配置目录失败：%w", err)
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".global-extensions-*.tmp")
-	if err != nil {
-		return fmt.Errorf("创建全局扩展临时配置失败：%w", err)
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0600); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("设置全局扩展配置权限失败：%w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("写入全局扩展临时配置失败：%w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("关闭全局扩展临时配置失败：%w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := fsutil.WriteFileAtomic(path, data, 0600); err != nil {
 		return fmt.Errorf("保存全局扩展配置失败：%w", err)
 	}
 	return nil
@@ -941,27 +1019,7 @@ func (a *App) saveProfileExtensionRegistry(registry profileExtensionRegistry) er
 		return fmt.Errorf("序列化环境扩展分配配置失败：%w", err)
 	}
 	path := a.profileExtensionRegistryPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("创建环境扩展分配目录失败：%w", err)
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".profile-extensions-*.tmp")
-	if err != nil {
-		return fmt.Errorf("创建环境扩展分配临时配置失败：%w", err)
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0600); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("设置环境扩展分配配置权限失败：%w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("写入环境扩展分配临时配置失败：%w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("关闭环境扩展分配临时配置失败：%w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := fsutil.WriteFileAtomic(path, data, 0600); err != nil {
 		return fmt.Errorf("保存环境扩展分配配置失败：%w", err)
 	}
 	return nil
@@ -1250,7 +1308,9 @@ func (a *App) InstallExtensionFromCRXURL(profileID string, crxURL string) (strin
 	defer a.maintenanceMu.Unlock()
 
 	extID := extractExtensionID(crxURL)
-	a.enableExtensionDeveloperModeForProfile(profileID)
+	if err := a.enableExtensionDeveloperModeForProfile(profileID); err != nil {
+		return extID, "", err
+	}
 	if extID != "" && len(a.filterProfilesMissingEquivalentExtension([]string{profileID}, extID, "")) == 0 {
 		return extID, "", nil
 	}
@@ -1403,31 +1463,52 @@ func chromeProfilePreferencePaths(userDataDir string) []string {
 	return out
 }
 
-func (a *App) enableExtensionDeveloperModeForProfile(profileID string) {
-	for _, profile := range a.browserMgr.List() {
-		if profile.ProfileId == profileID {
-			enableExtensionDeveloperMode(a.browserMgr.ResolveUserDataDir(&profile))
-			return
-		}
+func (a *App) enableExtensionDeveloperModeForProfile(profileID string) error {
+	a.browserMgr.Mutex.Lock()
+	profile, exists := a.browserMgr.Profiles[profileID]
+	if !exists || profile == nil {
+		a.browserMgr.Mutex.Unlock()
+		return fmt.Errorf("实例不存在：%s", profileID)
 	}
+	running := profile.Running
+	if cmd := a.browserMgr.BrowserProcesses[profileID]; cmd != nil && cmd.Process != nil {
+		running = true
+	}
+	snapshot := *profile
+	a.browserMgr.Mutex.Unlock()
+	if running {
+		// Chrome owns Preferences while the environment is live. Writing a
+		// stale read-modify-write snapshot here could discard extension
+		// metadata that Chrome just persisted. --load-extension remains the
+		// launch authority, so skip this optional UI preference.
+		return nil
+	}
+	return enableExtensionDeveloperMode(a.browserMgr.ResolveUserDataDir(&snapshot))
 }
 
 // enableExtensionDeveloperMode runs only when the user explicitly distributes
 // an extension to an environment that does not already contain it.
-func enableExtensionDeveloperMode(userDataDir string) {
+func enableExtensionDeveloperMode(userDataDir string) error {
 	if strings.TrimSpace(userDataDir) == "" {
-		return
+		return fmt.Errorf("用户数据目录为空")
 	}
 	defaultPrefs := filepath.Join(userDataDir, "Default", "Preferences")
-	_ = ensureChromePreferencesFile(defaultPrefs)
+	if err := ensureChromePreferencesFile(defaultPrefs); err != nil {
+		return fmt.Errorf("创建扩展首选项失败：%w", err)
+	}
 	for _, prefPath := range chromeProfilePreferencePaths(userDataDir) {
 		data, err := os.ReadFile(prefPath)
 		if err != nil {
-			continue
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("读取扩展首选项失败 %s：%w", prefPath, err)
 		}
 		prefs := map[string]any{}
-		if len(strings.TrimSpace(string(data))) > 0 && json.Unmarshal(data, &prefs) != nil {
-			continue
+		if len(strings.TrimSpace(string(data))) > 0 {
+			if err := json.Unmarshal(data, &prefs); err != nil {
+				return fmt.Errorf("扩展首选项格式无效 %s：%w", prefPath, err)
+			}
 		}
 		extensions, _ := prefs["extensions"].(map[string]any)
 		if extensions == nil {
@@ -1443,10 +1524,15 @@ func enableExtensionDeveloperMode(userDataDir string) {
 			continue
 		}
 		ui["developer_mode"] = true
-		if out, marshalErr := json.MarshalIndent(prefs, "", "   "); marshalErr == nil {
-			_ = os.WriteFile(prefPath, out, 0644)
+		out, err := json.MarshalIndent(prefs, "", "   ")
+		if err != nil {
+			return fmt.Errorf("生成扩展首选项失败 %s：%w", prefPath, err)
+		}
+		if err := fsutil.WriteFileAtomic(prefPath, out, 0644); err != nil {
+			return fmt.Errorf("保存扩展首选项失败 %s：%w", prefPath, err)
 		}
 	}
+	return nil
 }
 
 func normalizeExtensionPath(path string) string {

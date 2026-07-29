@@ -37,6 +37,17 @@ type syncPopupBoundsSearch struct {
 	owners              []syncPopupOwnerWindow
 	processOwners       map[int]int
 	processOwnersLoaded bool
+	placements          []syncPopupPlacement
+}
+
+type syncPopupPlacement struct {
+	hwnd            windows.HWND
+	owner           syncPopupOwnerWindow
+	x               int
+	y               int
+	width           int
+	height          int
+	geometryChanged bool
 }
 
 func (search *syncPopupBoundsSearch) findProcessTreeOwner(pid uint32) (syncPopupOwnerWindow, bool) {
@@ -93,8 +104,7 @@ var syncPopupBoundsEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lP
 		return 1
 	}
 	owner, ownerLinked, ok := findSyncPopupOwner(hwnd, search.owners)
-	lowerTitle := strings.ToLower(title)
-	if !ok && isCompactExtensionPopupTitle(lowerTitle) {
+	if !ok {
 		if processOwner, found := search.findProcessTreeOwner(windowPID(hwnd)); found {
 			owner = processOwner
 			ok = true
@@ -108,20 +118,19 @@ var syncPopupBoundsEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lP
 	// assistant only keeps that surface inside its current environment cell.
 	// In particular, do not apply the browser startup template or a wallet-
 	// specific width/height here: those fixed sizes create blank canvas after
-	// the environment has been tiled, stacked, or arranged horizontally.
+	// the environment has been tiled, stacked, or arranged horizontally. The
+	// native client remains untouched, so its vertical/horizontal overflow and
+	// the synchronizer's WM_MOUSEWHEEL/WM_MOUSEHWHEEL delivery keep working.
 	x, y, width, height, shouldMove := constrainSyncPopupRect(popupRect, owner.rect, syncPopupBoundsInset)
-	if !shouldMove {
-		return 1
-	}
-	procSetWindowPos.Call(
-		uintptr(hwnd),
-		0,
-		uintptr(x),
-		uintptr(y),
-		uintptr(width),
-		uintptr(height),
-		SWP_NOZORDER|SWP_NOACTIVATE,
-	)
+	search.placements = append(search.placements, syncPopupPlacement{
+		hwnd:            hwnd,
+		owner:           owner,
+		x:               x,
+		y:               y,
+		width:           width,
+		height:          height,
+		geometryChanged: shouldMove,
+	})
 	return 1
 })
 
@@ -188,6 +197,7 @@ func (s *InputSyncer) constrainSyncPopupSurfaces() {
 	}
 	search := &syncPopupBoundsSearch{owners: owners}
 	procEnumWindows.Call(syncPopupBoundsEnumCallback, uintptr(unsafe.Pointer(search)))
+	search.applyPlacements()
 	runtime.KeepAlive(search)
 }
 
@@ -197,7 +207,7 @@ func findSyncPopupOwner(hwnd windows.HWND, owners []syncPopupOwnerWindow) (syncP
 	// third level menus remain attached to the correct tiled environment.
 	current := hwnd
 	for depth := 0; depth < 12 && current != 0; depth++ {
-		ownerHwnd, _, _ := procGetWindow.Call(uintptr(current), 4) // GW_OWNER
+		ownerHwnd, _, _ := procGetWindow.Call(uintptr(current), GW_OWNER)
 		if ownerHwnd == 0 || windows.HWND(ownerHwnd) == current {
 			break
 		}
@@ -220,6 +230,93 @@ func findSyncPopupOwner(hwnd windows.HWND, owners []syncPopupOwnerWindow) (syncP
 	return syncPopupOwnerWindow{}, false, false
 }
 
+func syncPopupPlacementFlags(geometryChanged, zOrderChanged bool) uintptr {
+	flags := uintptr(SWP_NOACTIVATE)
+	if !geometryChanged {
+		flags |= SWP_NOMOVE | SWP_NOSIZE
+	}
+	if !zOrderChanged {
+		flags |= SWP_NOZORDER
+	}
+	return flags
+}
+
+func windowIsTopmost(hwnd windows.HWND) bool {
+	style, _, _ := procGetWindowLongW.Call(uintptr(hwnd), GWL_EXSTYLE)
+	return style&WS_EX_TOPMOST != 0
+}
+
+func windowImmediatelyAbove(hwnd windows.HWND) windows.HWND {
+	above, _, _ := procGetWindow.Call(uintptr(hwnd), GW_HWNDPREV)
+	return windows.HWND(above)
+}
+
+func (search *syncPopupBoundsSearch) applyPlacements() {
+	if search == nil || len(search.placements) == 0 {
+		return
+	}
+
+	// Extension windows can be created in the desktop-wide topmost band. Demote
+	// all candidates before calculating their normal-band order.
+	for _, placement := range search.placements {
+		if !windowIsTopmost(placement.hwnd) {
+			continue
+		}
+		procSetWindowPos.Call(uintptr(placement.hwnd), HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)
+	}
+
+	ownerOrder := make([]windows.HWND, 0, len(search.owners))
+	byOwner := make(map[windows.HWND][]syncPopupPlacement, len(search.owners))
+	for _, placement := range search.placements {
+		if _, exists := byOwner[placement.owner.hwnd]; !exists {
+			ownerOrder = append(ownerOrder, placement.owner.hwnd)
+		}
+		byOwner[placement.owner.hwnd] = append(byOwner[placement.owner.hwnd], placement)
+	}
+
+	for _, ownerHwnd := range ownerOrder {
+		group := byOwner[ownerHwnd]
+		groupSet := make(map[windows.HWND]struct{}, len(group))
+		for _, placement := range group {
+			groupSet[placement.hwnd] = struct{}{}
+		}
+
+		// EnumWindows delivered the popup group from top to bottom. Locate the
+		// nearest unrelated window above the owner, skipping this group's own
+		// surfaces, then preserve that native top-to-bottom order as one block.
+		// This keeps nested and sibling menus stable instead of making them swap
+		// places on every confinement tick.
+		boundary := windowImmediatelyAbove(ownerHwnd)
+		for boundary != 0 {
+			if _, belongsToGroup := groupSet[boundary]; !belongsToGroup {
+				break
+			}
+			boundary = windowImmediatelyAbove(boundary)
+		}
+
+		expectedAbove := boundary
+		for _, placement := range group {
+			zOrderChanged := windowImmediatelyAbove(placement.hwnd) != expectedAbove
+			if placement.geometryChanged || zOrderChanged {
+				insertAfter := HWND_TOP
+				if expectedAbove != 0 {
+					insertAfter = uintptr(expectedAbove)
+				}
+				procSetWindowPos.Call(
+					uintptr(placement.hwnd),
+					insertAfter,
+					uintptr(placement.x),
+					uintptr(placement.y),
+					uintptr(placement.width),
+					uintptr(placement.height),
+					syncPopupPlacementFlags(placement.geometryChanged, zOrderChanged),
+				)
+			}
+			expectedAbove = placement.hwnd
+		}
+	}
+}
+
 func isSyncPopupSurfaceCandidate(title string, popupRect, ownerRect winRect, ownerLinked bool) bool {
 	width := int(popupRect.Right - popupRect.Left)
 	height := int(popupRect.Bottom - popupRect.Top)
@@ -239,8 +336,10 @@ func isSyncPopupSurfaceCandidate(title string, popupRect, ownerRect winRect, own
 		return false
 	}
 	// Empty-title Aura widgets cover Chrome menus, comboboxes and nested menu
-	// surfaces. Titled prompt/notification windows are also valid sync popups.
-	return lowerTitle == "" || isDefinitiveExtensionPopupTitle(lowerTitle) || width < ownerWidth || height < ownerHeight
+	// surfaces, but a full-size empty Chrome frame can be a second browser
+	// window and must not be adopted as a popup. Titled prompt/notification
+	// windows are also valid sync popups.
+	return isDefinitiveExtensionPopupTitle(lowerTitle) || width < ownerWidth || height < ownerHeight
 }
 
 func constrainSyncPopupRect(popup, owner winRect, inset int) (x, y, width, height int, changed bool) {

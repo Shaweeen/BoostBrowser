@@ -161,6 +161,12 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertNotIn("extensionPopupTargetWidth", popup_bounds)
         self.assertNotIn("extensionPopupTargetHeight", popup_bounds)
         self.assertIn("syncPopupConfinementEnabled(s.IsActive(), s.IsPaused()", popup_bounds)
+        self.assertIn("search.applyPlacements()", popup_bounds)
+        self.assertIn("HWND_NOTOPMOST", popup_bounds)
+        self.assertIn("expectedAbove := boundary", popup_bounds)
+        self.assertNotIn("if !ok && isCompactExtensionPopupTitle", popup_bounds)
+        self.assertIn("WM_MOUSEWHEEL", self.read("backend/app_input_syncer.go"))
+        self.assertIn("WM_MOUSEHWHEEL", self.read("backend/app_input_syncer.go"))
         self.assertIn("closeUnwantedStartupPagesOnce", startup_tabs)
         self.assertIn("planStartupPageCleanup", startup_tabs)
         self.assertNotIn("extensionStartupSettleDelay", startup_tabs)
@@ -219,15 +225,45 @@ class PackagingScriptsTest(unittest.TestCase):
 
         self.assertIn("return m.DeleteWithCache(profileId, true)", manager)
         self.assertIn("func (m *Manager) DeleteWithCache(profileId string, _ bool)", manager)
-        self.assertIn("os.RemoveAll(userDataDir)", manager)
+        archive = self.read("backend/internal/browser/profile_archive.go")
+        self.assertIn("stageProfileDataArchiveLocked", manager)
+        self.assertIn("os.Rename(originalDir, archiveDir)", archive)
+        self.assertIn("os.Rename(move.archiveDir, move.originalDir)", archive)
+        self.assertNotIn("os.RemoveAll(userDataDir)", manager)
         self.assertNotIn("deleteCache", page)
-        self.assertIn("环境及全部所属数据已删除", page)
+        self.assertIn("本机恢复归档", page)
 
         self.assertIn("cachedWindows := make(map[string]windows.HWND", sync_api)
         self.assertIn("cachedWindows[profile.ProfileId] == 0", sync_api)
         self.assertIn("browserTopLevelClientSizeAllowed", win32)
         self.assertNotIn("clientW < 320 || clientH < 240", win32)
         self.assertNotIn("loadProfilesPromiseRef", sync_page)
+
+    def test_environment_close_has_one_graceful_data_flush_owner(self):
+        instance = self.read("backend/app_instance.go")
+        shutdown = self.read("backend/app_shutdown.go")
+        sync_api = self.read("backend/app_sync_api.go")
+        pointer = self.read("backend/internal/browser/profile_data_pointer.go")
+        process_windows = self.read("backend/process_liveness_windows.go")
+
+        stop_body = instance.split("func (a *App) BrowserInstanceStop", 1)[1].split(
+            "func (a *App) BrowserInstanceRestart", 1
+        )[0]
+        self.assertIn('WriteProfileDataPointer(profileSnapshot, "closing"', stop_body)
+        self.assertIn("tryCloseBrowserViaCDP", stop_body)
+        self.assertIn("waitEnvironmentDataFlush", stop_body)
+        self.assertIn('WriteProfileDataPointer(profileSnapshot, "closed"', stop_body)
+        self.assertNotIn("Process.Kill", stop_body)
+        self.assertNotIn('"/F"', stop_body)
+        self.assertIn("BrowserInstanceStop(profileID)", shutdown)
+        self.assertIn("BrowserInstanceStop(profileID)", sync_api)
+        self.assertNotIn("Process.Kill", shutdown)
+        self.assertNotIn('exec.Command("taskkill"', process_windows)
+        self.assertIn("WM_CLOSE", process_windows)
+        self.assertIn('WriteProfileDataPointer(closeSnapshot, "closed"', instance)
+        self.assertIn("ProfileDataPointerFileName", pointer)
+        self.assertIn("fsutil.WriteFileAtomic", pointer)
+        self.assertNotIn("Cookies", pointer.split("type ProfileDataPointer struct", 1)[1])
 
     def test_go_mod_does_not_replace_modules_with_missing_local_third_party_dirs(self):
         text = self.read("go.mod")

@@ -6,12 +6,35 @@ import (
 	"boost-browser/backend/internal/config"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+type failingExtensionProfileDAO struct{}
+
+func (failingExtensionProfileDAO) List() ([]*browser.Profile, error) {
+	return nil, nil
+}
+
+func (failingExtensionProfileDAO) GetById(string) (*browser.Profile, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (failingExtensionProfileDAO) Upsert(*browser.Profile) error {
+	return errors.New("forced persistence failure")
+}
+
+func (failingExtensionProfileDAO) UpsertMany([]*browser.Profile) error {
+	return errors.New("forced persistence failure")
+}
+
+func (failingExtensionProfileDAO) Delete(string) error {
+	return errors.New("not implemented")
+}
 
 func extensionZipForTest(t *testing.T, manifest string) []byte {
 	t.Helper()
@@ -56,6 +79,12 @@ func TestInstallUnpackedExtensionUpdateKeepsProgramRollbackAndReportsVersions(t 
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"Wallet","version":"1.0","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(extDir+".previous", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir+".previous", "manifest.json"), []byte(`{"name":"Wallet","version":"0.9","manifest_version":3}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	installed, previous, current, err := installUnpackedExtension(root, "example", extensionZipForTest(t, `{"name":"Wallet","version":"2.0","manifest_version":3}`))
@@ -310,6 +339,59 @@ func TestBrowserProfileUpdateDoesNotEraseAssignedExtension(t *testing.T) {
 	}
 }
 
+func TestBindExtensionRestoresInMemoryProfileWhenPersistenceFails(t *testing.T) {
+	root := t.TempDir()
+	app := NewApp(root)
+	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
+	app.browserMgr.ProfileDAO = failingExtensionProfileDAO{}
+	app.browserMgr.Profiles["profile-1"] = &browser.Profile{
+		ProfileId:   "profile-1",
+		ProfileName: "one",
+		LaunchArgs:  []string{"--no-first-run"},
+		UpdatedAt:   "before",
+	}
+
+	if _, err := app.bindExtensionDirToProfiles([]string{"profile-1"}, filepath.Join(root, "extension")); err == nil {
+		t.Fatal("persistence failure was expected")
+	}
+	got := app.browserMgr.Profiles["profile-1"]
+	if !reflect.DeepEqual(got.LaunchArgs, []string{"--no-first-run"}) || got.UpdatedAt != "before" {
+		t.Fatalf("failed write leaked into in-memory profile: %+v", got)
+	}
+}
+
+func TestDeveloperModeDoesNotRewritePreferencesForRunningEnvironment(t *testing.T) {
+	root := t.TempDir()
+	app := NewApp(root)
+	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
+	profile := &browser.Profile{
+		ProfileId:   "profile-1",
+		ProfileName: "one",
+		UserDataDir: filepath.Join("data", "profiles", "profile-1"),
+		Running:     true,
+	}
+	app.browserMgr.Profiles[profile.ProfileId] = profile
+	prefsPath := filepath.Join(app.browserMgr.ResolveUserDataDir(profile), "Default", "Preferences")
+	if err := os.MkdirAll(filepath.Dir(prefsPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte(`{"extensions":{"settings":{"wallet":{"state":"keep"}}}}`)
+	if err := os.WriteFile(prefsPath, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.enableExtensionDeveloperModeForProfile(profile.ProfileId); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(prefsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("running Chrome Preferences were rewritten: %s", got)
+	}
+}
+
 func TestDownloadAndInstallExtensionReusesExistingPackageWithoutOverwrite(t *testing.T) {
 	root := t.TempDir()
 	app := NewApp(root)
@@ -402,7 +484,7 @@ func TestGlobalExtensionDistributionChecksOnlyNewProfilesOnExplicitAction(t *tes
 	}
 }
 
-func TestProfileDeletionRemovesOwnedDataSnapshotsAndExtensionReferences(t *testing.T) {
+func TestProfileDeletionArchivesOwnedDataRetainsSnapshotsAndRemovesExtensionReferences(t *testing.T) {
 	root := t.TempDir()
 	app := NewApp(root)
 	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
@@ -439,10 +521,18 @@ func TestProfileDeletionRemovesOwnedDataSnapshotsAndExtensionReferences(t *testi
 	if err := app.BrowserProfileDeleteWithCache(profile.ProfileId, false); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{userDataDir, snapshotDir} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("deleted environment left owned data at %s: %v", path, err)
-		}
+	if _, err := os.Stat(userDataDir); !os.IsNotExist(err) {
+		t.Fatalf("active user-data path survived archival: %v", err)
+	}
+	archives, err := browser.ListProfileDataArchives(app.browserMgr.ProfileRecoveryArchiveRoot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archives) != 1 || !archives[0].DataAvailable {
+		t.Fatalf("environment recovery archive missing: %+v", archives)
+	}
+	if _, err := os.Stat(snapshotDir); err != nil {
+		t.Fatalf("profile snapshots must remain recoverable: %v", err)
 	}
 	assignments, err := app.loadProfileExtensionRegistry()
 	if err != nil {

@@ -2,9 +2,9 @@ package browser
 
 import (
 	"boost-browser/backend/internal/logger"
+	"errors"
 	"fmt"
 	"math/rand"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -109,12 +109,14 @@ func (m *Manager) loadProfiles() {
 func (m *Manager) SaveProfiles() error {
 	log := logger.New("Browser")
 	if m.ProfileDAO != nil {
+		profiles := make([]*Profile, 0, len(m.Profiles))
 		for _, profile := range m.Profiles {
 			profile.CoreId = normalizeProfileCoreID(profile.CoreId)
-			if err := m.ProfileDAO.Upsert(profile); err != nil {
-				log.Error("实例配置持久化失败", logger.F("profile_id", profile.ProfileId), logger.F("error", err))
-				return err
-			}
+			profiles = append(profiles, profile)
+		}
+		if err := m.ProfileDAO.UpsertMany(profiles); err != nil {
+			log.Error("实例配置事务持久化失败", logger.F("count", len(profiles)), logger.F("error", err))
+			return err
 		}
 		log.Info("实例配置持久化成功", logger.F("count", len(m.Profiles)))
 		return nil
@@ -149,6 +151,35 @@ func (m *Manager) SaveProfiles() error {
 		return err
 	}
 	log.Info("浏览器配置持久化成功（文件）", logger.F("count", len(profiles)))
+	return nil
+}
+
+// commitProfileLocked persists one environment before exposing the new value
+// in memory. SQLite writes only that row; the legacy config-file backend
+// temporarily stages the value and restores the old map entry if saving fails.
+// The caller must hold Manager.Mutex.
+func (m *Manager) commitProfileLocked(profile *Profile) error {
+	if profile == nil {
+		return fmt.Errorf("实例配置为空")
+	}
+	if m.ProfileDAO != nil {
+		profile.CoreId = normalizeProfileCoreID(profile.CoreId)
+		if err := m.ProfileDAO.Upsert(profile); err != nil {
+			return err
+		}
+		m.Profiles[profile.ProfileId] = profile
+		return nil
+	}
+	previous, existed := m.Profiles[profile.ProfileId]
+	m.Profiles[profile.ProfileId] = profile
+	if err := m.SaveProfiles(); err != nil {
+		if existed {
+			m.Profiles[profile.ProfileId] = previous
+		} else {
+			delete(m.Profiles, profile.ProfileId)
+		}
+		return err
+	}
 	return nil
 }
 
@@ -294,12 +325,14 @@ func (m *Manager) Create(input ProfileInput) (*Profile, error) {
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
+	if err := m.validateUserDataDirOwnerLocked(profile, ""); err != nil {
+		return nil, err
+	}
 	if hasSelectedProxy {
 		_ = BindProfileToProxy(profile, selectedProxy, true)
 	}
-	m.Profiles[profileId] = profile
 	log.Info("浏览器配置创建", logger.F("profile_id", profileId), logger.F("profile_name", input.ProfileName))
-	if err := m.SaveProfiles(); err != nil {
+	if err := m.commitProfileLocked(profile); err != nil {
 		return nil, err
 	}
 	if m.CodeProvider != nil {
@@ -359,13 +392,14 @@ func (m *Manager) RandomizeFingerprint(profileId string) (*Profile, error) {
 	// 注入新的随机身份 + 新种子
 	rest = append(rest, RandomFingerprintIdentity()...)
 	newSeed := fmt.Sprintf("--fingerprint=%d", rand.Int31n(2147483647)+1)
-	profile.FingerprintArgs = append(rest, newSeed)
-	profile.UpdatedAt = time.Now().Format(time.RFC3339)
-	if err := m.SaveProfiles(); err != nil {
+	next := *profile
+	next.FingerprintArgs = append(rest, newSeed)
+	next.UpdatedAt = time.Now().Format(time.RFC3339)
+	if err := m.commitProfileLocked(&next); err != nil {
 		return nil, err
 	}
 	log.Info("指纹已重新随机", logger.F("profile_id", profileId), logger.F("seed", newSeed))
-	return profile, nil
+	return &next, nil
 }
 
 // Update 更新配置
@@ -383,31 +417,43 @@ func (m *Manager) Update(profileId string, input ProfileInput) (*Profile, error)
 	if conflict := m.findProfileNameConflictLocked(input.ProfileName, profileId); conflict != "" {
 		return nil, fmt.Errorf("环境名称已存在：%s。请修改环境名称或编号后重试", conflict)
 	}
-	profile.ProfileName = input.ProfileName
-	profile.UserDataDir = input.UserDataDir
-	profile.CoreId = normalizeProfileCoreID(input.CoreId)
-	profile.FingerprintArgs = input.FingerprintArgs
-	profile.ProxyId = strings.TrimSpace(input.ProxyId)
-	if profile.ProxyId != "" {
-		if proxyItem, ok := m.GetProxyByID(profile.ProxyId); ok {
-			_ = BindProfileToProxy(profile, proxyItem, true)
+	// A profile ID permanently owns its user-data directory. Editing ordinary
+	// settings must never remap Cookies or wallet storage to another folder.
+	requestedUserDataDir := strings.TrimSpace(input.UserDataDir)
+	if requestedUserDataDir != "" {
+		requested := *profile
+		requested.UserDataDir = requestedUserDataDir
+		if m.userDataDirKey(&requested) != m.userDataDirKey(profile) {
+			return nil, fmt.Errorf("用户数据目录是环境的永久数据身份，不能在编辑环境时修改；请使用受控的旧数据恢复功能")
+		}
+	}
+
+	next := *profile
+	next.ProfileName = input.ProfileName
+	next.UserDataDir = profile.UserDataDir
+	next.CoreId = normalizeProfileCoreID(input.CoreId)
+	next.FingerprintArgs = append([]string{}, input.FingerprintArgs...)
+	next.ProxyId = strings.TrimSpace(input.ProxyId)
+	if next.ProxyId != "" {
+		if proxyItem, ok := m.GetProxyByID(next.ProxyId); ok {
+			_ = BindProfileToProxy(&next, proxyItem, true)
 		} else {
-			log.Error("代理绑定失败", logger.F("profile_id", profileId), logger.F("proxy_id", profile.ProxyId))
+			log.Error("代理绑定失败", logger.F("profile_id", profileId), logger.F("proxy_id", next.ProxyId))
 		}
 	} else {
-		profile.ProxyConfig = input.ProxyConfig
-		_ = ClearProfileProxyBinding(profile)
+		next.ProxyConfig = input.ProxyConfig
+		_ = ClearProfileProxyBinding(&next)
 	}
-	profile.LaunchArgs = input.LaunchArgs
-	profile.Tags = input.Tags
-	profile.Keywords = append([]string{}, input.Keywords...)
-	profile.GroupId = strings.TrimSpace(input.GroupId)
-	profile.UpdatedAt = time.Now().Format(time.RFC3339)
+	next.LaunchArgs = append([]string{}, input.LaunchArgs...)
+	next.Tags = append([]string{}, input.Tags...)
+	next.Keywords = append([]string{}, input.Keywords...)
+	next.GroupId = strings.TrimSpace(input.GroupId)
+	next.UpdatedAt = time.Now().Format(time.RFC3339)
 	log.Info("浏览器配置更新", logger.F("profile_id", profileId), logger.F("profile_name", input.ProfileName))
-	if err := m.SaveProfiles(); err != nil {
+	if err := m.commitProfileLocked(&next); err != nil {
 		return nil, err
 	}
-	return profile, nil
+	return &next, nil
 }
 
 func (m *Manager) findProfileNameConflictLocked(name, excludeProfileID string) string {
@@ -427,15 +473,15 @@ func (m *Manager) findProfileNameConflictLocked(name, excludeProfileID string) s
 	return ""
 }
 
-// Delete permanently removes both the profile record and its browser data.
+// Delete removes the active profile record after preserving its browser data in
+// the user-recoverable archive.
 func (m *Manager) Delete(profileId string) error {
 	return m.DeleteWithCache(profileId, true)
 }
 
 // DeleteWithCache keeps its historical boolean parameter for API compatibility.
-// Profile deletion is now authoritative and always removes the profile-owned
-// user-data directory so deleted environments cannot leave orphaned wallet,
-// extension, Cookie or cache data behind.
+// Profile deletion never destroys the profile-owned Cookie, extension or wallet
+// directory; it moves that directory into the indexed recovery archive.
 func (m *Manager) DeleteWithCache(profileId string, _ bool) error {
 	log := logger.New("Browser")
 	m.InitData()
@@ -453,29 +499,31 @@ func (m *Manager) DeleteWithCache(profileId string, _ bool) error {
 	if cmd, ok := m.BrowserProcesses[profileId]; ok && cmd != nil && cmd.Process != nil {
 		return fmt.Errorf("请先停止环境再删除环境数据")
 	}
-	userDataDir := m.ResolveUserDataDir(profile)
-	if err := validateUserDataDirForDelete(userDataDir, m.ResolveRelativePath(strings.TrimSpace(m.Config.Browser.UserDataRoot))); err != nil {
+	archiveMove, err := m.stageProfileDataArchiveLocked(profile, "user_deleted_environment")
+	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(userDataDir); err != nil {
-		return fmt.Errorf("删除环境数据失败: %w", err)
-	}
-	log.Info("环境用户数据目录删除", logger.F("profile_id", profileId), logger.F("user_data_dir", userDataDir))
 
-	delete(m.Profiles, profileId)
-	log.Info("浏览器配置删除", logger.F("profile_id", profileId), logger.F("delete_data", true))
-
-	// DAO 删除
 	if m.ProfileDAO != nil {
 		if err := m.ProfileDAO.Delete(profileId); err != nil {
+			rollbackErr := archiveMove.Rollback()
 			log.Error("数据库删除实例失败", logger.F("profile_id", profileId), logger.F("error", err))
-			return err
+			return errors.Join(err, rollbackErr)
 		}
 	} else {
+		delete(m.Profiles, profileId)
 		if err := m.SaveProfiles(); err != nil {
-			return err
+			m.Profiles[profileId] = profile
+			return errors.Join(err, archiveMove.Rollback())
 		}
 	}
+	delete(m.Profiles, profileId)
+	log.Info("环境用户数据已进入恢复归档",
+		logger.F("profile_id", profileId),
+		logger.F("archive_dir", archiveMove.archiveDir),
+		logger.F("data_available", archiveMove.hadData),
+	)
+	log.Info("浏览器配置删除", logger.F("profile_id", profileId), logger.F("data_archived", true))
 
 	if m.CodeProvider != nil {
 		_ = m.CodeProvider.Remove(profileId)
@@ -637,10 +685,12 @@ func (m *Manager) Copy(profileId string, newName string) (*Profile, error) {
 		UpdatedAt:          now,
 	}
 
-	m.Profiles[newId] = profile
 	log.Info("实例复制成功", logger.F("src_id", profileId), logger.F("new_id", newId), logger.F("new_name", profileName))
 
-	if err := m.SaveProfiles(); err != nil {
+	if err := m.validateUserDataDirOwnerLocked(profile, ""); err != nil {
+		return nil, err
+	}
+	if err := m.commitProfileLocked(profile); err != nil {
 		return nil, err
 	}
 
@@ -663,13 +713,14 @@ func (m *Manager) SetKeywords(profileId string, keywords []string) (*Profile, er
 	if !exists {
 		return nil, fmt.Errorf("profile not found")
 	}
-	profile.Keywords = append([]string{}, keywords...)
-	profile.UpdatedAt = time.Now().Format(time.RFC3339)
+	next := *profile
+	next.Keywords = append([]string{}, keywords...)
+	next.UpdatedAt = time.Now().Format(time.RFC3339)
 	log.Info("关键字更新", logger.F("profile_id", profileId))
-	if err := m.SaveProfiles(); err != nil {
+	if err := m.commitProfileLocked(&next); err != nil {
 		return nil, err
 	}
-	return profile, nil
+	return &next, nil
 }
 
 // copyKeywords 深拷贝 keywords map

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLegacyPreparePreservesNumbersAndSkipsExistingDestination(t *testing.T) {
@@ -199,7 +200,9 @@ func TestLegacyRestoreCandidateDataBacksUpAndCanRollbackOverwrite(t *testing.T) 
 	if !backupPathExists(filepath.Join(backupRoot, "overwritten-data", "current-profile", "old.txt")) {
 		t.Fatal("original destination was not retained in rollback backup")
 	}
-	rollback()
+	if err := rollback(); err != nil {
+		t.Fatal(err)
+	}
 	if !backupPathExists(filepath.Join(destination, "old.txt")) || backupPathExists(filepath.Join(destination, "new.txt")) {
 		t.Fatal("rollback did not restore original destination")
 	}
@@ -340,5 +343,34 @@ func TestLegacySkipRuntimeLockFile(t *testing.T) {
 	}
 	if legacySkipRuntimeLockFile(filepath.Join("Default", "Cookies")) {
 		t.Fatal("Cookies must be preserved")
+	}
+}
+
+func TestLegacyRawFolderUsesEnvironmentDataPointerIdentity(t *testing.T) {
+	sourceRoot := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Browser.UserDataRoot = sourceRoot
+	manager := browser.NewManager(cfg, sourceRoot)
+	profile := &browser.Profile{
+		ProfileId:       "stable-profile-88",
+		ProfileName:     "用户编号-88",
+		UserDataDir:     "wallet-folder-88",
+		CoreId:          "core-148",
+		FingerprintArgs: []string{"--fingerprint-platform=windows"},
+		ProxyId:         "proxy-88",
+		GroupId:         "group-wallet",
+	}
+	if err := os.MkdirAll(filepath.Join(sourceRoot, profile.UserDataDir, "Default"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.WriteProfileDataPointer(profile, "closed", 0, time.Date(2026, 7, 29, 10, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered := legacyRawFolderProfile(sourceRoot, profile.UserDataDir)
+	if recovered.ProfileId != profile.ProfileId || recovered.ProfileName != profile.ProfileName ||
+		recovered.UserDataDir != profile.UserDataDir || recovered.CoreId != profile.CoreId ||
+		recovered.ProxyId != profile.ProxyId || recovered.GroupId != profile.GroupId {
+		t.Fatalf("environment identity chain was not preserved: %+v", recovered)
 	}
 }

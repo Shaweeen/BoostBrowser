@@ -36,7 +36,24 @@ Keep a single authoritative implementation. Remove the superseded path when:
 Compatibility code may remain only when it protects existing user data or a
 documented supported input/version. Label its boundary and test it.
 
-### 4. Record reversible deletion
+### 4. Preserve the environment data identity chain
+
+Every active environment has one stable Profile ID, one configured user-data
+directory and one live browser PID/debug endpoint. Ordinary edit, start, stop,
+backup, extension distribution and wallet import paths must not remap that
+identity.
+
+An environment close must use the shared graceful-close lifecycle: record the
+Profile ID/directory/PID, ask Chromium to exit normally, wait for the process,
+debug endpoint and Singleton profile lock to disappear, write the clean-close
+data pointer, and only then publish the stopped state. Do not force-kill a
+browser or report its data saved when that barrier fails.
+
+Identity manifests contain configuration linkage only. They must never inspect,
+copy, log or export Cookies, extension storage, wallet vaults, mnemonics,
+private keys or page content.
+
+### 5. Record reversible deletion
 
 Every material deletion must add an entry to `docs/DELETION_LEDGER.md` with:
 
@@ -50,7 +67,7 @@ Every material deletion must add an entry to `docs/DELETION_LEDGER.md` with:
 The ledger is a recovery index, not permission to restore an obsolete subsystem
 wholesale.
 
-### 5. Recovery after an incorrect deletion
+### 6. Recovery after an incorrect deletion
 
 If a later release loses a required function:
 
@@ -63,7 +80,7 @@ If a later release loses a required function:
 7. remove any temporary compatibility bridge;
 8. run the complete verification matrix again.
 
-### 6. Verification matrix
+### 7. Verification matrix
 
 At minimum:
 

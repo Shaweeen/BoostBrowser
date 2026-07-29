@@ -354,7 +354,7 @@ DELETE /api/profiles/{profileId}
 |------|------|------|------|
 | \`profile\` | object | 是 | 环境对象 |
 | \`profile.profileName\` | string | 是 | 环境名称 |
-| \`profile.userDataDir\` | string | 否 | 用户数据目录；为空时自动生成 |
+| \`profile.userDataDir\` | string | 否 | 用户数据目录；仅创建时可指定，更新时保持原目录 |
 | \`profile.coreId\` | string | 否 | 指定浏览器内核 |
 | \`profile.fingerprintArgs\` | string[] | 否 | 持久化指纹参数 |
 | \`profile.proxyId\` | string | 否 | 代理池中的代理 ID；传它时会自动回填 \`proxyConfig\` |

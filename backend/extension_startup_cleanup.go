@@ -1,6 +1,8 @@
 package backend
 
 import (
+	"boost-browser/backend/internal/fsutil"
+	"boost-browser/backend/internal/logger"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,8 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"boost-browser/backend/internal/logger"
 )
 
 // sanitizeChromeStartupPreferences disables explicit URL/session restoration
@@ -43,7 +43,7 @@ func ensureChromePreferencesFile(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte("{}"), 0644)
+	return fsutil.WriteFileAtomic(path, []byte("{}"), 0644)
 }
 
 func patchChromePreferencesFile(path string) error {
@@ -123,7 +123,7 @@ func patchChromePreferencesFile(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, out, 0644)
+	return fsutil.WriteFileAtomic(path, out, 0644)
 }
 
 func ensureJSONMap(parent map[string]any, key string) map[string]any {
