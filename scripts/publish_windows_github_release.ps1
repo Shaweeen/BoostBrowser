@@ -4,6 +4,7 @@
 
 param(
     [string]$ExpectedVersion = "",
+    [string]$ApprovedGrowthReason = "",
     [switch]$SkipGoTests
 )
 
@@ -137,7 +138,19 @@ if ($LASTEXITCODE -ne 0 -or $previousTagOutput.Count -ne 1) {
     throw "Unable to resolve the release preceding $Tag"
 }
 $PreviousTag = $previousTagOutput[0].Trim()
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$RepoRoot\scripts\check_code_health.ps1" -BaseRef $PreviousTag
+$healthArgs = @(
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    "$RepoRoot\scripts\check_code_health.ps1",
+    '-BaseRef',
+    $PreviousTag
+)
+if (-not [string]::IsNullOrWhiteSpace($ApprovedGrowthReason)) {
+    $healthArgs += @('-ApprovedGrowthReason', $ApprovedGrowthReason)
+}
+& powershell.exe @healthArgs
 if ($LASTEXITCODE -ne 0) { throw 'Code health review failed' }
 
 $buildArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$RepoRoot\scripts\build_windows_public.ps1")
