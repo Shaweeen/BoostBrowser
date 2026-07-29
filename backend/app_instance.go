@@ -540,6 +540,11 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				logger.F("max_attempts", maxStartAttempts),
 				logger.F("args", strings.Join(args, " ")),
 			)
+			// 每个新浏览器进程只在这里清理一次。此时窗口仍由 --start-minimized
+			// 隐藏，任何显式网页/应用 URL 尚未创建；清理完成后再进入注入、导航
+			// 和用户交付阶段，因此后续钱包扩展页面不属于清理生命周期。
+			finalizeBrowserStartupTabs(stableDebugPort, profileId)
+
 			// 任务栏 badge 数字直接来自实例名字里的数字段：
 			//   名字 "1"        → badge 1
 			//   名字 "11"       → badge 11
@@ -592,11 +597,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				navigateToTargetURLs(stableDebugPort, targetURLs, profileId, isCloakSelectedCore)
 			}
 
-			// 本次环境启动的准备步骤完成后执行有上限的启动页收尾：保留内核自然
-			// 创建的第一个空白页，关闭扩展自行打开的顶层标签和其余空白页。
-			// 函数返回时 CDP 连接已经释放；后续用户点击扩展、浏览网页和执行同步
-			// 均不存在后台监听或控制。
-			finalizeBrowserStartupTabs(stableDebugPort, profile.Pid, profileId)
 			enforceBrowserWindowBounds(profile.Pid, 1400, 600)
 
 			// crashprobe: 临时停用实例启动后的 Turnstile 自动点击监控，继续收缩每实例后台

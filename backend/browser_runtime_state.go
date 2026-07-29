@@ -201,8 +201,8 @@ func (a *App) waitBrowserDebugReadyAsync(profileId string, debugPort int, timeou
 	}
 
 	if snapshot.Pid > 0 {
-		// 与正常启动路径相同：每次启动仅在准备完成后清理一次，函数返回即释放。
-		finalizeBrowserStartupTabs(debugPort, snapshot.Pid, profileId)
+		// 调试接口延迟就绪时，启动调用已经把浏览器交给用户。这里不得再补扫
+		// 或关闭任何标签，否则会误伤用户/网页刚拉起的钱包扩展页面。
 		enforceBrowserWindowBounds(snapshot.Pid, 1400, 600)
 	}
 

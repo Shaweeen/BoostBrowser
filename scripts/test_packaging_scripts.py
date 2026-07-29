@@ -161,18 +161,33 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertNotIn("extensionPopupTargetWidth", popup_bounds)
         self.assertNotIn("extensionPopupTargetHeight", popup_bounds)
         self.assertIn("syncPopupConfinementEnabled(s.IsActive(), s.IsPaused()", popup_bounds)
-        self.assertIn("closeUnwantedStartupPages", startup_tabs)
+        self.assertIn("closeUnwantedStartupPagesOnce", startup_tabs)
         self.assertIn("planStartupPageCleanup", startup_tabs)
-        self.assertIn("extensionStartupCleanupWindow", startup_tabs)
+        self.assertNotIn("extensionStartupSettleDelay", startup_tabs)
         self.assertIn("startupPageCloseExtraBlank", startup_tabs)
         self.assertNotIn("settleBrowserStartupTabs", startup_tabs)
         self.assertIn("shouldCloseAutomaticExtensionStartupTarget", startup_tabs)
+        self.assertNotIn("startupTargetMatchesProtectedURL", startup_tabs)
+        self.assertIn("No DOM, form or page content is", startup_tabs)
+        self.assertIn("read, and no cleanup owner survives this function", startup_tabs)
+        self.assertNotIn("extensionStartupCleanupWindow", startup_tabs)
+        self.assertNotIn("extensionStartupProbeDelay", startup_tabs)
+        self.assertNotIn("for {", startup_tabs)
         self.assertNotIn("Target.setDiscoverTargets", startup_tabs)
         self.assertNotIn("automaticExtensionStartupGuardDuration", startup_tabs)
         self.assertNotIn("automaticExtensionStartupGuards", startup_tabs)
         self.assertNotIn("automaticExtensionStartupCleanupDelays", startup_tabs)
         self.assertNotIn("time.AfterFunc", startup_tabs)
         self.assertNotIn("go func", startup_tabs)
+        self.assertEqual(launch.count("finalizeBrowserStartupTabs(stableDebugPort, profileId)"), 1)
+        self.assertLess(
+            launch.index("finalizeBrowserStartupTabs(stableDebugPort, profileId)"),
+            launch.index("navigateToTargetURLs(stableDebugPort"),
+        )
+        self.assertNotIn(
+            "finalizeBrowserStartupTabs",
+            self.read("backend/browser_runtime_state.go"),
+        )
 
     def test_extension_distribution_is_explicit_and_never_profile_or_startup_driven(self):
         app = self.read("backend/app.go")

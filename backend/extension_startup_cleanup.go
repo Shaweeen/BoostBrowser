@@ -13,11 +13,6 @@ import (
 	"boost-browser/backend/internal/logger"
 )
 
-const (
-	extensionStartupCleanupWindow = 2 * time.Second
-	extensionStartupProbeDelay    = 50 * time.Millisecond
-)
-
 // sanitizeChromeStartupPreferences disables explicit URL/session restoration
 // without deleting session files or extension data. Chrome owns its natural
 // initial page; BrowserStudio does not configure or pass a replacement page.
@@ -152,16 +147,16 @@ type startupPageCloseAction struct {
 	kind     startupPageCloseKind
 }
 
-func finalizeBrowserStartupTabs(debugPort int, pid int, profileId string) {
+func finalizeBrowserStartupTabs(debugPort int, profileId string) {
 	if debugPort <= 0 {
 		return
 	}
-	// BrowserStudio never creates a default tab. During this bounded startup
-	// window it preserves the browser core's first natural blank page and closes
-	// extension-created top-level pages plus extra blank pages as soon as they
-	// appear. Extension workers/background pages remain untouched. The CDP
-	// connection is released before this function returns; no worker, listener,
-	// timer or target registry survives startup.
+	// Run immediately after this new browser process reaches stable debug-ready,
+	// before BrowserStudio navigates any explicit URL and before the minimized
+	// window is handed to the user. Take exactly one target snapshot, keep the
+	// core's first natural blank and extension workers, and close only automatic
+	// extension pages plus extra natural blanks. No DOM, form or page content is
+	// read, and no cleanup owner survives this function.
 	browserWsURL, err := getBrowserWebSocketURL(debugPort)
 	if err != nil {
 		return
@@ -171,14 +166,12 @@ func finalizeBrowserStartupTabs(debugPort int, pid int, profileId string) {
 		return
 	}
 	defer browserClient.close()
-	closedExtensions, closedBlanks := closeUnwantedStartupPages(
+	closedExtensions, closedBlanks := closeUnwantedStartupPagesOnce(
 		func() ([]cdpTarget, error) { return listCDPTargets(debugPort) },
 		func(targetID string) error {
 			_, closeErr := browserClient.call("Target.closeTarget", map[string]any{"targetId": targetID}, 1500*time.Millisecond)
 			return closeErr
 		},
-		extensionStartupCleanupWindow,
-		extensionStartupProbeDelay,
 	)
 	if closedExtensions > 0 || closedBlanks > 0 {
 		logger.New("Browser").Info("启动页面已收敛为唯一空白页",
@@ -194,79 +187,49 @@ func finalizeBrowserStartupTabs(debugPort int, pid int, profileId string) {
 	// in child processes; surfacing one of those produces a large, undecorated
 	// white window over the page.  The restore pass was only needed when startup
 	// deliberately used an offscreen --window-position, which is no longer done.
-	_ = pid
 }
 
-func closeUnwantedStartupPages(
+func closeUnwantedStartupPagesOnce(
 	fetch func() ([]cdpTarget, error),
 	closeTarget func(string) error,
-	timeout time.Duration,
-	probeDelay time.Duration,
 ) (int, int) {
-	if fetch == nil || closeTarget == nil || timeout <= 0 {
+	if fetch == nil || closeTarget == nil {
 		return 0, 0
 	}
-	if probeDelay <= 0 {
-		probeDelay = 25 * time.Millisecond
+	targets, err := fetch()
+	if err != nil {
+		return 0, 0
 	}
 
-	deadline := time.Now().Add(timeout)
-	keeperBlankID := ""
-	closedTargetIDs := map[string]bool{}
+	actions := planStartupPageCleanup(targets)
 	closedExtensions := 0
 	closedBlanks := 0
-	for {
-		if targets, err := fetch(); err == nil {
-			var actions []startupPageCloseAction
-			keeperBlankID, actions = planStartupPageCleanup(targets, keeperBlankID, closedTargetIDs)
-			for _, action := range actions {
-				if closeTarget(action.targetID) != nil {
-					continue
-				}
-				closedTargetIDs[action.targetID] = true
-				switch action.kind {
-				case startupPageCloseExtension:
-					closedExtensions++
-				case startupPageCloseExtraBlank:
-					closedBlanks++
-				}
-			}
+	for _, action := range actions {
+		if closeTarget(action.targetID) != nil {
+			continue
 		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return closedExtensions, closedBlanks
-		}
-		if remaining < probeDelay {
-			time.Sleep(remaining)
-		} else {
-			time.Sleep(probeDelay)
+		switch action.kind {
+		case startupPageCloseExtension:
+			closedExtensions++
+		case startupPageCloseExtraBlank:
+			closedBlanks++
 		}
 	}
+	return closedExtensions, closedBlanks
 }
 
-func planStartupPageCleanup(targets []cdpTarget, keeperBlankID string, alreadyClosed map[string]bool) (string, []startupPageCloseAction) {
-	blankStillPresent := false
+func planStartupPageCleanup(targets []cdpTarget) []startupPageCloseAction {
+	keeperBlankID := ""
 	for _, target := range targets {
-		if target.ID == keeperBlankID && isNaturalBlankPageTarget(target) && !alreadyClosed[target.ID] {
-			blankStillPresent = true
+		if target.ID != "" && isNaturalBlankPageTarget(target) {
+			keeperBlankID = target.ID
 			break
-		}
-	}
-	if !blankStillPresent {
-		keeperBlankID = ""
-	}
-	if keeperBlankID == "" {
-		for _, target := range targets {
-			if target.ID != "" && !alreadyClosed[target.ID] && isNaturalBlankPageTarget(target) {
-				keeperBlankID = target.ID
-				break
-			}
 		}
 	}
 
 	actions := make([]startupPageCloseAction, 0)
 	for _, target := range targets {
-		if target.ID == "" || alreadyClosed[target.ID] {
+		if target.ID == "" {
 			continue
 		}
 		if shouldCloseAutomaticExtensionStartupTarget(target) {
@@ -277,7 +240,7 @@ func planStartupPageCleanup(targets []cdpTarget, keeperBlankID string, alreadyCl
 			actions = append(actions, startupPageCloseAction{targetID: target.ID, kind: startupPageCloseExtraBlank})
 		}
 	}
-	return keeperBlankID, actions
+	return actions
 }
 
 func isNaturalBlankPageTarget(target cdpTarget) bool {
@@ -290,6 +253,11 @@ func isNaturalBlankPageTarget(target cdpTarget) bool {
 }
 
 func shouldCloseAutomaticExtensionStartupTarget(target cdpTarget) bool {
+	// This classifier is called only inside the pre-handoff startup snapshot.
+	// At that point BrowserStudio has not navigated an application URL and the
+	// minimized window is not available for user interaction, so every top-level
+	// extension page in the snapshot belongs to extension startup. Opener
+	// metadata is intentionally irrelevant and no content is inspected.
 	return strings.EqualFold(strings.TrimSpace(target.Type), "page") &&
 		isExtensionStartupURL(target.URL)
 }

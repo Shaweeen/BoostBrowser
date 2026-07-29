@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 )
 
 func TestPatchChromePreferencesFileDisablesSessionRestore(t *testing.T) {
@@ -152,9 +151,9 @@ func TestAutomaticExtensionStartupCleanupKeepsBlankAndWebPages(t *testing.T) {
 	if !shouldCloseAutomaticExtensionStartupTarget(cdpTarget{
 		Type:     "page",
 		URL:      "chrome-extension://wallet/onboarding.html",
-		OpenerID: "extension-background-target",
+		OpenerID: "extension-background",
 	}) {
-		t.Fatal("startup sweep must close extension-created pages even when Chrome reports an opener")
+		t.Fatal("an extension startup page must close regardless of extension-reported opener metadata")
 	}
 }
 
@@ -167,10 +166,7 @@ func TestPlanStartupPageCleanupKeepsOneNaturalBlank(t *testing.T) {
 		{ID: "worker", Type: "service_worker", URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/background.js"},
 		{ID: "web", Type: "page", URL: "https://example.com/"},
 	}
-	keeper, actions := planStartupPageCleanup(targets, "", map[string]bool{})
-	if keeper != "blank-1" {
-		t.Fatalf("first natural blank must be kept: keeper=%q", keeper)
-	}
+	actions := planStartupPageCleanup(targets)
 	got := map[string]startupPageCloseKind{}
 	for _, action := range actions {
 		got[action.targetID] = action.kind
@@ -191,45 +187,46 @@ func TestPlanStartupPageCleanupKeepsOneNaturalBlank(t *testing.T) {
 	}
 }
 
-func TestCloseUnwantedStartupPagesCatchesLateExtensionTabAndReleases(t *testing.T) {
+func TestCloseUnwantedStartupPagesUsesOneSnapshotAndReleases(t *testing.T) {
 	calls := 0
 	fetch := func() ([]cdpTarget, error) {
 		calls++
 		targets := []cdpTarget{
 			{ID: "blank-1", Type: "page", URL: "about:blank"},
 			{ID: "blank-2", Type: "page", URL: "about:blank"},
-			{ID: "blank-3", Type: "page", URL: "about:blank"},
+			{ID: "metamask-auto", Type: "page", URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/home.html#/onboarding/welcome"},
 		}
 		if calls >= 2 {
 			targets = append(targets, cdpTarget{
-				ID: "metamask", Type: "page",
-				URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/home.html#/onboarding/welcome",
+				ID: "metamask-user", Type: "page",
+				URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/home.html#/unlock",
 			})
 		}
 		return targets, nil
 	}
 	closed := map[string]bool{}
-	closedExtensions, closedBlanks := closeUnwantedStartupPages(
+	closedExtensions, closedBlanks := closeUnwantedStartupPagesOnce(
 		fetch,
 		func(targetID string) error {
 			closed[targetID] = true
 			return nil
 		},
-		8*time.Millisecond,
-		time.Millisecond,
 	)
-	if calls < 2 {
-		t.Fatalf("startup cleanup returned before late extension page appeared: calls=%d", calls)
+	if calls != 1 {
+		t.Fatalf("startup cleanup must read exactly one target snapshot: calls=%d", calls)
 	}
-	if closedExtensions != 1 || closedBlanks != 2 {
+	if closedExtensions != 1 || closedBlanks != 1 {
 		t.Fatalf("unexpected close counts: extension=%d blanks=%d", closedExtensions, closedBlanks)
 	}
-	for _, id := range []string{"blank-2", "blank-3", "metamask"} {
+	for _, id := range []string{"blank-2", "metamask-auto"} {
 		if !closed[id] {
 			t.Fatalf("startup target %q was not closed: %#v", id, closed)
 		}
 	}
 	if closed["blank-1"] {
 		t.Fatal("the browser core's first natural blank page must remain")
+	}
+	if closed["metamask-user"] {
+		t.Fatal("a target created after the startup snapshot must never be controlled")
 	}
 }

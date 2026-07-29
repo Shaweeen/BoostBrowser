@@ -4,7 +4,7 @@
 [CmdletBinding()]
 param(
     [string]$InstallRoot = '',
-    [string]$TargetVersion = 'v1.7.51',
+    [string]$TargetVersion = 'v1.7.52',
     [string]$GitHubOwner = 'Shaweeen',
     [string]$GitHubRepo = 'BoostBrowser',
     [switch]$NoLaunch
