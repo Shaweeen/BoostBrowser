@@ -154,6 +154,7 @@ export namespace backend {
 	    extensionId: string;
 	    extensionDir: string;
 	    installed: boolean;
+	    profileIds: string[];
 
 	    static createFrom(source: any = {}) {
 	        return new GlobalManagedExtension(source);
@@ -165,6 +166,7 @@ export namespace backend {
 	        this.extensionId = source["extensionId"];
 	        this.extensionDir = source["extensionDir"];
 	        this.installed = source["installed"];
+	        this.profileIds = source["profileIds"];
 	    }
 	}
 	export class LicenseStatus {

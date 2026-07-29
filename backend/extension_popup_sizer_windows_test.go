@@ -99,6 +99,19 @@ func TestWalletPopupTitleClassification(t *testing.T) {
 	}
 }
 
+func TestBrowserTopLevelClientSizeAllowsArrangedThinWindows(t *testing.T) {
+	for _, size := range [][2]int{{1920, 36}, {480, 120}, {320, 24}, {80, 8}} {
+		if !browserTopLevelClientSizeAllowed(size[0], size[1]) {
+			t.Fatalf("arranged browser window %dx%d must remain discoverable", size[0], size[1])
+		}
+	}
+	for _, size := range [][2]int{{0, 600}, {600, 0}, {79, 600}, {600, 7}, {10001, 600}, {600, 10001}} {
+		if browserTopLevelClientSizeAllowed(size[0], size[1]) {
+			t.Fatalf("invalid browser surface %dx%d was accepted", size[0], size[1])
+		}
+	}
+}
+
 func TestMainBrowserWindowTitleClassification(t *testing.T) {
 	for _, title := range []string{"Moss - Boost Browser", "新标签页 - Chromium", "Phantom - Google Chrome"} {
 		if !looksLikeMainBrowserWindowTitle(title) {

@@ -674,12 +674,7 @@ func (a *App) BrowserProfileSetKeywords(profileId string, keywords []string) (*B
 }
 
 func (a *App) BrowserProfileCreate(input BrowserProfileInput) (*BrowserProfile, error) {
-	input.LaunchArgs = a.appendGlobalExtensionArgsForNewProfile(input.LaunchArgs)
-	profile, err := a.browserMgr.Create(input)
-	if err == nil && profile != nil && len(activeLoadExtensionDirs(profile.LaunchArgs)) > 0 {
-		enableExtensionDeveloperMode(a.browserMgr.ResolveUserDataDir(profile))
-	}
-	return profile, err
+	return a.browserMgr.Create(input)
 }
 
 // BrowserProfileBatchCreate 批量创建实例配置
@@ -762,7 +757,6 @@ func (a *App) BrowserProfileBatchCreate(prefix string, startIndex int, count int
 		name := fmt.Sprintf("%s-%d", prefix, startIndex+i)
 		profileInput := input
 		profileInput.ProfileName = name
-		profileInput.LaunchArgs = a.appendGlobalExtensionArgsForNewProfile(profileInput.LaunchArgs)
 		// 每个实例独立分配种子，由 Create 内部检测「无 --fingerprint=」时随机生成
 		profileInput.FingerprintArgs = append([]string{}, baseFingerprint...)
 		p, err := a.browserMgr.Create(profileInput)
@@ -771,9 +765,6 @@ func (a *App) BrowserProfileBatchCreate(prefix string, startIndex int, count int
 			return created, fmt.Errorf("第 %d 个实例创建失败: %w", i+1, err)
 		}
 		created = append(created, p)
-		if len(activeLoadExtensionDirs(p.LaunchArgs)) > 0 {
-			enableExtensionDeveloperMode(a.browserMgr.ResolveUserDataDir(p))
-		}
 	}
 	return created, nil
 }
@@ -793,11 +784,52 @@ func (a *App) BrowserProfileUpdate(profileId string, input BrowserProfileInput) 
 	return a.browserMgr.Update(profileId, input)
 }
 
-func (a *App) BrowserProfileDelete(profileId string) error { return a.browserMgr.Delete(profileId) }
+func (a *App) BrowserProfileDelete(profileId string) error {
+	return a.deleteBrowserProfileAndOwnedData(profileId)
+}
 
-// BrowserProfileDeleteWithCache 删除实例配置；deleteCache=true 时同时删除缓存/用户数据目录。
-func (a *App) BrowserProfileDeleteWithCache(profileId string, deleteCache bool) error {
-	return a.browserMgr.DeleteWithCache(profileId, deleteCache)
+// BrowserProfileDeleteWithCache retains the legacy signature for existing
+// clients. Deleting an environment now always removes its owned browser data.
+func (a *App) BrowserProfileDeleteWithCache(profileId string, _ bool) error {
+	return a.deleteBrowserProfileAndOwnedData(profileId)
+}
+
+func (a *App) deleteBrowserProfileAndOwnedData(profileId string) error {
+	profileId = strings.TrimSpace(profileId)
+	if profileId == "" {
+		return fmt.Errorf("缺少要删除的环境 ID")
+	}
+	if err := a.browserMgr.DeleteWithCache(profileId, true); err != nil {
+		return err
+	}
+
+	cleanupErrors := make([]string, 0, 2)
+	if err := a.removeDeletedProfileExtensionReferences(profileId); err != nil {
+		cleanupErrors = append(cleanupErrors, err.Error())
+	}
+	if err := a.removeDeletedProfileSnapshots(profileId); err != nil {
+		cleanupErrors = append(cleanupErrors, err.Error())
+	}
+	// Publish the authoritative main-client environment list after deletion so
+	// the sync assistant cannot retain the removed profile in a later refresh.
+	a.PrepareWindowSyncRuntimeSnapshot()
+	if len(cleanupErrors) > 0 {
+		return fmt.Errorf("环境与浏览器数据已删除，但附加记录清理失败：%s", strings.Join(cleanupErrors, "；"))
+	}
+	return nil
+}
+
+func (a *App) removeDeletedProfileSnapshots(profileId string) error {
+	base := filepath.Clean(a.resolveAppPath(filepath.Join("data", "snapshots")))
+	target := filepath.Clean(filepath.Join(base, profileId))
+	rel, err := filepath.Rel(base, target)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("快照目录越界，已取消清理")
+	}
+	if err := os.RemoveAll(target); err != nil {
+		return fmt.Errorf("删除环境快照失败: %w", err)
+	}
+	return nil
 }
 
 // BrowserProfileCopy 复制实例配置（除指纹参数外全部复制）

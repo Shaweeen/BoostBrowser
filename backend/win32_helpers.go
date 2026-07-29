@@ -240,12 +240,19 @@ func scoreBrowserTopLevelWindow(hwnd windows.HWND) (processWindowCandidate, bool
 		}
 	}
 	clientW, clientH, ok := getClientSize(hwnd)
-	if !ok || clientW < 320 || clientH < 240 || clientW > 10000 || clientH > 10000 {
+	if !ok || !browserTopLevelClientSizeAllowed(clientW, clientH) {
 		return processWindowCandidate{}, false
 	}
 
 	score := len(title) + 10000 + clientW*clientH/1000
 	return processWindowCandidate{hwnd: hwnd, score: score}, true
+}
+
+func browserTopLevelClientSizeAllowed(width, height int) bool {
+	// A valid Chrome frame can be intentionally very short after 20+ windows
+	// are stacked. Reject only zero/implausible surfaces; the class, visibility,
+	// owner and IME checks above provide the real main-window classification.
+	return width >= 80 && height >= 8 && width <= 10000 && height <= 10000
 }
 
 // EnumWindows callbacks allocated through windows.NewCallback are backed by a

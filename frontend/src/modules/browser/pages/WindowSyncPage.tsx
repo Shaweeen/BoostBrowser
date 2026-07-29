@@ -89,11 +89,9 @@ export function WindowSyncPage() {
   const [resumeNoticeVisible, setResumeNoticeVisible] = useState(false)
 
   const loadProfilesSeq = useRef(0)
-  const loadProfilesPromiseRef = useRef<Promise<SyncProfileInfo[]> | null>(null)
   const startingRef = useRef(false)
   const stoppingRef = useRef(false)
   const loadProfiles = useCallback((): Promise<SyncProfileInfo[]> => {
-    if (loadProfilesPromiseRef.current) return loadProfilesPromiseRef.current
     const seq = ++loadProfilesSeq.current
     setRefreshing(true)
     const request = (async () => {
@@ -135,15 +133,12 @@ export function WindowSyncPage() {
       return sorted
     })().finally(() => {
       if (seq === loadProfilesSeq.current) setRefreshing(false)
-      if (loadProfilesPromiseRef.current === request) loadProfilesPromiseRef.current = null
     })
-    loadProfilesPromiseRef.current = request
     return request
   }, [])
 
   const releaseCollectedSyncData = useCallback(() => {
     loadProfilesSeq.current += 1
-    loadProfilesPromiseRef.current = null
     setProfiles([])
     setSelectedIds(new Set())
     setMasterId(null)

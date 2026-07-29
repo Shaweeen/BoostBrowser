@@ -39,6 +39,7 @@ export interface GlobalManagedExtension {
   extensionId: string
   extensionDir: string
   installed: boolean
+  profileIds: string[]
 }
 
 export interface RabbyWalletImportPreviewRow {

@@ -75,10 +75,9 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 }
 
 func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
-	// The main client's environment list is authoritative. The panel never runs
-	// its own process discovery or runtime reconciliation because that creates a
-	// second state owner which can replace valid PIDs with unrelated Chrome
-	// child processes. Refresh only reloads the latest main-client snapshot.
+	// The main client's environment list and root PIDs are authoritative. Reuse
+	// every valid HWND it published, then resolve all still-missing root PIDs in
+	// one bounded batch. The panel never reconciles or persists runtime state.
 	runtimeSnapshot, snapshotOK := a.readBrowserRuntimeSnapshot()
 	if !snapshotOK {
 		runtimeSnapshot = browserRuntimeSnapshot{}
@@ -100,13 +99,13 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 		candidates = append(candidates, p)
 	}
 
-	snapshotEntries := make(map[string]browserRuntimeSnapshotEntry, len(runtimeSnapshot.Entries))
+	cachedWindows := make(map[string]windows.HWND, len(runtimeSnapshot.Entries))
 	rootPIDs := make([]int, 0, len(candidates))
 	for _, entry := range runtimeSnapshot.Entries {
-		snapshotEntries[entry.ProfileID] = entry
+		cachedWindows[entry.ProfileID] = validRuntimeSnapshotWindow(entry)
 	}
 	for _, profile := range candidates {
-		if profile.Pid > 0 {
+		if profile.Pid > 0 && cachedWindows[profile.ProfileId] == 0 {
 			rootPIDs = append(rootPIDs, profile.Pid)
 		}
 	}
@@ -114,7 +113,7 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 	result := make([]SyncProfileInfo, len(candidates))
 	for i, p := range candidates {
 		info := SyncProfileInfo{ProfileId: p.ProfileId, ProfileName: p.ProfileName, Pid: p.Pid, DebugPort: p.DebugPort, Running: p.Running, BadgeNumber: extractBadgeNumberFromName(p.ProfileName)}
-		hwnd := validRuntimeSnapshotWindow(snapshotEntries[p.ProfileId])
+		hwnd := cachedWindows[p.ProfileId]
 		if hwnd == 0 {
 			hwnd = resolvedWindows[p.Pid]
 		}

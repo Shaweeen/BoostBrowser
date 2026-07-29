@@ -150,10 +150,10 @@ export async function updateBrowserProfile(profileId: string, input: BrowserProf
   return mockProfiles[index]
 }
 
-export async function deleteBrowserProfile(profileId: string, deleteCache = false): Promise<boolean> {
+export async function deleteBrowserProfile(profileId: string): Promise<boolean> {
   const bindings: any = await getBindings()
   if (bindings?.BrowserProfileDeleteWithCache) {
-    await bindings.BrowserProfileDeleteWithCache(profileId, deleteCache)
+    await bindings.BrowserProfileDeleteWithCache(profileId, true)
     return true
   }
   if (bindings?.BrowserProfileDelete) {

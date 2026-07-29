@@ -131,7 +131,8 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertNotIn("visibilitychange", page)
         self.assertIn("const releaseCollectedSyncData", page)
         self.assertIn("const snapshot = await getSyncSnapshot()", page)
-        self.assertIn("if (loadProfilesPromiseRef.current) return loadProfilesPromiseRef.current", page)
+        self.assertIn("const seq = ++loadProfilesSeq.current", page)
+        self.assertNotIn("loadProfilesPromiseRef", page)
         self.assertNotIn("const freshProfiles = await loadProfiles()", page)
         self.assertIn("func (a *App) GetSyncSnapshot() SyncSnapshot", backend)
         self.assertNotIn("a.reconcileBrowserRuntimeStateOnce()", backend)
@@ -172,6 +173,46 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertNotIn("automaticExtensionStartupCleanupDelays", startup_tabs)
         self.assertNotIn("time.AfterFunc", startup_tabs)
         self.assertNotIn("go func", startup_tabs)
+
+    def test_extension_distribution_is_explicit_and_never_profile_or_startup_driven(self):
+        app = self.read("backend/app.go")
+        launch = self.read("backend/app_instance.go")
+        extension_backend = self.read("backend/app_extension_import.go")
+        page = self.read("frontend/src/modules/browser/pages/ExtensionManagementPage.tsx")
+
+        self.assertNotIn("appendGlobalExtensionArgsForNewProfile", app)
+        self.assertNotIn("appendGlobalExtensionArgsForNewProfile", extension_backend)
+        self.assertNotIn("loadGlobalExtensionRegistry", launch)
+        self.assertNotIn("BrowserGlobalExtensionImport", launch)
+
+        submit_body = page.split("const submitExtension = async () => {", 1)[1].split(
+            "const distributeExtension = async", 1
+        )[0]
+        distribute_body = page.split("const distributeExtension = async", 1)[1].split(
+            "const removeExtension = async", 1
+        )[0]
+        self.assertNotIn("importGlobalExtension(", submit_body)
+        self.assertIn("importGlobalExtension(item.downloadAddress)", distribute_body)
+        self.assertIn("只有点击“分配”才会检测并安装", submit_body)
+
+    def test_profile_delete_removes_owned_data_and_sync_accepts_arranged_windows(self):
+        manager = self.read("backend/internal/browser/profile.go")
+        page = self.read("frontend/src/modules/browser/pages/BrowserListPage.tsx")
+        sync_page = self.read("frontend/src/modules/browser/pages/WindowSyncPage.tsx")
+        sync_api = self.read("backend/app_sync_api.go")
+        win32 = self.read("backend/win32_helpers.go")
+
+        self.assertIn("return m.DeleteWithCache(profileId, true)", manager)
+        self.assertIn("func (m *Manager) DeleteWithCache(profileId string, _ bool)", manager)
+        self.assertIn("os.RemoveAll(userDataDir)", manager)
+        self.assertNotIn("deleteCache", page)
+        self.assertIn("环境及全部所属数据已删除", page)
+
+        self.assertIn("cachedWindows := make(map[string]windows.HWND", sync_api)
+        self.assertIn("cachedWindows[profile.ProfileId] == 0", sync_api)
+        self.assertIn("browserTopLevelClientSizeAllowed", win32)
+        self.assertNotIn("clientW < 320 || clientH < 240", win32)
+        self.assertNotIn("loadProfilesPromiseRef", sync_page)
 
     def test_go_mod_does_not_replace_modules_with_missing_local_third_party_dirs(self):
         text = self.read("go.mod")

@@ -112,7 +112,7 @@ function matchesProfileSearch(profile: BrowserProfile, query: string) {
 export function ExtensionManagementPage() {
   const [extensions, setExtensions] = useState<ManagedExtension[]>(() => loadExtensions())
   const [profiles, setProfiles] = useState<BrowserProfile[]>([])
-  const [appliedGlobalAddresses, setAppliedGlobalAddresses] = useState<Set<string>>(() => new Set())
+  const [appliedGlobalProfiles, setAppliedGlobalProfiles] = useState<Map<string, Set<string>>>(() => new Map())
   const [activePlatform, setActivePlatform] = useState<'all' | ExtensionPlatform>('all')
   const [keyword, setKeyword] = useState('')
   const [profileKeyword, setProfileKeyword] = useState('')
@@ -149,17 +149,15 @@ export function ExtensionManagementPage() {
         fetchGlobalExtensions().catch(() => []),
       ])
       setProfiles(loadedProfiles)
-      const applied = new Set(
-        globalPolicies
-          .filter(item => item.installed)
-          .map(item => extensionAddressKey(item.downloadAddress)),
-      )
-
-      setAppliedGlobalAddresses(new Set(applied))
+      const applied = new Map<string, Set<string>>()
+      globalPolicies
+        .filter(item => item.installed)
+        .forEach(item => applied.set(extensionAddressKey(item.downloadAddress), new Set(item.profileIds || [])))
+      setAppliedGlobalProfiles(applied)
     }
     initialize().catch(() => {
       setProfiles([])
-      setAppliedGlobalAddresses(new Set())
+      setAppliedGlobalProfiles(new Map())
     })
   }, [])
 
@@ -259,25 +257,17 @@ export function ExtensionManagementPage() {
     setSubmitting(true)
     try {
       if (form.distributionMode === 'global' && form.platform !== 'google') {
-        toast.warning('全局自动安装当前仅支持 Google/Chrome 扩展')
+        toast.warning('全局分配当前仅支持 Google/Chrome 扩展')
         return
       }
-      if (currentExtension?.distributionMode === 'global' && (
+      const currentGlobalApplied = currentExtension?.distributionMode === 'global' &&
+        appliedGlobalProfiles.has(extensionAddressKey(currentExtension.downloadAddress))
+      if (currentGlobalApplied && (
         form.distributionMode !== 'global' ||
         extensionAddressKey(currentExtension.downloadAddress) !== extensionAddressKey(downloadAddress)
       )) {
-        await removeGlobalExtension(currentExtension.downloadAddress)
-        setAppliedGlobalAddresses(prev => {
-          const next = new Set(prev)
-          next.delete(extensionAddressKey(currentExtension.downloadAddress))
-          return next
-        })
-      }
-      let globalMessage = ''
-      if (form.distributionMode === 'global') {
-        const result = await importGlobalExtension(downloadAddress)
-        globalMessage = result?.message || ''
-        setAppliedGlobalAddresses(prev => new Set(prev).add(extensionAddressKey(downloadAddress)))
+        toast.warning('该全局扩展已分配，请先从扩展列表移除，再修改来源或分配方式')
+        return
       }
       const nextItem: ManagedExtension = {
         id: currentId || `ext-${Date.now()}`,
@@ -294,7 +284,9 @@ export function ExtensionManagementPage() {
         ? prev.map(item => item.id === currentId ? nextItem : item)
         : [nextItem, ...prev]
       )
-      toast.success(globalMessage || (currentId ? '扩展配置已保存' : '扩展已加入列表'))
+      toast.success(form.distributionMode === 'global'
+        ? '全局配置已保存；只有点击“分配”才会检测并安装'
+        : (currentId ? '扩展配置已保存' : '扩展已加入列表'))
       setUploadOpen(false)
       setConfigOpen(false)
       resetForm()
@@ -319,7 +311,11 @@ export function ExtensionManagementPage() {
         : await importExtensionToBrowserProfiles(targetIds, item.downloadAddress)
       toast.success(result?.message || `已分配到 ${targetIds.length} 个实例`)
       if (item.distributionMode === 'global') {
-        setAppliedGlobalAddresses(prev => new Set(prev).add(extensionAddressKey(item.downloadAddress)))
+        setAppliedGlobalProfiles(prev => {
+          const next = new Map(prev)
+          next.set(extensionAddressKey(item.downloadAddress), new Set(targetIds))
+          return next
+        })
       }
       setExtensions(prev => prev.map(ext => ext.id === item.id ? { ...ext, updatedAt: new Date().toISOString() } : ext))
     } catch (error: any) {
@@ -338,8 +334,8 @@ export function ExtensionManagementPage() {
       if (item.distributionMode === 'global') {
         const result = await removeGlobalExtension(item.downloadAddress)
         toast.success(result?.message || '全局扩展已移除')
-        setAppliedGlobalAddresses(prev => {
-          const next = new Set(prev)
+        setAppliedGlobalProfiles(prev => {
+          const next = new Map(prev)
           next.delete(extensionAddressKey(item.downloadAddress))
           return next
         })
@@ -529,8 +525,9 @@ export function ExtensionManagementPage() {
                   <td colSpan={5} className="px-5 py-14 text-center text-sm text-[var(--color-text-muted)]">暂无扩展</td>
                 </tr>
               ) : filtered.map(item => {
-                const globalApplied = item.distributionMode === 'global' && appliedGlobalAddresses.has(extensionAddressKey(item.downloadAddress))
-                const count = item.distributionMode === 'global' ? (globalApplied ? profiles.length : 0) : item.profileIds.length
+                const count = item.distributionMode === 'global'
+                  ? (appliedGlobalProfiles.get(extensionAddressKey(item.downloadAddress))?.size || 0)
+                  : item.profileIds.length
                 return (
                   <tr key={item.id} className="hover:bg-[var(--color-bg-hover)] transition-colors">
                     <td className="px-5 py-4">
@@ -660,7 +657,7 @@ export function ExtensionManagementPage() {
           ) : (
             <div className="flex items-center gap-2 rounded-xl border border-green-200 bg-green-50 dark:bg-green-900/20 dark:border-green-900 px-4 py-3 text-sm text-green-700 dark:text-green-300">
               <ShieldCheck className="w-4 h-4" />
-              保存后会自动安装到当前全部 {profiles.length} 个实例；后续新建实例及每次启动也会自动继承，无需再次分配。
+              保存只记录全局选项。点击“分配”时才检测当前 {profiles.length} 个环境并仅安装缺失扩展；新建环境后需再次点击分配。
             </div>
           )}
 

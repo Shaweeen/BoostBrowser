@@ -427,13 +427,16 @@ func (m *Manager) findProfileNameConflictLocked(name, excludeProfileID string) s
 	return ""
 }
 
-// Delete 删除配置（默认只删除配置记录，不删除浏览器缓存/用户数据目录）
+// Delete permanently removes both the profile record and its browser data.
 func (m *Manager) Delete(profileId string) error {
-	return m.DeleteWithCache(profileId, false)
+	return m.DeleteWithCache(profileId, true)
 }
 
-// DeleteWithCache 删除配置；deleteCache=true 时同时删除该实例的用户数据目录。
-func (m *Manager) DeleteWithCache(profileId string, deleteCache bool) error {
+// DeleteWithCache keeps its historical boolean parameter for API compatibility.
+// Profile deletion is now authoritative and always removes the profile-owned
+// user-data directory so deleted environments cannot leave orphaned wallet,
+// extension, Cookie or cache data behind.
+func (m *Manager) DeleteWithCache(profileId string, _ bool) error {
 	log := logger.New("Browser")
 	m.InitData()
 	m.Mutex.Lock()
@@ -444,25 +447,23 @@ func (m *Manager) DeleteWithCache(profileId string, deleteCache bool) error {
 		return fmt.Errorf("profile not found")
 	}
 
-	if deleteCache {
-		if profile.Running {
-			return fmt.Errorf("请先停止实例再删除缓存文件")
-		}
-		if cmd, ok := m.BrowserProcesses[profileId]; ok && cmd != nil && cmd.Process != nil {
-			return fmt.Errorf("请先停止实例再删除缓存文件")
-		}
-		userDataDir := m.ResolveUserDataDir(profile)
-		if err := validateUserDataDirForDelete(userDataDir, m.ResolveRelativePath(strings.TrimSpace(m.Config.Browser.UserDataRoot))); err != nil {
-			return err
-		}
-		if err := os.RemoveAll(userDataDir); err != nil {
-			return fmt.Errorf("删除缓存文件失败: %w", err)
-		}
-		log.Info("浏览器缓存目录删除", logger.F("profile_id", profileId), logger.F("user_data_dir", userDataDir))
+	if profile.Running {
+		return fmt.Errorf("请先停止环境再删除环境数据")
 	}
+	if cmd, ok := m.BrowserProcesses[profileId]; ok && cmd != nil && cmd.Process != nil {
+		return fmt.Errorf("请先停止环境再删除环境数据")
+	}
+	userDataDir := m.ResolveUserDataDir(profile)
+	if err := validateUserDataDirForDelete(userDataDir, m.ResolveRelativePath(strings.TrimSpace(m.Config.Browser.UserDataRoot))); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(userDataDir); err != nil {
+		return fmt.Errorf("删除环境数据失败: %w", err)
+	}
+	log.Info("环境用户数据目录删除", logger.F("profile_id", profileId), logger.F("user_data_dir", userDataDir))
 
 	delete(m.Profiles, profileId)
-	log.Info("浏览器配置删除", logger.F("profile_id", profileId), logger.F("delete_cache", deleteCache))
+	log.Info("浏览器配置删除", logger.F("profile_id", profileId), logger.F("delete_data", true))
 
 	// DAO 删除
 	if m.ProfileDAO != nil {

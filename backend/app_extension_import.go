@@ -31,10 +31,11 @@ type ExtensionImportResult struct {
 // Extension directories are resolved from ExtensionID at runtime so an installed
 // application can be moved without leaving stale absolute paths in the registry.
 type GlobalManagedExtension struct {
-	DownloadAddress string `json:"downloadAddress"`
-	ExtensionID     string `json:"extensionId"`
-	ExtensionDir    string `json:"extensionDir"`
-	Installed       bool   `json:"installed"`
+	DownloadAddress string   `json:"downloadAddress"`
+	ExtensionID     string   `json:"extensionId"`
+	ExtensionDir    string   `json:"extensionDir"`
+	Installed       bool     `json:"installed"`
+	ProfileIDs      []string `json:"profileIds"`
 }
 
 type globalExtensionRegistry struct {
@@ -42,14 +43,14 @@ type globalExtensionRegistry struct {
 }
 
 type globalExtensionRegistryEntry struct {
-	DownloadAddress string `json:"downloadAddress"`
-	ExtensionID     string `json:"extensionId"`
+	DownloadAddress string   `json:"downloadAddress"`
+	ExtensionID     string   `json:"extensionId"`
+	ProfileIDs      []string `json:"profileIds,omitempty"`
 }
 
-// profileExtensionRegistry is the backend-authoritative manual assignment map.
-// Do not rely only on Profile.LaunchArgs: profile editing, legacy recovery and
-// migrations legitimately replace that slice. The registry lets every launch
-// reconstruct the current extension arguments from stable profile IDs.
+// profileExtensionRegistry records explicit manual assignments for later edit
+// and removal actions. Browser startup never reads it or performs extension
+// maintenance; persisted profile launch arguments remain the launch authority.
 type profileExtensionRegistry struct {
 	Extensions []profileExtensionRegistryEntry `json:"extensions"`
 }
@@ -165,15 +166,12 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 	a.maintenanceMu.Lock()
 	defer a.maintenanceMu.Unlock()
 
-	for _, id := range profileIds {
-		a.enableExtensionDeveloperModeForProfile(id)
-	}
 	candidateID := a.registeredExtensionIDForAddress(downloadAddress)
 	if candidateID == "" {
 		candidateID = extractExtensionID(downloadAddress)
 	}
 	if candidateID != "" {
-		missing := a.filterProfilesMissingEquivalentExtension(profileIds, candidateID, "", downloadAddress)
+		missing := a.filterProfilesMissingEquivalentExtension(profileIds, candidateID, "")
 		if len(missing) == 0 {
 			return &ExtensionImportResult{
 				ExtensionID:     candidateID,
@@ -189,7 +187,7 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 		return nil, err
 	}
 	manifestName := readManifestNameFromDir(extDir)
-	profileIds = a.filterProfilesMissingEquivalentExtension(profileIds, extID, manifestName, downloadAddress)
+	profileIds = a.filterProfilesMissingEquivalentExtension(profileIds, extID, manifestName)
 	if len(profileIds) == 0 {
 		return &ExtensionImportResult{
 			ExtensionDir:     extDir,
@@ -199,6 +197,9 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 			UpdatedProfiles:  []string{},
 			Message:          "所选环境已存在同类型、名称或来源的扩展，未覆盖原扩展",
 		}, nil
+	}
+	for _, id := range profileIds {
+		a.enableExtensionDeveloperModeForProfile(id)
 	}
 
 	updated, err := a.bindExtensionDirToProfiles(profileIds, extDir)
@@ -227,9 +228,10 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 	}, nil
 }
 
-// BrowserGlobalExtensionImport installs an extension as a real global policy.
-// It binds all existing profiles immediately and is also injected at every
-// future profile launch, including profiles created after this call.
+// BrowserGlobalExtensionImport runs only for the user's explicit global
+// distribution action. It checks the current profile set once, binds only
+// missing extensions and records the completed set. Profile creation and
+// browser startup never call this workflow.
 func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionImportResult, error) {
 	downloadAddress = strings.TrimSpace(downloadAddress)
 	if downloadAddress == "" {
@@ -242,35 +244,57 @@ func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionIm
 	a.maintenanceMu.Lock()
 	defer a.maintenanceMu.Unlock()
 
-	extID, extDir, previousVersion, extensionVersion, err := a.downloadAndInstallExtension(downloadAddress)
-	if err != nil {
-		return nil, err
-	}
 	registry, err := a.loadGlobalExtensionRegistry()
 	if err != nil {
 		return nil, err
 	}
-	registry.Extensions = upsertGlobalExtensionRegistryEntry(registry.Extensions, globalExtensionRegistryEntry{
-		DownloadAddress: downloadAddress,
-		ExtensionID:     extID,
-	})
-	if err := a.saveGlobalExtensionRegistry(registry); err != nil {
-		return nil, err
-	}
-
 	profiles := a.browserMgr.List()
 	targetIDs := make([]string, 0, len(profiles))
 	for _, profile := range profiles {
 		targetIDs = append(targetIDs, profile.ProfileId)
-		a.enableExtensionDeveloperModeForProfile(profile.ProfileId)
 	}
-	missing := a.filterProfilesMissingEquivalentExtension(targetIDs, extID, readManifestNameFromDir(extDir), downloadAddress)
+	candidateID := a.registeredExtensionIDForAddress(downloadAddress)
+	if candidateID == "" {
+		candidateID = extractExtensionID(downloadAddress)
+	}
+	completed := globalExtensionCompletedProfiles(registry.Extensions, candidateID, downloadAddress)
+	unchecked := make([]string, 0, len(targetIDs))
+	for _, profileID := range targetIDs {
+		if !completed[profileID] {
+			unchecked = append(unchecked, profileID)
+		}
+	}
+	if len(unchecked) == 0 && candidateID != "" && extensionManifestExists(a.globalExtensionDir(candidateID)) {
+		return &ExtensionImportResult{
+			ExtensionDir:    a.globalExtensionDir(candidateID),
+			ExtensionID:     candidateID,
+			UpdatedProfiles: []string{},
+			Message:         fmt.Sprintf("全局分配已覆盖当前 %d 个环境，未重复检测或覆盖扩展", len(targetIDs)),
+		}, nil
+	}
+
+	extID, extDir, previousVersion, extensionVersion, err := a.downloadAndInstallExtension(downloadAddress)
+	if err != nil {
+		return nil, err
+	}
+	missing := a.filterProfilesMissingEquivalentExtension(unchecked, extID, readManifestNameFromDir(extDir))
 	updated := []string{}
 	if len(missing) > 0 {
+		for _, profileID := range missing {
+			a.enableExtensionDeveloperModeForProfile(profileID)
+		}
 		updated, err = a.bindExtensionDirToProfiles(missing, extDir)
 		if err != nil {
 			return nil, err
 		}
+	}
+	registry.Extensions = upsertGlobalExtensionRegistryEntry(registry.Extensions, globalExtensionRegistryEntry{
+		DownloadAddress: downloadAddress,
+		ExtensionID:     extID,
+		ProfileIDs:      targetIDs,
+	})
+	if err := a.saveGlobalExtensionRegistry(registry); err != nil {
+		return nil, err
 	}
 	return &ExtensionImportResult{
 		ExtensionDir:     extDir,
@@ -278,7 +302,7 @@ func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionIm
 		ExtensionVersion: extensionVersion,
 		PreviousVersion:  previousVersion,
 		UpdatedProfiles:  updated,
-		Message:          fmt.Sprintf("全局扩展已应用：新增 %d 个环境，跳过 %d 个已有同类扩展的环境；后续新建环境在创建时继承", len(updated), len(targetIDs)-len(updated)),
+		Message:          fmt.Sprintf("全局分配已执行：新增 %d 个环境，跳过 %d 个已有扩展的环境；新建环境需再次点击分配", len(updated), len(targetIDs)-len(updated)),
 	}, nil
 }
 
@@ -369,13 +393,24 @@ func (a *App) BrowserGlobalExtensionList() ([]GlobalManagedExtension, error) {
 		return nil, err
 	}
 	out := make([]GlobalManagedExtension, 0, len(registry.Extensions))
+	existingProfiles := map[string]bool{}
+	for _, profile := range a.browserMgr.List() {
+		existingProfiles[profile.ProfileId] = true
+	}
 	for _, entry := range registry.Extensions {
 		extDir := a.globalExtensionDir(entry.ExtensionID)
+		profileIDs := make([]string, 0, len(entry.ProfileIDs))
+		for _, profileID := range entry.ProfileIDs {
+			if existingProfiles[profileID] {
+				profileIDs = append(profileIDs, profileID)
+			}
+		}
 		out = append(out, GlobalManagedExtension{
 			DownloadAddress: entry.DownloadAddress,
 			ExtensionID:     entry.ExtensionID,
 			ExtensionDir:    extDir,
 			Installed:       extensionManifestExists(extDir),
+			ProfileIDs:      profileIDs,
 		})
 	}
 	return out, nil
@@ -454,21 +489,7 @@ func extensionInstallMessage(previousVersion, extensionVersion string, count int
 	return fmt.Sprintf("扩展 %s 已绑定到 %d 个实例；各环境钱包/Cookies 数据未改动，重启实例后生效", extensionVersion, count)
 }
 
-func (a *App) filterProfilesMissingEquivalentExtension(profileIDs []string, extensionID string, manifestName string, downloadAddress string) []string {
-	assignments, _ := a.loadProfileExtensionRegistry()
-	sourceKey := extensionSourceKey(downloadAddress)
-	assigned := map[string]bool{}
-	for _, entry := range assignments.Extensions {
-		sameID := extensionID != "" && strings.EqualFold(entry.ExtensionID, extensionID)
-		sameSource := sourceKey != "" && extensionSourceKey(entry.DownloadAddress) == sourceKey
-		if !sameID && !sameSource {
-			continue
-		}
-		for _, profileID := range entry.ProfileIDs {
-			assigned[profileID] = true
-		}
-	}
-
+func (a *App) filterProfilesMissingEquivalentExtension(profileIDs []string, extensionID string, manifestName string) []string {
 	profiles := map[string]BrowserProfile{}
 	for _, profile := range a.browserMgr.List() {
 		profiles[profile.ProfileId] = profile
@@ -483,7 +504,7 @@ func (a *App) filterProfilesMissingEquivalentExtension(profileIDs []string, exte
 		if !ok {
 			continue
 		}
-		if assigned[profileID] || (extDir != "" && hasExtensionDirInLaunchArgs(profile.LaunchArgs, extDir)) {
+		if extDir != "" && hasExtensionDirInLaunchArgs(profile.LaunchArgs, extDir) {
 			continue
 		}
 		userDataDir := a.browserMgr.ResolveUserDataDir(&profile)
@@ -1011,6 +1032,65 @@ func removeProfileExtensionAssignments(entries []profileExtensionRegistryEntry, 
 	return out, changed
 }
 
+func (a *App) removeDeletedProfileExtensionReferences(profileID string) error {
+	profileID = strings.TrimSpace(profileID)
+	if profileID == "" {
+		return nil
+	}
+	a.maintenanceMu.Lock()
+	defer a.maintenanceMu.Unlock()
+
+	assignments, err := a.loadProfileExtensionRegistry()
+	if err != nil {
+		return err
+	}
+	assignmentChanged := false
+	nextAssignments := make([]profileExtensionRegistryEntry, 0, len(assignments.Extensions))
+	for _, entry := range normalizeProfileExtensionRegistryEntries(assignments.Extensions) {
+		kept := make([]string, 0, len(entry.ProfileIDs))
+		for _, id := range entry.ProfileIDs {
+			if id == profileID {
+				assignmentChanged = true
+				continue
+			}
+			kept = append(kept, id)
+		}
+		if len(kept) > 0 {
+			entry.ProfileIDs = kept
+			nextAssignments = append(nextAssignments, entry)
+		}
+	}
+	if assignmentChanged {
+		assignments.Extensions = nextAssignments
+		if err := a.saveProfileExtensionRegistry(assignments); err != nil {
+			return err
+		}
+	}
+
+	global, err := a.loadGlobalExtensionRegistry()
+	if err != nil {
+		return err
+	}
+	globalChanged := false
+	for index := range global.Extensions {
+		kept := make([]string, 0, len(global.Extensions[index].ProfileIDs))
+		for _, id := range global.Extensions[index].ProfileIDs {
+			if id == profileID {
+				globalChanged = true
+				continue
+			}
+			kept = append(kept, id)
+		}
+		global.Extensions[index].ProfileIDs = kept
+	}
+	if globalChanged {
+		if err := a.saveGlobalExtensionRegistry(global); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func profileExtensionAssigned(entries []profileExtensionRegistryEntry, extensionID string) bool {
 	for _, entry := range entries {
 		if strings.EqualFold(strings.TrimSpace(entry.ExtensionID), strings.TrimSpace(extensionID)) && len(entry.ProfileIDs) > 0 {
@@ -1052,6 +1132,7 @@ func normalizeGlobalExtensionRegistryEntries(entries []globalExtensionRegistryEn
 	for _, entry := range entries {
 		entry.DownloadAddress = strings.TrimSpace(entry.DownloadAddress)
 		entry.ExtensionID = strings.TrimSpace(entry.ExtensionID)
+		entry.ProfileIDs = normalizeProfileIDs(entry.ProfileIDs)
 		if entry.ExtensionID == "" {
 			continue
 		}
@@ -1061,6 +1142,22 @@ func normalizeGlobalExtensionRegistryEntries(entries []globalExtensionRegistryEn
 		}
 		seen[key] = true
 		out = append(out, entry)
+	}
+	return out
+}
+
+func globalExtensionCompletedProfiles(entries []globalExtensionRegistryEntry, extensionID string, downloadAddress string) map[string]bool {
+	out := map[string]bool{}
+	key := extensionSourceKey(downloadAddress)
+	for _, entry := range normalizeGlobalExtensionRegistryEntries(entries) {
+		sameID := extensionID != "" && strings.EqualFold(entry.ExtensionID, extensionID)
+		sameSource := key != "" && extensionSourceKey(entry.DownloadAddress) == key
+		if !sameID && !sameSource {
+			continue
+		}
+		for _, profileID := range entry.ProfileIDs {
+			out[profileID] = true
+		}
 	}
 	return out
 }
@@ -1089,26 +1186,6 @@ func upsertGlobalExtensionRegistryEntry(entries []globalExtensionRegistryEntry, 
 func extensionManifestExists(extDir string) bool {
 	info, err := os.Stat(filepath.Join(extDir, "manifest.json"))
 	return err == nil && !info.IsDir()
-}
-
-// appendGlobalExtensionArgsForNewProfile is called only by the explicit
-// profile-creation workflow. Browser startup never reads registries or scans
-// extension directories.
-func (a *App) appendGlobalExtensionArgsForNewProfile(args []string) []string {
-	registry, err := a.loadGlobalExtensionRegistry()
-	if err != nil {
-		return normalizeLoadExtensionArgs(args)
-	}
-	for _, entry := range registry.Extensions {
-		extDir := a.globalExtensionDir(entry.ExtensionID)
-		if extensionManifestExists(extDir) {
-			args = addExtensionDirToLaunchArgs(args, extDir)
-		}
-	}
-	if len(activeLoadExtensionDirs(args)) > 0 {
-		args = removeExtensionBlockingLaunchArgs(args)
-	}
-	return normalizeLoadExtensionArgs(args)
 }
 
 func preserveAssignedExtensionArgs(existing []string, requested []string) []string {
@@ -1174,7 +1251,7 @@ func (a *App) InstallExtensionFromCRXURL(profileID string, crxURL string) (strin
 
 	extID := extractExtensionID(crxURL)
 	a.enableExtensionDeveloperModeForProfile(profileID)
-	if extID != "" && len(a.filterProfilesMissingEquivalentExtension([]string{profileID}, extID, "", crxURL)) == 0 {
+	if extID != "" && len(a.filterProfilesMissingEquivalentExtension([]string{profileID}, extID, "")) == 0 {
 		return extID, "", nil
 	}
 	extID, extDir, _, _, err := a.downloadAndInstallExtension(crxURL)
@@ -1182,7 +1259,7 @@ func (a *App) InstallExtensionFromCRXURL(profileID string, crxURL string) (strin
 		return extID, "", err
 	}
 	extName := readManifestNameFromDir(extDir)
-	if len(a.filterProfilesMissingEquivalentExtension([]string{profileID}, extID, extName, crxURL)) == 0 {
+	if len(a.filterProfilesMissingEquivalentExtension([]string{profileID}, extID, extName)) == 0 {
 		return extID, extName, nil
 	}
 	if _, err := a.bindExtensionDirToProfiles([]string{profileID}, extDir); err != nil {
@@ -1336,7 +1413,7 @@ func (a *App) enableExtensionDeveloperModeForProfile(profileID string) {
 }
 
 // enableExtensionDeveloperMode runs only when the user explicitly distributes
-// an extension or when a new profile inherits a global choice.
+// an extension to an environment that does not already contain it.
 func enableExtensionDeveloperMode(userDataDir string) {
 	if strings.TrimSpace(userDataDir) == "" {
 		return

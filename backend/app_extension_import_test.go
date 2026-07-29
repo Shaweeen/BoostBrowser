@@ -95,16 +95,25 @@ func TestGlobalExtensionRegistryUpsertUsesExtensionIDAsIdentity(t *testing.T) {
 	entries := []globalExtensionRegistryEntry{{
 		DownloadAddress: "https://old.example/" + extID,
 		ExtensionID:     extID,
+		ProfileIDs:      []string{"profile-old"},
 	}}
 	got := upsertGlobalExtensionRegistryEntry(entries, globalExtensionRegistryEntry{
 		DownloadAddress: "https://chromewebstore.google.com/detail/metamask/" + extID,
 		ExtensionID:     extID,
+		ProfileIDs:      []string{"profile-1", "profile-2", "profile-2"},
 	})
 	if len(got) != 1 {
 		t.Fatalf("expected one global policy, got %d", len(got))
 	}
 	if got[0].DownloadAddress != "https://chromewebstore.google.com/detail/metamask/"+extID {
 		t.Fatalf("global policy address was not updated: %#v", got[0])
+	}
+	if !reflect.DeepEqual(got[0].ProfileIDs, []string{"profile-1", "profile-2"}) {
+		t.Fatalf("global completion set was not replaced and normalized: %#v", got[0])
+	}
+	completed := globalExtensionCompletedProfiles(got, extID, "")
+	if !completed["profile-1"] || !completed["profile-2"] || completed["profile-old"] {
+		t.Fatalf("unexpected completed profile set: %#v", completed)
 	}
 }
 
@@ -113,38 +122,6 @@ func TestResolveExtensionDownloadURLUsesBundledChromeVersion(t *testing.T) {
 	got := resolveExtensionDownloadURL(extID, extID)
 	if !strings.Contains(got, "prodversion="+managedExtensionChromeVersion) {
 		t.Fatalf("extension download URL does not match bundled Chrome %s: %s", managedExtensionChromeVersion, got)
-	}
-}
-
-func TestAppendGlobalExtensionArgsRunsOnlyForNewProfileCreation(t *testing.T) {
-	root := t.TempDir()
-	app := NewApp(root)
-	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
-	extDir := app.globalExtensionDir(extID)
-	if err := os.MkdirAll(extDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"MetaMask","version":"1.0","manifest_version":3}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.saveGlobalExtensionRegistry(globalExtensionRegistry{Extensions: []globalExtensionRegistryEntry{{
-		DownloadAddress: extID,
-		ExtensionID:     extID,
-	}}}); err != nil {
-		t.Fatal(err)
-	}
-
-	got := app.appendGlobalExtensionArgsForNewProfile([]string{"--disable-extensions", "--no-first-run"})
-	if !hasExtensionDirInLaunchArgs(got, extDir) {
-		t.Fatalf("global extension was not injected into fresh launch args: %#v", got)
-	}
-	got = app.appendGlobalExtensionArgsForNewProfile(got)
-	active := activeLoadExtensionDirs(got)
-	if len(active) != 1 {
-		t.Fatalf("global extension should be de-duplicated, got %#v", got)
-	}
-	if reflect.DeepEqual(got, []string{"--disable-extensions", "--no-first-run"}) {
-		t.Fatalf("extension blocker should be removed during profile creation: %#v", got)
 	}
 }
 
@@ -277,7 +254,7 @@ func TestEnableExtensionDeveloperModePreservesExistingSettings(t *testing.T) {
 	}
 }
 
-func TestBrowserProfileCreateInheritsGlobalExtensionAtCreationOnly(t *testing.T) {
+func TestBrowserProfileCreateDoesNotApplyGlobalExtensionWithoutDistribution(t *testing.T) {
 	root := t.TempDir()
 	app := NewApp(root)
 	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
@@ -300,12 +277,12 @@ func TestBrowserProfileCreateInheritsGlobalExtensionAtCreationOnly(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !hasExtensionDirInLaunchArgs(profile.LaunchArgs, extDir) {
-		t.Fatalf("new profile did not inherit the explicit global choice: %#v", profile.LaunchArgs)
+	if hasExtensionDirInLaunchArgs(profile.LaunchArgs, extDir) {
+		t.Fatalf("new profile must wait for an explicit distribution action: %#v", profile.LaunchArgs)
 	}
-	prefs, err := os.ReadFile(filepath.Join(app.browserMgr.ResolveUserDataDir(profile), "Default", "Preferences"))
-	if err != nil || !strings.Contains(string(prefs), `"developer_mode": true`) {
-		t.Fatalf("developer mode was not enabled at profile creation: %s err=%v", prefs, err)
+	prefsPath := filepath.Join(app.browserMgr.ResolveUserDataDir(profile), "Default", "Preferences")
+	if prefs, err := os.ReadFile(prefsPath); err == nil && strings.Contains(string(prefs), `"developer_mode": true`) {
+		t.Fatalf("profile creation unexpectedly changed extension preferences: %s", prefs)
 	}
 }
 
@@ -358,5 +335,127 @@ func TestDownloadAndInstallExtensionReusesExistingPackageWithoutOverwrite(t *tes
 	}
 	if data, err := os.ReadFile(marker); err != nil || string(data) != "keep" {
 		t.Fatalf("existing extension package was overwritten: data=%q err=%v", data, err)
+	}
+}
+
+func TestGlobalExtensionDistributionChecksOnlyNewProfilesOnExplicitAction(t *testing.T) {
+	root := t.TempDir()
+	app := NewApp(root)
+	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
+	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
+	extDir := app.globalExtensionDir(extID)
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"MetaMask","version":"1.0","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	existing, err := app.browserMgr.Create(BrowserProfileInput{ProfileName: "existing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, err := app.browserMgr.Create(BrowserProfileInput{ProfileName: "missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	existingPrefs := filepath.Join(app.browserMgr.ResolveUserDataDir(existing), "Default", "Preferences")
+	if err := os.MkdirAll(filepath.Dir(existingPrefs), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(existingPrefs, []byte(`{"extensions":{"settings":{"nkbihfbeogaeaoehlefnkodbefgpgknn":{"manifest":{"name":"MetaMask"}}}}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := app.BrowserGlobalExtensionImport(extID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first.UpdatedProfiles, []string{missing.ProfileId}) {
+		t.Fatalf("explicit distribution should bind only the missing profile: %#v", first.UpdatedProfiles)
+	}
+	if prefs, err := os.ReadFile(existingPrefs); err != nil || strings.Contains(string(prefs), "developer_mode") {
+		t.Fatalf("existing extension preferences were modified: %s err=%v", prefs, err)
+	}
+
+	second, err := app.BrowserGlobalExtensionImport(extID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.UpdatedProfiles) != 0 {
+		t.Fatalf("completed profiles were checked or rebound again: %#v", second.UpdatedProfiles)
+	}
+
+	createdLater, err := app.BrowserProfileCreate(BrowserProfileInput{ProfileName: "created-later"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasExtensionDirInLaunchArgs(createdLater.LaunchArgs, extDir) {
+		t.Fatalf("new profile inherited a global extension before distribution: %#v", createdLater.LaunchArgs)
+	}
+	third, err := app.BrowserGlobalExtensionImport(extID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(third.UpdatedProfiles, []string{createdLater.ProfileId}) {
+		t.Fatalf("next explicit distribution should bind only the new profile: %#v", third.UpdatedProfiles)
+	}
+}
+
+func TestProfileDeletionRemovesOwnedDataSnapshotsAndExtensionReferences(t *testing.T) {
+	root := t.TempDir()
+	app := NewApp(root)
+	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
+	profile, err := app.browserMgr.Create(BrowserProfileInput{ProfileName: "delete-me"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	userDataDir := app.browserMgr.ResolveUserDataDir(profile)
+	if err := os.MkdirAll(filepath.Join(userDataDir, "Default", "Extensions"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userDataDir, "Default", "Cookies"), []byte("session"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	snapshotDir := filepath.Join(root, "data", "snapshots", profile.ProfileId)
+	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.saveProfileExtensionRegistry(profileExtensionRegistry{Extensions: []profileExtensionRegistryEntry{{
+		DownloadAddress: "manual",
+		ExtensionID:     "manual-extension",
+		ProfileIDs:      []string{profile.ProfileId},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.saveGlobalExtensionRegistry(globalExtensionRegistry{Extensions: []globalExtensionRegistryEntry{{
+		DownloadAddress: "global",
+		ExtensionID:     "global-extension",
+		ProfileIDs:      []string{profile.ProfileId},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.BrowserProfileDeleteWithCache(profile.ProfileId, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{userDataDir, snapshotDir} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("deleted environment left owned data at %s: %v", path, err)
+		}
+	}
+	assignments, err := app.loadProfileExtensionRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assignments.Extensions) != 0 {
+		t.Fatalf("manual extension references survived profile deletion: %#v", assignments.Extensions)
+	}
+	global, err := app.loadGlobalExtensionRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(global.Extensions) != 1 || len(global.Extensions[0].ProfileIDs) != 0 {
+		t.Fatalf("global completion reference survived profile deletion: %#v", global.Extensions)
 	}
 }

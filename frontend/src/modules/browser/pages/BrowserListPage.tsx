@@ -268,7 +268,6 @@ export function BrowserListPage() {
   const [batchLoading, setBatchLoading] = useState(false)
   const [cleaningCache, setCleaningCache] = useState(false)
   const [deleteModal, setDeleteModal] = useState<{ open: boolean; ids: string[]; names: string[] }>({ open: false, ids: [], names: [] })
-  const [deleteCache, setDeleteCache] = useState(false)
   const [deletingProfiles, setDeletingProfiles] = useState(false)
 
   // 筛选状态（从 localStorage 恢复）
@@ -689,14 +688,12 @@ export function BrowserListPage() {
     const uniqueIds = Array.from(new Set(ids)).filter(Boolean)
     if (uniqueIds.length === 0) return
     const names = uniqueIds.map(id => profiles.find(p => p.profileId === id)?.profileName || id)
-    setDeleteCache(false)
     setDeleteModal({ open: true, ids: uniqueIds, names })
   }
 
   const closeDeleteModal = () => {
     if (deletingProfiles) return
     setDeleteModal({ open: false, ids: [], names: [] })
-    setDeleteCache(false)
   }
 
   const confirmDeleteProfiles = async () => {
@@ -706,14 +703,13 @@ export function BrowserListPage() {
     setBatchLoading(ids.length > 1)
     try {
       for (const id of ids) {
-        await deleteBrowserProfile(id, deleteCache)
+        await deleteBrowserProfile(id)
       }
       if (ids.length > 1) {
         setSelectedIds(new Set())
       }
-      toast.success(`${ids.length > 1 ? `已删除 ${ids.length} 个环境` : '配置已删除'}${deleteCache ? '，缓存文件已删除' : ''}`)
+      toast.success(ids.length > 1 ? `已删除 ${ids.length} 个环境及全部所属数据` : '环境及全部所属数据已删除')
       setDeleteModal({ open: false, ids: [], names: [] })
-      setDeleteCache(false)
       await loadProfiles()
     } catch (error: any) {
       toast.error(error?.message || '删除失败')
@@ -1456,7 +1452,7 @@ export function BrowserListPage() {
             <p className="font-medium text-red-500 mb-1">
               确定删除 {deleteModal.ids.length} 个环境吗？
             </p>
-            <p>默认只删除列表里的配置记录，不删除浏览器缓存、插件、Cookie、书签等本地数据。</p>
+            <p>删除会同时清理该环境的浏览器数据、扩展与钱包存储、Cookie、缓存和快照。共享的扩展程序包不会影响其他环境。</p>
           </div>
           {deleteModal.names.length > 0 && (
             <div className="max-h-28 overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-2 text-xs text-[var(--color-text-muted)]">
@@ -1464,21 +1460,6 @@ export function BrowserListPage() {
               {deleteModal.names.length > 8 && <div>另有 {deleteModal.names.length - 8} 个环境...</div>}
             </div>
           )}
-          <label className="flex items-start gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-3 cursor-pointer">
-            <input
-              type="checkbox"
-              className="mt-1"
-              checked={deleteCache}
-              onChange={e => setDeleteCache(e.target.checked)}
-              disabled={deletingProfiles}
-            />
-            <span className="text-sm">
-              <span className="block font-medium text-[var(--color-text-primary)]">同时删除缓存文件/用户数据目录</span>
-              <span className="block mt-1 text-xs leading-5 text-[var(--color-text-muted)]">
-                勾选后会删除该环境的数据文件夹，包括浏览器缓存、Cookie、已安装插件、书签等；未勾选则保留这些文件，后续仍可手动备份或清理。
-              </span>
-            </span>
-          </label>
         </div>
       </Modal>
 
