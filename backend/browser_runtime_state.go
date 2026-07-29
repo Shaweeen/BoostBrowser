@@ -202,7 +202,7 @@ func (a *App) waitBrowserDebugReadyAsync(profileId string, debugPort int, timeou
 
 	if snapshot.Pid > 0 {
 		// 与正常启动路径相同：每次启动仅在准备完成后清理一次，函数返回即释放。
-		finalizeBrowserStartupTabs(debugPort, snapshot.Pid, profileId, snapshot.LaunchArgs)
+		finalizeBrowserStartupTabs(debugPort, snapshot.Pid, profileId)
 		enforceBrowserWindowBounds(snapshot.Pid, 1400, 600)
 	}
 

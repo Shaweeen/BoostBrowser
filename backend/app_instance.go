@@ -480,8 +480,8 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	if len(removedWindowArgs) > 0 {
 		logManagedLaunchArgOverrides(log, profileId, "final.windowPlacement", removedWindowArgs)
 	}
-	// 命令行是唯一的 about:blank 来源；Preferences 不再配置 startup_urls，
-	// 避免 Chrome 初始 target 与配置 URL 各生成一个空白标签。
+	// 浏览器内核负责自然创建唯一初始空白页。BrowserStudio 只移除旧版本遗留
+	// 的位置型启动 URL，不再通过命令行创建任何默认标签。
 	args = preparePrimaryEnvironmentLaunchArgs(args)
 	// 等 CDP 就绪后先注入 stealth + UA override（确保 Sec-CH-UA 和 navigator.userAgentData
 	// 在目标页面首次请求前就正确），然后再通过 CDP Page.navigate 导航到目标 URL。
@@ -582,8 +582,8 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				}
 			}
 
-			// stealth 注入完成后，通过 CDP 导航到目标 URL
-			// （浏览器以 about:blank 启动，首页面不载入任何真正的网站）
+			// stealth 注入完成后，通过 CDP 导航到用户明确配置的目标 URL。
+			// 默认启动页完全由浏览器内核创建，BrowserStudio 不传入默认 URL。
 			//
 			// CloakBrowser 内核分支只用 Target.createTarget(url) 直接打开标签页，
 			// 完全跳过 Page.addScriptToEvaluateOnNewDocument + Emulation.setUserAgentOverride，
@@ -592,10 +592,11 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				navigateToTargetURLs(stableDebugPort, targetURLs, profileId, isCloakSelectedCore)
 			}
 
-			// 本次环境启动的准备步骤完成后只执行一次启动页收尾：关闭扩展自行打开的
-			// 顶层标签，保留 about:blank。函数返回时 CDP 连接已经释放；后续用户点击
-			// 扩展、浏览网页和执行同步均不存在后台监听或控制。
-			finalizeBrowserStartupTabs(stableDebugPort, profile.Pid, profileId, args)
+			// 本次环境启动的准备步骤完成后执行有上限的启动页收尾：保留内核自然
+			// 创建的第一个空白页，关闭扩展自行打开的顶层标签和其余空白页。
+			// 函数返回时 CDP 连接已经释放；后续用户点击扩展、浏览网页和执行同步
+			// 均不存在后台监听或控制。
+			finalizeBrowserStartupTabs(stableDebugPort, profile.Pid, profileId)
 			enforceBrowserWindowBounds(profile.Pid, 1400, 600)
 
 			// crashprobe: 临时停用实例启动后的 Turnstile 自动点击监控，继续收缩每实例后台
@@ -1180,8 +1181,6 @@ func (a *App) openBrowserWindowForRunningProfile(profile *BrowserProfile, extraL
 	args = normalizeLoadExtensionArgs(args)
 	if len(startURLs) > 0 {
 		args = append(args, startURLs...)
-	} else {
-		args = append(args, "about:blank")
 	}
 
 	cmd := exec.Command(chromeBinaryPath, args...)

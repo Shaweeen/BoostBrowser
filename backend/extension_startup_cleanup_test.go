@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -41,7 +42,7 @@ func TestPatchChromePreferencesFileDisablesSessionRestore(t *testing.T) {
 		t.Fatalf("restore_on_startup=%v, want 5", got)
 	}
 	if _, exists := session["startup_urls"]; exists {
-		t.Fatalf("startup_urls must be removed so the command line remains the only blank-page owner: %#v", session["startup_urls"])
+		t.Fatalf("startup_urls must be removed so Chrome remains the only initial-page owner: %#v", session["startup_urls"])
 	}
 	profile := out["profile"].(map[string]any)
 	if profile["exited_cleanly"] != true || profile["exit_type"] != "Normal" {
@@ -157,53 +158,78 @@ func TestAutomaticExtensionStartupCleanupKeepsBlankAndWebPages(t *testing.T) {
 	}
 }
 
-func TestManagedExtensionIDsFromLaunchArgs(t *testing.T) {
-	const metamaskID = "nkbihfbeogaeaoehlefnkodbefgpgknn"
-	const rabbyID = "acmacodkjbdgmoleebolmdjonilkdbch"
-	got := managedExtensionIDsFromLaunchArgs([]string{
-		"--load-extension=C:\\BrowserStudio\\extensions\\imported\\" + metamaskID + ",D:\\wallets\\" + rabbyID,
-		"--no-first-run",
-	})
-	if !got[metamaskID] || !got[rabbyID] || len(got) != 2 {
-		t.Fatalf("managed extension IDs mismatch: %#v", got)
+func TestPlanStartupPageCleanupKeepsOneNaturalBlank(t *testing.T) {
+	targets := []cdpTarget{
+		{ID: "blank-1", Type: "page", URL: "about:blank"},
+		{ID: "blank-2", Type: "page", URL: "about:blank"},
+		{ID: "blank-3", Type: "page", URL: "about:blank"},
+		{ID: "metamask", Type: "page", URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/home.html#/onboarding/welcome"},
+		{ID: "worker", Type: "service_worker", URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/background.js"},
+		{ID: "web", Type: "page", URL: "https://example.com/"},
+	}
+	keeper, actions := planStartupPageCleanup(targets, "", map[string]bool{})
+	if keeper != "blank-1" {
+		t.Fatalf("first natural blank must be kept: keeper=%q", keeper)
+	}
+	got := map[string]startupPageCloseKind{}
+	for _, action := range actions {
+		got[action.targetID] = action.kind
+	}
+	want := map[string]startupPageCloseKind{
+		"blank-2":  startupPageCloseExtraBlank,
+		"blank-3":  startupPageCloseExtraBlank,
+		"metamask": startupPageCloseExtension,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("startup cleanup actions mismatch: got=%#v want=%#v", got, want)
+	}
+	if _, exists := got["worker"]; exists {
+		t.Fatal("extension service worker must remain available")
+	}
+	if _, exists := got["web"]; exists {
+		t.Fatal("normal web page must remain available")
 	}
 }
 
-func TestAwaitAssignedExtensionStartupTargetsStopsAfterCompletionWindow(t *testing.T) {
-	const metamaskID = "nkbihfbeogaeaoehlefnkodbefgpgknn"
+func TestCloseUnwantedStartupPagesCatchesLateExtensionTabAndReleases(t *testing.T) {
 	calls := 0
 	fetch := func() ([]cdpTarget, error) {
 		calls++
-		targets := []cdpTarget{{ID: "blank", Type: "page", URL: "about:blank"}}
+		targets := []cdpTarget{
+			{ID: "blank-1", Type: "page", URL: "about:blank"},
+			{ID: "blank-2", Type: "page", URL: "about:blank"},
+			{ID: "blank-3", Type: "page", URL: "about:blank"},
+		}
 		if calls >= 2 {
-			targets = append(targets,
-				cdpTarget{ID: "worker", Type: "service_worker", URL: "chrome-extension://" + metamaskID + "/background.js"},
-				cdpTarget{ID: "welcome", Type: "page", URL: "chrome-extension://" + metamaskID + "/home.html#onboarding/welcome"},
-			)
+			targets = append(targets, cdpTarget{
+				ID: "metamask", Type: "page",
+				URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/home.html#/onboarding/welcome",
+			})
 		}
 		return targets, nil
 	}
-
-	got := awaitAssignedExtensionStartupTargets(
+	closed := map[string]bool{}
+	closedExtensions, closedBlanks := closeUnwantedStartupPages(
 		fetch,
-		map[string]bool{metamaskID: true},
-		100*time.Millisecond,
-		3*time.Millisecond,
+		func(targetID string) error {
+			closed[targetID] = true
+			return nil
+		},
+		8*time.Millisecond,
 		time.Millisecond,
 	)
-	if calls < 3 {
-		t.Fatalf("startup barrier returned before the extension target became stable: calls=%d", calls)
+	if calls < 2 {
+		t.Fatalf("startup cleanup returned before late extension page appeared: calls=%d", calls)
 	}
-	if !allAssignedExtensionsObserved(got, map[string]bool{metamaskID: true}) {
-		t.Fatalf("assigned extension was not observed: %#v", got)
+	if closedExtensions != 1 || closedBlanks != 2 {
+		t.Fatalf("unexpected close counts: extension=%d blanks=%d", closedExtensions, closedBlanks)
 	}
-	foundWelcome := false
-	for _, target := range got {
-		if target.ID == "welcome" {
-			foundWelcome = true
+	for _, id := range []string{"blank-2", "blank-3", "metamask"} {
+		if !closed[id] {
+			t.Fatalf("startup target %q was not closed: %#v", id, closed)
 		}
 	}
-	if !foundWelcome {
-		t.Fatalf("extension onboarding target missing from settled result: %#v", got)
+	if closed["blank-1"] {
+		t.Fatal("the browser core's first natural blank page must remain")
 	}
 }

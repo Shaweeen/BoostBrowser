@@ -497,7 +497,7 @@ func TestAppendChromeTestingInfobarSuppressArgAddsTestTypeAndDisableInfobars(t *
 	}
 }
 
-func TestPreparePrimaryEnvironmentLaunchArgsOwnsExactlyOneBlankURL(t *testing.T) {
+func TestPreparePrimaryEnvironmentLaunchArgsDoesNotCreateDefaultTabs(t *testing.T) {
 	t.Parallel()
 
 	got := preparePrimaryEnvironmentLaunchArgs([]string{
@@ -506,7 +506,7 @@ func TestPreparePrimaryEnvironmentLaunchArgsOwnsExactlyOneBlankURL(t *testing.T)
 		"chrome-extension://wallet/home.html",
 		"https://stale-start.example/",
 	})
-	want := []string{"--user-data-dir=D:\\profiles\\demo", "--start-minimized", "about:blank"}
+	want := []string{"--user-data-dir=D:\\profiles\\demo", "--start-minimized"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("primary startup args mismatch: got=%v want=%v", got, want)
 	}
@@ -514,14 +514,10 @@ func TestPreparePrimaryEnvironmentLaunchArgsOwnsExactlyOneBlankURL(t *testing.T)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("primary startup args must not duplicate the minimized flag: got=%v want=%v", got, want)
 	}
-	blankCount := 0
 	for _, arg := range got {
-		if strings.EqualFold(strings.TrimSpace(arg), "about:blank") {
-			blankCount++
+		if isBrowserStartupTargetArg(arg) {
+			t.Fatalf("BrowserStudio must not create a default startup tab: got=%v", got)
 		}
-	}
-	if blankCount != 1 {
-		t.Fatalf("command line must own exactly one blank startup page, got=%v", got)
 	}
 }
 

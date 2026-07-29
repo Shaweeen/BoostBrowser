@@ -153,19 +153,19 @@ func appendLaunchArgIfMissing(args []string, want string) []string {
 }
 
 // preparePrimaryEnvironmentLaunchArgs keeps startup presentation policy in one
-// place. Raw profile/API launch arguments may contain positional URLs left by
-// older builds; those are not allowed to become a second startup owner. Explicit
-// product start URLs are opened later through CDP.
+// place. The selected browser core owns its natural initial blank page.
+// BrowserStudio removes positional startup targets left by older builds and
+// never creates another default tab. Explicit product start URLs are opened
+// later through CDP.
 func preparePrimaryEnvironmentLaunchArgs(args []string) []string {
-	out := make([]string, 0, len(args)+2)
+	out := make([]string, 0, len(args)+1)
 	for _, arg := range args {
 		if isBrowserStartupTargetArg(arg) {
 			continue
 		}
 		out = append(out, arg)
 	}
-	out = appendLaunchArgIfMissing(out, "--start-minimized")
-	return append(out, "about:blank")
+	return appendLaunchArgIfMissing(out, "--start-minimized")
 }
 
 func isBrowserStartupTargetArg(arg string) bool {

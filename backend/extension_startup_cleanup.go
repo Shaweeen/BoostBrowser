@@ -14,14 +14,13 @@ import (
 )
 
 const (
-	extensionStartupLoadTimeout      = 2 * time.Second
-	extensionStartupCompletionWindow = 500 * time.Millisecond
-	extensionStartupProbeDelay       = 75 * time.Millisecond
+	extensionStartupCleanupWindow = 2 * time.Second
+	extensionStartupProbeDelay    = 50 * time.Millisecond
 )
 
-// sanitizeChromeStartupPreferences selects one fixed blank startup page without
-// deleting session files or extension data. A bounded startup barrier closes
-// extension-created tabs after assigned extension targets finish loading.
+// sanitizeChromeStartupPreferences disables explicit URL/session restoration
+// without deleting session files or extension data. Chrome owns its natural
+// initial page; BrowserStudio does not configure or pass a replacement page.
 func sanitizeChromeStartupPreferences(userDataDir string) {
 	if strings.TrimSpace(userDataDir) == "" {
 		return
@@ -70,9 +69,9 @@ func patchChromePreferencesFile(path string) error {
 	}
 
 	sessionPrefs := ensureJSONMap(prefs, "session")
-	// The command line is the only owner of the single about:blank target.
-	// Keeping about:blank here as a configured startup URL makes Chrome create
-	// its initial target plus a second configured target.
+	// Let Chrome create its natural initial page. Configured startup URLs,
+	// restored sessions and positional launch URLs are competing tab owners and
+	// must not participate in a managed environment launch.
 	if sessionPrefs["restore_on_startup"] != float64(5) {
 		sessionPrefs["restore_on_startup"] = 5
 		changed = true
@@ -141,20 +140,51 @@ func ensureJSONMap(parent map[string]any, key string) map[string]any {
 	return created
 }
 
-func finalizeBrowserStartupTabs(debugPort int, pid int, profileId string, launchArgs []string) {
+type startupPageCloseKind uint8
+
+const (
+	startupPageCloseExtension startupPageCloseKind = iota + 1
+	startupPageCloseExtraBlank
+)
+
+type startupPageCloseAction struct {
+	targetID string
+	kind     startupPageCloseKind
+}
+
+func finalizeBrowserStartupTabs(debugPort int, pid int, profileId string) {
 	if debugPort <= 0 {
 		return
 	}
-	// Extensions remain installed and enabled, but their onboarding/unlock
-	// pages must not take over every environment at process startup. The bounded
-	// startup barrier ends after the assigned extensions have exposed their CDP
-	// targets (or the deadline expires), closes their top-level pages once, and
-	// releases every HTTP/CDP connection before returning. No worker, listener,
-	// timer or target registry remains after the environment is shown.
-	if closed := closeAutomaticExtensionStartupPages(debugPort, managedExtensionIDsFromLaunchArgs(launchArgs)); closed > 0 {
-		logger.New("Browser").Info("已关闭扩展自动启动页面",
+	// BrowserStudio never creates a default tab. During this bounded startup
+	// window it preserves the browser core's first natural blank page and closes
+	// extension-created top-level pages plus extra blank pages as soon as they
+	// appear. Extension workers/background pages remain untouched. The CDP
+	// connection is released before this function returns; no worker, listener,
+	// timer or target registry survives startup.
+	browserWsURL, err := getBrowserWebSocketURL(debugPort)
+	if err != nil {
+		return
+	}
+	browserClient, err := newRabbyCDPClient(browserWsURL)
+	if err != nil {
+		return
+	}
+	defer browserClient.close()
+	closedExtensions, closedBlanks := closeUnwantedStartupPages(
+		func() ([]cdpTarget, error) { return listCDPTargets(debugPort) },
+		func(targetID string) error {
+			_, closeErr := browserClient.call("Target.closeTarget", map[string]any{"targetId": targetID}, 1500*time.Millisecond)
+			return closeErr
+		},
+		extensionStartupCleanupWindow,
+		extensionStartupProbeDelay,
+	)
+	if closedExtensions > 0 || closedBlanks > 0 {
+		logger.New("Browser").Info("启动页面已收敛为唯一空白页",
 			logger.F("profile_id", profileId),
-			logger.F("count", closed),
+			logger.F("closed_extension_pages", closedExtensions),
+			logger.F("closed_extra_blank_pages", closedBlanks),
 		)
 	}
 	// Browser windows are launched at their real onscreen position now.  Do not
@@ -167,93 +197,44 @@ func finalizeBrowserStartupTabs(debugPort int, pid int, profileId string, launch
 	_ = pid
 }
 
-func managedExtensionIDsFromLaunchArgs(args []string) map[string]bool {
-	ids := map[string]bool{}
-	for _, dir := range activeLoadExtensionDirs(args) {
-		if id := extractExtensionID(dir); id != "" {
-			ids[id] = true
-		}
-	}
-	return ids
-}
-
-func closeAutomaticExtensionStartupPages(debugPort int, expectedExtensionIDs map[string]bool) int {
-	targets := awaitAssignedExtensionStartupTargets(
-		func() ([]cdpTarget, error) { return listCDPTargets(debugPort) },
-		expectedExtensionIDs,
-		extensionStartupLoadTimeout,
-		extensionStartupCompletionWindow,
-		extensionStartupProbeDelay,
-	)
-	if len(targets) == 0 {
-		return 0
-	}
-	browserWsURL, err := getBrowserWebSocketURL(debugPort)
-	if err != nil {
-		return 0
-	}
-	browserClient, err := newRabbyCDPClient(browserWsURL)
-	if err != nil {
-		return 0
-	}
-	defer browserClient.close()
-
-	closed := 0
-	for _, target := range targets {
-		if target.ID == "" || !shouldCloseAutomaticExtensionStartupTarget(target) {
-			continue
-		}
-		if _, err := browserClient.call("Target.closeTarget", map[string]any{"targetId": target.ID}, 1500*time.Millisecond); err == nil {
-			closed++
-		}
-	}
-	return closed
-}
-
-func awaitAssignedExtensionStartupTargets(
+func closeUnwantedStartupPages(
 	fetch func() ([]cdpTarget, error),
-	expectedExtensionIDs map[string]bool,
+	closeTarget func(string) error,
 	timeout time.Duration,
-	completionWindow time.Duration,
 	probeDelay time.Duration,
-) []cdpTarget {
-	if fetch == nil {
-		return nil
-	}
-	if timeout <= 0 || len(expectedExtensionIDs) == 0 {
-		targets, _ := fetch()
-		return targets
-	}
-	if completionWindow < 0 {
-		completionWindow = 0
+) (int, int) {
+	if fetch == nil || closeTarget == nil || timeout <= 0 {
+		return 0, 0
 	}
 	if probeDelay <= 0 {
 		probeDelay = 25 * time.Millisecond
 	}
 
 	deadline := time.Now().Add(timeout)
-	var latest []cdpTarget
-
+	keeperBlankID := ""
+	closedTargetIDs := map[string]bool{}
+	closedExtensions := 0
+	closedBlanks := 0
 	for {
 		if targets, err := fetch(); err == nil {
-			latest = targets
-			if allAssignedExtensionsObserved(targets, expectedExtensionIDs) {
-				remaining := time.Until(deadline)
-				if remaining > 0 {
-					if remaining > completionWindow {
-						remaining = completionWindow
-					}
-					time.Sleep(remaining)
+			var actions []startupPageCloseAction
+			keeperBlankID, actions = planStartupPageCleanup(targets, keeperBlankID, closedTargetIDs)
+			for _, action := range actions {
+				if closeTarget(action.targetID) != nil {
+					continue
 				}
-				if finalTargets, err := fetch(); err == nil {
-					latest = finalTargets
+				closedTargetIDs[action.targetID] = true
+				switch action.kind {
+				case startupPageCloseExtension:
+					closedExtensions++
+				case startupPageCloseExtraBlank:
+					closedBlanks++
 				}
-				return latest
 			}
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return latest
+			return closedExtensions, closedBlanks
 		}
 		if remaining < probeDelay {
 			time.Sleep(remaining)
@@ -263,38 +244,49 @@ func awaitAssignedExtensionStartupTargets(
 	}
 }
 
-func allAssignedExtensionsObserved(targets []cdpTarget, expectedExtensionIDs map[string]bool) bool {
-	if len(expectedExtensionIDs) == 0 {
-		return true
-	}
-	observed := map[string]bool{}
+func planStartupPageCleanup(targets []cdpTarget, keeperBlankID string, alreadyClosed map[string]bool) (string, []startupPageCloseAction) {
+	blankStillPresent := false
 	for _, target := range targets {
-		if id := extensionIDFromTargetURL(target.URL); id != "" {
-			observed[id] = true
+		if target.ID == keeperBlankID && isNaturalBlankPageTarget(target) && !alreadyClosed[target.ID] {
+			blankStillPresent = true
+			break
 		}
 	}
-	for id := range expectedExtensionIDs {
-		if !observed[strings.ToLower(strings.TrimSpace(id))] {
-			return false
+	if !blankStillPresent {
+		keeperBlankID = ""
+	}
+	if keeperBlankID == "" {
+		for _, target := range targets {
+			if target.ID != "" && !alreadyClosed[target.ID] && isNaturalBlankPageTarget(target) {
+				keeperBlankID = target.ID
+				break
+			}
 		}
 	}
-	return true
+
+	actions := make([]startupPageCloseAction, 0)
+	for _, target := range targets {
+		if target.ID == "" || alreadyClosed[target.ID] {
+			continue
+		}
+		if shouldCloseAutomaticExtensionStartupTarget(target) {
+			actions = append(actions, startupPageCloseAction{targetID: target.ID, kind: startupPageCloseExtension})
+			continue
+		}
+		if isNaturalBlankPageTarget(target) && target.ID != keeperBlankID {
+			actions = append(actions, startupPageCloseAction{targetID: target.ID, kind: startupPageCloseExtraBlank})
+		}
+	}
+	return keeperBlankID, actions
 }
 
-func extensionIDFromTargetURL(rawURL string) string {
-	const prefix = "chrome-extension://"
-	value := strings.ToLower(strings.TrimSpace(rawURL))
-	if !strings.HasPrefix(value, prefix) {
-		return ""
+func isNaturalBlankPageTarget(target cdpTarget) bool {
+	if !strings.EqualFold(strings.TrimSpace(target.Type), "page") {
+		return false
 	}
-	value = strings.TrimPrefix(value, prefix)
-	if slash := strings.IndexByte(value, '/'); slash >= 0 {
-		value = value[:slash]
-	}
-	if chromeWebStoreIDPattern.MatchString(value) && len(value) == 32 {
-		return value
-	}
-	return ""
+	url := strings.ToLower(strings.TrimSpace(target.URL))
+	return url == "" || url == "about:blank" || url == "about:blank#" ||
+		url == "chrome://newtab/" || url == "chrome://newtab"
 }
 
 func shouldCloseAutomaticExtensionStartupTarget(target cdpTarget) bool {
