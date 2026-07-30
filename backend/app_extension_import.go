@@ -153,6 +153,7 @@ func (a *App) BrowserProfileRemoveExtension(profileIds []string, downloadAddress
 		return nil, fmt.Errorf("保存实例扩展配置失败：%w", err)
 	}
 	a.browserMgr.Mutex.Unlock()
+	a.clearExtensionLaunchReadyForProfiles(updated)
 
 	if !stillReferenced && !a.globalExtensionRegistered(extID) {
 		_ = os.RemoveAll(extDir)
@@ -1224,6 +1225,8 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) ([]
 		}
 		return nil, fmt.Errorf("保存实例扩展配置失败：%w", err)
 	}
+	// Force next start to re-verify extension packages ↔ profile data.
+	a.clearExtensionLaunchReadyForProfilesLocked(updated)
 	return updated, nil
 }
 
@@ -1267,6 +1270,7 @@ func (a *App) removeExtensionDirFromProfilesExcept(extDir string, keepProfiles m
 		}
 		return nil, fmt.Errorf("保存全局扩展配置失败：%w", err)
 	}
+	a.clearExtensionLaunchReadyForProfilesLocked(updated)
 	return updated, nil
 }
 

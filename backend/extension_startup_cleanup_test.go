@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 )
 
 func TestPatchChromePreferencesFileDisablesSessionRestore(t *testing.T) {
@@ -213,81 +212,6 @@ func TestCloseUnwantedStartupPagesOnceIsSinglePass(t *testing.T) {
 	}
 	if !closed["metamask"] || !closed["blank-2"] || closed["blank-1"] {
 		t.Fatalf("unexpected close set: %#v", closed)
-	}
-}
-
-func TestCloseUnwantedStartupPagesDuringLaunchClosesDelayedTargetsAndReleases(t *testing.T) {
-	calls := 0
-	fetch := func() ([]cdpTarget, error) {
-		calls++
-		targets := []cdpTarget{
-			{ID: "blank-1", Type: "page", URL: "about:blank"},
-			{ID: "blank-2", Type: "page", URL: "about:blank"},
-		}
-		// Appear after the first quiet sample so delayed wallet pages are still
-		// covered by the bounded observation window.
-		if calls == 2 {
-			targets = append(targets, cdpTarget{
-				ID: "metamask-auto", Type: "page",
-				URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/home.html#/onboarding/welcome",
-			})
-		}
-		return targets, nil
-	}
-	closed := map[string]bool{}
-	pauses := 0
-	closedExtensions, closedBlanks := closeUnwantedStartupPagesDuringLaunch(
-		fetch,
-		func(targetID string) error {
-			closed[targetID] = true
-			return nil
-		},
-		func(time.Duration) { pauses++ },
-		8,
-		2,
-	)
-	// pass1 quiet blanks, pass2 close extension+extra blank, pass3+pass4 quiet release
-	if calls != 4 {
-		t.Fatalf("startup cleanup must include the delayed target and release after quiet passes: calls=%d", calls)
-	}
-	if closedExtensions != 1 || closedBlanks != 1 {
-		t.Fatalf("unexpected close counts: extension=%d blanks=%d", closedExtensions, closedBlanks)
-	}
-	for _, id := range []string{"blank-2", "metamask-auto"} {
-		if !closed[id] {
-			t.Fatalf("startup target %q was not closed: %#v", id, closed)
-		}
-	}
-	if closed["blank-1"] {
-		t.Fatal("the browser core's first natural blank page must remain")
-	}
-	if pauses != calls-1 {
-		t.Fatalf("startup cleanup pause count mismatch: pauses=%d calls=%d", pauses, calls)
-	}
-}
-
-func TestCloseUnwantedStartupPagesDuringLaunchReleasesWhenNoExtensionAppears(t *testing.T) {
-	fetches := 0
-	pauses := 0
-	closedExtensions, closedBlanks := closeUnwantedStartupPagesDuringLaunch(
-		func() ([]cdpTarget, error) {
-			fetches++
-			return []cdpTarget{{ID: "blank-1", Type: "page", URL: "about:blank"}}, nil
-		},
-		func(string) error {
-			t.Fatal("the only natural blank must never be closed")
-			return nil
-		},
-		func(time.Duration) { pauses++ },
-		10,
-		2,
-	)
-	if closedExtensions != 0 || closedBlanks != 0 {
-		t.Fatalf("unexpected close counts: extension=%d blanks=%d", closedExtensions, closedBlanks)
-	}
-	// Quiet-pass early exit: no extension UI means release after quietPasses only.
-	if fetches != 2 || pauses != 1 {
-		t.Fatalf("quiet early-exit mismatch: fetches=%d pauses=%d", fetches, pauses)
 	}
 }
 

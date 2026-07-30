@@ -1,0 +1,211 @@
+package backend
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestAssignmentFingerprintStableAndOrderIndependent(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	b := filepath.Join(dir, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	if err := os.MkdirAll(a, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(b, 0755); err != nil {
+		t.Fatal(err)
+	}
+	fp1, ids1 := assignmentFingerprintFromLaunchArgs([]string{
+		"--load-extension=" + b + "," + a,
+	})
+	fp2, ids2 := assignmentFingerprintFromLaunchArgs([]string{
+		"--load-extension=" + a,
+		"--other=1",
+		"--load-extension=" + b,
+	})
+	if fp1 == "" || fp1 != fp2 {
+		t.Fatalf("fingerprint mismatch: %q vs %q", fp1, fp2)
+	}
+	if len(ids1) != 2 || len(ids2) != 2 {
+		t.Fatalf("ids=%v %v", ids1, ids2)
+	}
+}
+
+func TestExtensionLaunchPrepReadyRequiresMatchingMarker(t *testing.T) {
+	userData := t.TempDir()
+	fp, ids := assignmentFingerprintFromLaunchArgs([]string{
+		"--load-extension=" + filepath.Join(userData, "cccccccccccccccccccccccccccccccc"),
+	})
+	if isExtensionLaunchPrepReady(userData, fp) {
+		t.Fatal("missing marker must not be ready")
+	}
+	if err := writeExtensionLaunchReadyMarker(userData, "p1", fp, ids); err != nil {
+		t.Fatal(err)
+	}
+	if !isExtensionLaunchPrepReady(userData, fp) {
+		t.Fatal("matching marker must be ready")
+	}
+	if isExtensionLaunchPrepReady(userData, fp+"x") {
+		t.Fatal("fingerprint change must invalidate readiness")
+	}
+	clearExtensionLaunchReadyMarker(userData)
+	if isExtensionLaunchPrepReady(userData, fp) {
+		t.Fatal("cleared marker must not be ready")
+	}
+}
+
+func TestVerifyAssignedExtensionsAgainstProfileData(t *testing.T) {
+	root := t.TempDir()
+	extID := "dddddddddddddddddddddddddddddddd"
+	extDir := filepath.Join(root, "pkg", extID)
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"t","version":"1","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	userData := filepath.Join(root, "user")
+	args := []string{"--load-extension=" + extDir}
+	if verifyAssignedExtensionsAgainstProfileData(userData, args) {
+		t.Fatal("missing profile data must fail verification")
+	}
+	les := filepath.Join(userData, "Default", "Local Extension Settings", extID)
+	if err := os.MkdirAll(les, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Empty scaffold must not pass — only real Chrome-written state.
+	if verifyAssignedExtensionsAgainstProfileData(userData, args) {
+		t.Fatal("empty LES scaffold must not satisfy verification")
+	}
+	if err := os.WriteFile(filepath.Join(les, "000003.log"), []byte("leveldb"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !verifyAssignedExtensionsAgainstProfileData(userData, args) {
+		t.Fatal("Local Extension Settings with real files should satisfy verification")
+	}
+
+	userData2 := filepath.Join(root, "user2")
+	prefDir := filepath.Join(userData2, "Default")
+	if err := os.MkdirAll(prefDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	prefs := map[string]any{
+		"extensions": map[string]any{
+			"settings": map[string]any{
+				extID: map[string]any{"state": 1},
+			},
+		},
+	}
+	raw, _ := json.Marshal(prefs)
+	if err := os.WriteFile(filepath.Join(prefDir, "Preferences"), raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !verifyAssignedExtensionsAgainstProfileData(userData2, args) {
+		t.Fatal("Preferences extensions.settings should satisfy verification")
+	}
+}
+
+func TestEmptyAssignmentIsNotPrepReady(t *testing.T) {
+	if isExtensionLaunchPrepReady(t.TempDir(), "") {
+		t.Fatal("empty assignment must keep normal prep path")
+	}
+}
+
+func TestEnsureEmptyExtensionSettingsScaffoldNeverTouchesExisting(t *testing.T) {
+	userData := t.TempDir()
+	extID := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	target := filepath.Join(userData, "Default", "Local Extension Settings", extID)
+	if err := os.MkdirAll(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	vault := filepath.Join(target, "wallet-state")
+	if err := os.WriteFile(vault, []byte("encrypted-secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if ensureEmptyExtensionSettingsScaffold(userData, extID) {
+		t.Fatal("must not recreate existing LES directory")
+	}
+	data, err := os.ReadFile(vault)
+	if err != nil || string(data) != "encrypted-secret" {
+		t.Fatalf("existing wallet state was modified: %v %q", err, data)
+	}
+}
+
+func TestMergeExtensionSettingsNeverOverwritesExistingEntries(t *testing.T) {
+	userData := t.TempDir()
+	prefDir := filepath.Join(userData, "Default")
+	if err := os.MkdirAll(prefDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	extID := "ffffffffffffffffffffffffffffffff"
+	prefs := map[string]any{
+		"extensions": map[string]any{
+			"settings": map[string]any{
+				extID: map[string]any{
+					"state":   float64(1),
+					"path":    "/keep/me",
+					"account": "social-session",
+				},
+			},
+			"ui": map[string]any{},
+		},
+	}
+	raw, _ := json.Marshal(prefs)
+	prefPath := filepath.Join(prefDir, "Preferences")
+	if err := os.WriteFile(prefPath, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	_ = mergeExtensionSettingsNeverOverwrite(userData, []string{extID})
+	out, err := os.ReadFile(prefPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if json.Unmarshal(out, &got) != nil {
+		t.Fatal("prefs parse failed")
+	}
+	settings := got["extensions"].(map[string]any)["settings"].(map[string]any)
+	entry := settings[extID].(map[string]any)
+	if entry["path"] != "/keep/me" || entry["account"] != "social-session" {
+		t.Fatalf("existing extension settings were overwritten: %#v", entry)
+	}
+	ui := got["extensions"].(map[string]any)["ui"].(map[string]any)
+	if ui["developer_mode"] != true {
+		t.Fatalf("developer_mode should be enabled without touching settings: %#v", ui)
+	}
+}
+
+func TestCompleteAssignedExtensionProfileDataCreatesScaffoldOnlyWhenMissing(t *testing.T) {
+	root := t.TempDir()
+	extID := "gggggggggggggggggggggggggggggggg"
+	extDir := filepath.Join(root, "pkg", extID)
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Minimal manifest without key — completion must not delete package.
+	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"t","version":"1","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	userData := filepath.Join(root, "user")
+	args := []string{"--load-extension=" + extDir}
+	var app *App
+	_, scaffolds := app.completeAssignedExtensionProfileData(userData, args)
+	if scaffolds != 1 {
+		t.Fatalf("expected one empty LES scaffold, got %d", scaffolds)
+	}
+	// Second call must not report new scaffolds or wipe anything.
+	_, scaffolds2 := app.completeAssignedExtensionProfileData(userData, args)
+	if scaffolds2 != 0 {
+		t.Fatalf("second complete must not recreate scaffolds: %d", scaffolds2)
+	}
+	les := filepath.Join(userData, "Default", "Local Extension Settings", extID)
+	entries, err := os.ReadDir(les)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("scaffold must stay empty (no fake vault writes): %d entries", len(entries))
+	}
+}

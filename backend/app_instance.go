@@ -233,9 +233,23 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		profile.LastError = startErr.Error()
 		return profile, startErr
 	}
+	// Extension prep is one-shot after assignment: first successful open that
+	// verifies profile data ↔ assigned packages writes a marker. Later starts
+	// only launch the browser (+ window/popup policy). Re-assignment clears it.
+	assignmentFP, assignmentExtIDs := assignmentFingerprintFromLaunchArgs(sanitizedProfileLaunchArgs)
+	extensionPrepReady := isExtensionLaunchPrepReady(userDataDir, assignmentFP)
+	if extensionPrepReady {
+		log.Info("扩展启动就绪标记有效，跳过扩展扫描/修复与启动页收敛",
+			logger.F("profile_id", profileId),
+			logger.F("extension_count", len(assignmentExtIDs)),
+		)
+	}
+
 	// 启动前关闭 Chrome 的“恢复上次会话”，避免上次遗留的扩展 welcome/options 页面
-	// 在重开实例时再次弹出。
-	sanitizeChromeStartupPreferences(userDataDir)
+	// 在重开实例时再次弹出。已就绪环境跳过整文件 Preferences 扫描写入。
+	if !extensionPrepReady {
+		sanitizeChromeStartupPreferences(userDataDir)
+	}
 	if err := ensureBrowserUserDataDirReadyForFreshLaunch(chromeBinaryPath, userDataDir); err != nil {
 		log.Error("浏览器用户目录启动前检查失败", logger.F("profile_id", profileId), logger.F("chrome", chromeBinaryPath), logger.F("dir", userDataDir), logger.F("error", err.Error()))
 		profile.LastError = err.Error()
@@ -246,14 +260,16 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	//     dead guid / partial Google state；只允许在 debug port 就绪后走 runtime
 	//     CDP settings UI 路径，这是 packaged 目标里唯一稳定不会回退成 No Search
 	//     的方案。
-	//   - 非 cloak：仍保留启动前静态 seed 作为兜底。
-	if !isCloakSelectedCore {
+	//   - 非 cloak：仍保留启动前静态 seed 作为兜底；扩展就绪后跳过。
+	if !isCloakSelectedCore && !extensionPrepReady {
 		seedDefaultSearchEngine(userDataDir)
 	}
 
-	// 每次启动时合并默认书签（已存在的 URL 不重复添加）
-	if err := browser.EnsureDefaultBookmarks(userDataDir, a.BookmarkList()); err != nil {
-		log.Error("默认书签写入失败", logger.F("error", err.Error()))
+	// 仅在尚未完成扩展/环境数据对齐时合并默认书签，避免每次启动扫 Bookmarks 文件。
+	if !extensionPrepReady {
+		if err := browser.EnsureDefaultBookmarks(userDataDir, a.BookmarkList()); err != nil {
+			log.Error("默认书签写入失败", logger.F("error", err.Error()))
+		}
 	}
 
 	proxies := a.getLatestProxies()
@@ -484,10 +500,11 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
-	// Wallet/content-script providers key off chrome-extension://<id>. Repair
-	// missing CRX public keys in --load-extension packages before Chrome starts
-	// so path-derived IDs cannot hide Local Extension Settings vault data.
-	a.repairLoadExtensionStableIDs(args)
+	// First post-assignment opens: repair package keys + empty LES scaffolds only.
+	// Never overwrite existing Preferences settings, wallet vaults or cookies.
+	if !extensionPrepReady {
+		a.completeAssignedExtensionProfileData(userDataDir, sanitizedProfileLaunchArgs)
+	}
 	// Final authoritative placement pass: fingerprint/profile/API arguments are
 	// already appended, so stale sizes and maximised/fullscreen flags cannot win.
 	args, removedWindowArgs := sanitizeManagedWindowPlacementArgs(args)
@@ -561,8 +578,8 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				logger.F("max_attempts", maxStartAttempts),
 				logger.F("args", strings.Join(args, " ")),
 			)
-			// 快速单次收敛启动页（v1.7.48 模型）：不阻塞多秒。延迟出现的钱包
-			// 启动页由 finalize 内后台短重试处理，避免多开时串行等待。
+			// 启动就绪时仅单次关闭扩展自动标签：无后台轮询、无实时监听，
+			// 避免误关用户之后主动点开的扩展页或其它标签。
 			finalizeBrowserStartupTabs(stableDebugPort, profileId)
 
 			// 任务栏 badge 数字直接来自实例名字里的数字段：
@@ -587,12 +604,12 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 					logger.F("profile_id", profileId),
 					logger.F("debug_port", stableDebugPort),
 				)
-				// Cloak 内核下只能走 runtime CDP seed。它在后台打开临时 settings tab，
-				// 通过与用户手动“添加 → 设为默认”同一条 UI 路径写入 TemplateURLService。
-				// settings/private API 在 brand-new profile 上常晚于 debug port 就绪，因此
-				// 这里必须异步重试；成功后会写 .boost_search_seeded marker，后续启动跳过。
-				go seedDefaultSearchEngineViaCDPWithRetry(userDataDir, stableDebugPort, 8, 1500*time.Millisecond)
-			} else {
+				// Cloak 内核下只能走 runtime CDP seed。扩展就绪后跳过，避免每次启动
+				// 再扫 settings。
+				if !extensionPrepReady {
+					go seedDefaultSearchEngineViaCDPWithRetry(userDataDir, stableDebugPort, 8, 1500*time.Millisecond)
+				}
+			} else if !extensionPrepReady {
 				if stealthErr := injectStealthToAllPagesWithUA(stableDebugPort, true); stealthErr != nil {
 					log.Warn("反检测脚本注入失败（非致命）",
 						logger.F("profile_id", profileId),
@@ -617,7 +634,9 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				navigateToTargetURLs(stableDebugPort, targetURLs, profileId, isCloakSelectedCore)
 			}
 
-			enforceBrowserWindowBounds(profile.Pid, 1400, 600)
+			// One-shot main environment frame size on this user start only.
+			// Popups/extensions are never forced; sync tile/stack uses user layout.
+			enforceMainEnvironmentWindowOnStart(profile.Pid)
 
 			// crashprobe: 临时停用实例启动后的 Turnstile 自动点击监控，继续收缩每实例后台
 			// CDP 监控/注入链路，验证是否仍会出现 watchdog exit_code=2。
@@ -647,6 +666,27 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 					}
 				}
 			}()
+
+			// First post-assignment open: after browser is up, verify extension
+			// package list ↔ profile data, then skip prep helpers on later starts.
+			if !extensionPrepReady && assignmentFP != "" {
+				launchArgsSnapshot := append([]string{}, sanitizedProfileLaunchArgs...)
+				go func() {
+					defer func() { _ = recover() }()
+					// Complete package keys / empty scaffolds first (never overwrites
+					// existing vaults). Then wait for Chrome to materialize real
+					// Preferences/LES state so wallets and social accounts stay valid.
+					a.completeAssignedExtensionProfileData(userDataDir, launchArgsSnapshot)
+					for _, wait := range []time.Duration{800 * time.Millisecond, 2 * time.Second, 3 * time.Second} {
+						time.Sleep(wait)
+						if verifyAssignedExtensionsAgainstProfileData(userDataDir, launchArgsSnapshot) {
+							a.maybeMarkExtensionLaunchReady(profileId, userDataDir, assignmentFP, launchArgsSnapshot, assignmentExtIDs)
+							return
+						}
+					}
+					a.maybeMarkExtensionLaunchReady(profileId, userDataDir, assignmentFP, launchArgsSnapshot, assignmentExtIDs)
+				}()
+			}
 
 			a.emitBrowserInstanceStarted(profile, false)
 

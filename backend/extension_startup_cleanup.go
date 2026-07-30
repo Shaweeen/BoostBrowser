@@ -148,44 +148,29 @@ type startupPageCloseAction struct {
 }
 
 const (
-	// Background-only recheck for wallet pages that open after debug-ready.
-	// Must not run on the start critical path (see finalizeBrowserStartupTabs).
-	startupPageCleanupObservationWindow = 1200 * time.Millisecond
-	startupPageCleanupPollInterval      = 100 * time.Millisecond
-	startupPageCleanupQuietPasses       = 2
-	startupPageCloseTargetTimeout       = 800 * time.Millisecond
+	// Single-shot close only. No long-lived polling, no real-time tab watcher,
+	// and no delayed window that could close user-opened extension pages.
+	startupPageCloseTargetTimeout = 800 * time.Millisecond
 )
 
+// finalizeBrowserStartupTabs runs exactly once at environment debug-ready:
+// one CDP list snapshot, close automatic extension startup pages + extra blanks,
+// ensure a single natural blank, then disconnect. No background recheck, no
+// multi-second observation, no continuous Target events — so tabs the user
+// later opens (toolbar extension click, manual navigation) are never auto-closed.
 func finalizeBrowserStartupTabs(debugPort int, profileId string) {
 	if debugPort <= 0 {
 		return
 	}
-	// Fast path restored to the v1.7.48 model: one CDP snapshot, close automatic
-	// extension startup pages + extra blanks, ensure a single natural blank, then
-	// return so multi-open is not blocked for seconds. Delayed wallet onboarding
-	// tabs are handled by a short non-blocking background recheck only.
 	closedExtensions, closedBlanks, blankEnsured := runStartupTabCleanupOnce(debugPort)
 	if closedExtensions > 0 || closedBlanks > 0 || blankEnsured {
-		logger.New("Browser").Info("启动页面已收敛为唯一空白页",
+		logger.New("Browser").Info("启动时已单次关闭扩展自动标签（无持续监听）",
 			logger.F("profile_id", profileId),
 			logger.F("closed_extension_pages", closedExtensions),
 			logger.F("closed_extra_blank_pages", closedBlanks),
 			logger.F("blank_ensured", blankEnsured),
 		)
 	}
-	go func() {
-		defer func() { _ = recover() }()
-		// Wallet extensions may open onboarding after first debug-ready; recheck
-		// briefly without holding the environment start transaction.
-		ext, blanks := runStartupTabCleanupDelayed(debugPort)
-		if ext > 0 || blanks > 0 {
-			logger.New("Browser").Info("延迟扩展启动页已关闭",
-				logger.F("profile_id", profileId),
-				logger.F("closed_extension_pages", ext),
-				logger.F("closed_extra_blank_pages", blanks),
-			)
-		}
-	}()
 }
 
 func runStartupTabCleanupOnce(debugPort int) (closedExtensions, closedBlanks int, blankEnsured bool) {
@@ -225,30 +210,7 @@ func runStartupTabCleanupOnce(debugPort int) (closedExtensions, closedBlanks int
 	return closedExtensions, closedBlanks, blankEnsured
 }
 
-func runStartupTabCleanupDelayed(debugPort int) (int, int) {
-	browserWsURL, err := getBrowserWebSocketURL(debugPort)
-	if err != nil {
-		return 0, 0
-	}
-	browserClient, err := newRabbyCDPClient(browserWsURL)
-	if err != nil {
-		return 0, 0
-	}
-	defer browserClient.close()
-	maxPasses := int(startupPageCleanupObservationWindow/startupPageCleanupPollInterval) + 1
-	return closeUnwantedStartupPagesDuringLaunch(
-		func() ([]cdpTarget, error) { return listCDPTargets(debugPort) },
-		func(targetID string) error {
-			_, closeErr := browserClient.call("Target.closeTarget", map[string]any{"targetId": targetID}, startupPageCloseTargetTimeout)
-			return closeErr
-		},
-		time.Sleep,
-		maxPasses,
-		startupPageCleanupQuietPasses,
-	)
-}
-
-// closeUnwantedStartupPagesOnce is the fast v1.7.48-style single snapshot pass.
+// closeUnwantedStartupPagesOnce is the only startup tab action: one snapshot.
 func closeUnwantedStartupPagesOnce(
 	fetch func() ([]cdpTarget, error),
 	closeTarget func(string) error,
@@ -271,72 +233,6 @@ func closeUnwantedStartupPagesOnce(
 			closedExtensions++
 		case startupPageCloseExtraBlank:
 			closedBlanks++
-		}
-	}
-	return closedExtensions, closedBlanks
-}
-
-func closeUnwantedStartupPagesDuringLaunch(
-	fetch func() ([]cdpTarget, error),
-	closeTarget func(string) error,
-	pause func(time.Duration),
-	maxPasses int,
-	quietPassesRequired int,
-) (int, int) {
-	if fetch == nil || closeTarget == nil || maxPasses <= 0 {
-		return 0, 0
-	}
-	if quietPassesRequired <= 0 {
-		quietPassesRequired = 1
-	}
-
-	closedTargetIDs := make(map[string]struct{})
-	closedExtensions := 0
-	closedBlanks := 0
-	quietPasses := 0
-
-	for pass := 0; pass < maxPasses; pass++ {
-		targets, err := fetch()
-		closedExtensionThisPass := false
-		liveExtensionPages := false
-		if err == nil {
-			for _, target := range targets {
-				if shouldCloseAutomaticExtensionStartupTarget(target) {
-					liveExtensionPages = true
-					break
-				}
-			}
-			for _, action := range planStartupPageCleanup(targets) {
-				if _, alreadyClosed := closedTargetIDs[action.targetID]; alreadyClosed {
-					continue
-				}
-				if closeTarget(action.targetID) != nil {
-					continue
-				}
-				closedTargetIDs[action.targetID] = struct{}{}
-				switch action.kind {
-				case startupPageCloseExtension:
-					closedExtensions++
-					closedExtensionThisPass = true
-				case startupPageCloseExtraBlank:
-					closedBlanks++
-				}
-			}
-		}
-
-		// Exit once the page set is quiet: no live automatic extension page and
-		// no close action this pass. This covers both "no extension UI ever" and
-		// "extension UI already closed", while a late MetaMask tab resets quiet.
-		if err != nil || closedExtensionThisPass || liveExtensionPages {
-			quietPasses = 0
-		} else {
-			quietPasses++
-			if quietPasses >= quietPassesRequired {
-				break
-			}
-		}
-		if pass+1 < maxPasses && pause != nil {
-			pause(startupPageCleanupPollInterval)
 		}
 	}
 	return closedExtensions, closedBlanks
@@ -434,11 +330,8 @@ func isNaturalBlankPageTarget(target cdpTarget) bool {
 }
 
 func shouldCloseAutomaticExtensionStartupTarget(target cdpTarget) bool {
-	// This classifier is called only inside the pre-handoff startup snapshot.
-	// At that point BrowserStudio has not navigated an application URL and the
-	// minimized window is not available for user interaction, so every top-level
-	// extension page in the snapshot belongs to extension startup. Opener
-	// metadata is intentionally irrelevant and no content is inspected.
+	// Only the single startup snapshot may call this. After handoff there is no
+	// watcher, so user-opened extension tabs (toolbar click) are never closed.
 	return strings.EqualFold(strings.TrimSpace(target.Type), "page") &&
 		isExtensionStartupURL(target.URL)
 }

@@ -179,10 +179,7 @@ func (a *App) waitBrowserDebugReadyAsync(profileId string, debugPort int, timeou
 		logger.F("profile_id", profileId),
 		logger.F("debug_port", debugPort),
 	)
-	// This is the mutually exclusive delayed-ready startup path. The browser is
-	// still minimized and has not been handed to the user, so run the same
-	// bounded startup-tab finalizer used by the normal ready path before any
-	// window restore or user interaction can occur.
+	// Delayed-ready: same single-shot tab close only — no long poll / watcher.
 	finalizeBrowserStartupTabs(debugPort, profileId)
 	// 延迟就绪后也注入反检测脚本 + 启动 Turnstile 自动点击
 	// CloakBrowser 内核完全跳过：内核层已处理身份/反检测，
@@ -209,8 +206,9 @@ func (a *App) waitBrowserDebugReadyAsync(profileId string, debugPort int, timeou
 		// startTurnstileMonitor(debugPort, profileId)
 	}
 
+	// Delayed-ready is still the same user start; size only the main frame once.
 	if snapshot.Pid > 0 {
-		enforceBrowserWindowBounds(snapshot.Pid, 1400, 600)
+		enforceMainEnvironmentWindowOnStart(snapshot.Pid)
 	}
 
 	a.emitBrowserInstanceUpdated(snapshot)

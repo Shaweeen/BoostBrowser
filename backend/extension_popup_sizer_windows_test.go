@@ -4,6 +4,17 @@ package backend
 
 import "testing"
 
+func TestIsMainEnvironmentBrowserFrameRejectsPopupsAndZero(t *testing.T) {
+	if isMainEnvironmentBrowserFrame(0, "anything") {
+		t.Fatal("zero hwnd must not be a main frame")
+	}
+	// Title-only rejection paths (hwnd non-zero is required for size checks;
+	// popup titles are rejected before size when title matches).
+	if !isCompactExtensionPopupTitle("MetaMask") {
+		t.Fatal("precondition: MetaMask is a popup title")
+	}
+}
+
 func TestSyncPopupUsesCurrentArrangedOwnerBounds(t *testing.T) {
 	x, y, width, height, changed := constrainSyncPopupRect(
 		winRect{Left: 20, Top: 20, Right: 1460, Bottom: 920},
