@@ -110,6 +110,18 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 		}
 	}
 	resolvedWindows := findProcessTreeWindows(rootPIDs)
+	missing := 0
+	for _, p := range candidates {
+		if cachedWindows[p.ProfileId] == 0 && resolvedWindows[p.Pid] == 0 && p.Pid > 0 {
+			missing++
+		}
+	}
+	// Multi-open often leaves top-level frames unregistered for a short moment.
+	// One cheap retry avoids an empty/unusable assistant list right after batch start.
+	if missing > 0 && missing >= (len(candidates)+1)/2 {
+		time.Sleep(150 * time.Millisecond)
+		resolvedWindows = findProcessTreeWindows(rootPIDs)
+	}
 	result := make([]SyncProfileInfo, len(candidates))
 	for i, p := range candidates {
 		info := SyncProfileInfo{ProfileId: p.ProfileId, ProfileName: p.ProfileName, Pid: p.Pid, DebugPort: p.DebugPort, Running: p.Running, BadgeNumber: extractBadgeNumberFromName(p.ProfileName)}

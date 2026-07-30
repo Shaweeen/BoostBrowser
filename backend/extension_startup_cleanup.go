@@ -150,11 +150,13 @@ type startupPageCloseAction struct {
 const (
 	// Observation stays bounded so multi-window batch starts remain responsive,
 	// while quiet-pass early exit releases machines that never open extension UI.
-	startupPageCleanupObservationWindow = 3500 * time.Millisecond
+	// Kept short: each environment blocks start until this window ends when wallet
+	// onboarding keeps reopening; multi-open multiplies that cost.
+	startupPageCleanupObservationWindow = 1800 * time.Millisecond
 	startupPageCleanupPollInterval      = 100 * time.Millisecond
 	// Quiet passes apply whenever no automatic extension page is visible, not
 	// only after the first close. Delayed MetaMask tabs still reset the counter.
-	startupPageCleanupQuietPasses = 8
+	startupPageCleanupQuietPasses = 4
 )
 
 func finalizeBrowserStartupTabs(debugPort int, profileId string) {

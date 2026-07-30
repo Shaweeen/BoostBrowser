@@ -106,10 +106,31 @@ func (a *App) PrepareWindowSyncRuntimeSnapshot() int {
 	a.browserMgr.Mutex.Lock()
 	a.persistBrowserRuntimeSnapshotLocked()
 	count := 0
+	missingHWND := 0
 	for _, profile := range a.browserMgr.Profiles {
-		if profile != nil && profile.Running && profile.Pid > 0 {
-			count++
+		if profile == nil || !profile.Running || profile.Pid <= 0 {
+			continue
 		}
+		count++
+	}
+	// Re-resolve once when windows are still settling after a multi-open batch.
+	// The first EnumWindows pass often misses frames that become visible ~100ms later.
+	path := a.browserRuntimeSnapshotPath()
+	if data, err := os.ReadFile(path); err == nil {
+		var snap browserRuntimeSnapshot
+		if json.Unmarshal(data, &snap) == nil {
+			for _, entry := range snap.Entries {
+				if entry.PID > 0 && (entry.HWND == 0 || !isWindow(windows.HWND(entry.HWND))) {
+					missingHWND++
+				}
+			}
+		}
+	}
+	if count > 0 && missingHWND > 0 {
+		a.browserMgr.Mutex.Unlock()
+		time.Sleep(180 * time.Millisecond)
+		a.browserMgr.Mutex.Lock()
+		a.persistBrowserRuntimeSnapshotLocked()
 	}
 	a.browserMgr.Mutex.Unlock()
 	return count
