@@ -161,6 +161,54 @@ func TestAutomaticExtensionStartupCleanupKeepsBlankAndWebPages(t *testing.T) {
 	}
 }
 
+func TestPlanCollapseToSoleAboutBlankNeverClosesLastTabFirst(t *testing.T) {
+	// Single content tab: must navigate in place, never close it.
+	plan := planCollapseToSoleAboutBlank([]cdpTarget{
+		{ID: "only", Type: "page", URL: "https://example.com/"},
+	})
+	if plan.keepID != "only" || !plan.navigateKeepBlank || len(plan.closeIDs) != 0 || plan.createBlankIfEmpty {
+		t.Fatalf("single content tab must navigate in place: %+v", plan)
+	}
+
+	// Content + blank: keep blank, close content (safe — blank survivor exists).
+	plan = planCollapseToSoleAboutBlank([]cdpTarget{
+		{ID: "web", Type: "page", URL: "https://example.com/"},
+		{ID: "blank", Type: "page", URL: "about:blank"},
+	})
+	if plan.keepID != "blank" || plan.navigateKeepBlank || len(plan.closeIDs) != 1 || plan.closeIDs[0] != "web" {
+		t.Fatalf("blank survivor plan mismatch: %+v", plan)
+	}
+
+	// Only NTP: keep it and rewrite to about:blank.
+	plan = planCollapseToSoleAboutBlank([]cdpTarget{
+		{ID: "ntp", Type: "page", URL: "chrome://new-tab-page/"},
+	})
+	if plan.keepID != "ntp" || !plan.navigateKeepBlank || len(plan.closeIDs) != 0 {
+		t.Fatalf("ntp must be rewritten in place: %+v", plan)
+	}
+
+	// Multiple content tabs, no blank: keep first, close rest after navigate.
+	plan = planCollapseToSoleAboutBlank([]cdpTarget{
+		{ID: "a", Type: "page", URL: "https://a.example/"},
+		{ID: "b", Type: "page", URL: "https://b.example/"},
+		{ID: "c", Type: "page", URL: "https://c.example/"},
+	})
+	if plan.keepID != "a" || !plan.navigateKeepBlank || len(plan.closeIDs) != 2 {
+		t.Fatalf("multi content without blank: %+v", plan)
+	}
+	for _, id := range plan.closeIDs {
+		if id == plan.keepID {
+			t.Fatal("plan must never close the survivor")
+		}
+	}
+
+	// Empty: create blank.
+	plan = planCollapseToSoleAboutBlank(nil)
+	if !plan.createBlankIfEmpty || plan.keepID != "" {
+		t.Fatalf("empty targets must create blank: %+v", plan)
+	}
+}
+
 func TestCloseAutomaticExtensionStartupPagesLeavesBlanksUntouched(t *testing.T) {
 	fetches := 0
 	closed := map[string]bool{}
@@ -179,6 +227,7 @@ func TestCloseAutomaticExtensionStartupPagesLeavesBlanksUntouched(t *testing.T) 
 			closed[targetID] = true
 			return nil
 		},
+		nil,
 	)
 	if fetches != 1 {
 		t.Fatalf("must use a single snapshot: fetches=%d", fetches)
@@ -188,6 +237,47 @@ func TestCloseAutomaticExtensionStartupPagesLeavesBlanksUntouched(t *testing.T) 
 	}
 	if closed["blank-1"] || closed["blank-2"] || closed["worker"] || closed["web"] {
 		t.Fatalf("blanks, workers and web pages must never be closed: %#v", closed)
+	}
+}
+
+func TestCloseAutomaticExtensionStartupPagesNeverKillsLastTab(t *testing.T) {
+	blankCreated := false
+	closed := map[string]bool{}
+	n := closeAutomaticExtensionStartupPagesOnce(
+		func() ([]cdpTarget, error) {
+			return []cdpTarget{
+				{ID: "mm", Type: "page", URL: "chrome-extension://wallet/onboarding.html"},
+			}, nil
+		},
+		func(targetID string) error {
+			closed[targetID] = true
+			return nil
+		},
+		func() { blankCreated = true },
+	)
+	if !blankCreated {
+		t.Fatal("must create about:blank before closing the only extension page")
+	}
+	if n != 1 || !closed["mm"] {
+		t.Fatalf("extension page should still close after blank is ensured: n=%d closed=%#v", n, closed)
+	}
+
+	// Without ensureBlank factory, leave the sole page alone.
+	closed = map[string]bool{}
+	n = closeAutomaticExtensionStartupPagesOnce(
+		func() ([]cdpTarget, error) {
+			return []cdpTarget{
+				{ID: "mm", Type: "page", URL: "chrome-extension://wallet/onboarding.html"},
+			}, nil
+		},
+		func(targetID string) error {
+			closed[targetID] = true
+			return nil
+		},
+		nil,
+	)
+	if n != 0 || closed["mm"] {
+		t.Fatalf("without blank factory sole page must survive: n=%d closed=%#v", n, closed)
 	}
 }
 

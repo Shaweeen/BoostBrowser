@@ -225,6 +225,15 @@ func (a *App) FinalizeEnvironmentTabsForUserHandoff() map[string]interface{} {
 		"profiles":   0,
 		"closedTabs": 0,
 	}
+	// Sync assistant is a separate process with its own handoff flag. Main
+	// already collapses tabs when opening the panel; running it again from the
+	// panel races Target.closeTarget and can close the last page → Chromium
+	// destroys the whole environment window ("突然关闭").
+	if a != nil && a.panelMode {
+		result["skipped"] = true
+		result["reason"] = "panel_never_owns_tab_handoff"
+		return result
+	}
 	if !environmentTabsUserHandoffDone.CompareAndSwap(false, true) {
 		result["skipped"] = true
 		result["reason"] = "already_handed_off"
@@ -260,9 +269,85 @@ func (a *App) FinalizeEnvironmentTabsForUserHandoff() map[string]interface{} {
 	return result
 }
 
+func isBlankOrNewTabURL(raw string) bool {
+	u := strings.ToLower(strings.TrimSpace(raw))
+	return u == "about:blank" || u == "about:blank#" ||
+		u == "chrome://newtab" || u == "chrome://newtab/" ||
+		u == "chrome://new-tab-page" || u == "chrome://new-tab-page/" ||
+		strings.HasPrefix(u, "chrome://new-tab-page/")
+}
+
+func isExactAboutBlankURL(raw string) bool {
+	u := strings.ToLower(strings.TrimSpace(raw))
+	return u == "about:blank" || u == "about:blank#"
+}
+
+// collapseTabPlan describes a last-tab-safe collapse: always keep one page
+// alive, navigate it to about:blank before closing anything else. Closing the
+// final Chromium page destroys the whole browser window — that is the multi-
+// environment "从属突然关闭" failure mode when handoff races or closes first.
+type collapseTabPlan struct {
+	keepID             string
+	navigateKeepBlank  bool
+	closeIDs           []string
+	createBlankIfEmpty bool
+}
+
+func planCollapseToSoleAboutBlank(targets []cdpTarget) collapseTabPlan {
+	pages := make([]cdpTarget, 0, len(targets))
+	for _, t := range targets {
+		if t.ID == "" || !strings.EqualFold(strings.TrimSpace(t.Type), "page") {
+			continue
+		}
+		pages = append(pages, t)
+	}
+	if len(pages) == 0 {
+		return collapseTabPlan{createBlankIfEmpty: true}
+	}
+
+	var keep cdpTarget
+	var closeIDs []string
+	foundBlankLike := false
+	for _, t := range pages {
+		if isBlankOrNewTabURL(t.URL) {
+			if !foundBlankLike {
+				keep = t
+				foundBlankLike = true
+				continue
+			}
+			closeIDs = append(closeIDs, t.ID)
+			continue
+		}
+		closeIDs = append(closeIDs, t.ID)
+	}
+	if !foundBlankLike {
+		// No blank tab yet: promote the first page and navigate in place.
+		// Never close it — that would be the last tab and kill the window.
+		keep = pages[0]
+		closeIDs = closeIDs[:0]
+		for i := 1; i < len(pages); i++ {
+			closeIDs = append(closeIDs, pages[i].ID)
+		}
+		return collapseTabPlan{
+			keepID:            keep.ID,
+			navigateKeepBlank: true,
+			closeIDs:          closeIDs,
+		}
+	}
+	return collapseTabPlan{
+		keepID:            keep.ID,
+		navigateKeepBlank: !isExactAboutBlankURL(keep.URL),
+		closeIDs:          closeIDs,
+	}
+}
+
 // collapseEnvironmentTabsToSoleAboutBlank closes every page that is not
 // about:blank, keeps one blank (navigating chrome://newtab → about:blank in
 // place), or creates about:blank if none remain. One-shot, no watcher.
+//
+// Safety: never Target.closeTarget the last remaining page before a blank
+// survivor exists. Chromium exits the whole environment window when the last
+// tab closes — that looked like "从属强制退出" under multi-open + sync handoff.
 func collapseEnvironmentTabsToSoleAboutBlank(debugPort int) int {
 	if debugPort <= 0 {
 		return 0
@@ -278,6 +363,9 @@ func collapseEnvironmentTabsToSoleAboutBlank(debugPort int) int {
 	defer browserClient.close()
 
 	closeTarget := func(id string) error {
+		if strings.TrimSpace(id) == "" {
+			return fmt.Errorf("empty target id")
+		}
 		_, e := browserClient.call("Target.closeTarget", map[string]any{"targetId": id}, startupPageCloseTargetTimeout)
 		return e
 	}
@@ -285,51 +373,48 @@ func collapseEnvironmentTabsToSoleAboutBlank(debugPort int) int {
 	if err != nil {
 		return 0
 	}
-
-	closed := 0
-	var keepBlank *cdpTarget
-	for i := range targets {
-		t := &targets[i]
-		if t.ID == "" || !strings.EqualFold(strings.TrimSpace(t.Type), "page") {
-			continue
-		}
-		u := strings.ToLower(strings.TrimSpace(t.URL))
-		isBlank := u == "about:blank" || u == "about:blank#" ||
-			u == "chrome://newtab" || u == "chrome://newtab/" ||
-			u == "chrome://new-tab-page" || u == "chrome://new-tab-page/" ||
-			strings.HasPrefix(u, "chrome://new-tab-page/")
-		if isBlank {
-			if keepBlank == nil {
-				keepBlank = t
-			} else if closeTarget(t.ID) == nil {
-				closed++
-			}
-			continue
-		}
-		if closeTarget(t.ID) == nil {
-			closed++
-		}
-	}
-	if keepBlank == nil {
+	plan := planCollapseToSoleAboutBlank(targets)
+	if plan.createBlankIfEmpty {
 		_, _ = browserClient.call("Target.createTarget", map[string]any{"url": "about:blank"}, 1500*time.Millisecond)
-		return closed
+		return 0
 	}
-	// Foundation wants about:blank; rewrite NTP shell in place on this same tab.
-	u := strings.ToLower(strings.TrimSpace(keepBlank.URL))
-	if u != "about:blank" && u != "about:blank#" {
-		if strings.TrimSpace(keepBlank.WebSocketDebuggerUrl) == "" {
+
+	// 1) Ensure the survivor is about:blank BEFORE closing siblings.
+	if plan.navigateKeepBlank && plan.keepID != "" {
+		var keepTarget cdpTarget
+		for _, t := range targets {
+			if t.ID == plan.keepID {
+				keepTarget = t
+				break
+			}
+		}
+		if strings.TrimSpace(keepTarget.WebSocketDebuggerUrl) == "" {
 			if all, e := listCDPTargets(debugPort); e == nil {
 				for _, t := range all {
-					if t.ID == keepBlank.ID && strings.TrimSpace(t.WebSocketDebuggerUrl) != "" {
-						*keepBlank = t
+					if t.ID == plan.keepID && strings.TrimSpace(t.WebSocketDebuggerUrl) != "" {
+						keepTarget = t
 						break
 					}
 				}
 			}
 		}
-		if strings.TrimSpace(keepBlank.WebSocketDebuggerUrl) != "" {
-			_, _ = cdpCallTarget(*keepBlank, "Page.enable", map[string]any{})
-			_, _ = cdpCallTarget(*keepBlank, "Page.navigate", map[string]any{"url": "about:blank"})
+		if strings.TrimSpace(keepTarget.WebSocketDebuggerUrl) != "" {
+			_, _ = cdpCallTarget(keepTarget, "Page.enable", map[string]any{})
+			_, _ = cdpCallTarget(keepTarget, "Page.navigate", map[string]any{"url": "about:blank"})
+		} else {
+			// No page WS: open a blank first so closing siblings cannot kill the window.
+			_, _ = browserClient.call("Target.createTarget", map[string]any{"url": "about:blank"}, 1500*time.Millisecond)
+		}
+	}
+
+	// 2) Close only non-survivor pages. Never close keepID.
+	closed := 0
+	for _, id := range plan.closeIDs {
+		if id == plan.keepID {
+			continue
+		}
+		if closeTarget(id) == nil {
+			closed++
 		}
 	}
 	return closed
@@ -346,20 +431,27 @@ func runStartupTabCleanupOnce(debugPort int) int {
 	}
 	defer browserClient.close()
 
+	ensureBlank := func() {
+		_, _ = browserClient.call("Target.createTarget", map[string]any{"url": "about:blank"}, 1500*time.Millisecond)
+	}
 	return closeAutomaticExtensionStartupPagesOnce(
 		func() ([]cdpTarget, error) { return listCDPTargets(debugPort) },
 		func(targetID string) error {
 			_, closeErr := browserClient.call("Target.closeTarget", map[string]any{"targetId": targetID}, startupPageCloseTargetTimeout)
 			return closeErr
 		},
+		ensureBlank,
 	)
 }
 
 // closeAutomaticExtensionStartupPagesOnce closes only automatic extension
 // startup pages. It does not open blanks, close blanks, or manage new-tab pages.
+// If closing those pages would remove the last page, ensureBlank is called first
+// so Chromium does not destroy the environment window.
 func closeAutomaticExtensionStartupPagesOnce(
 	fetch func() ([]cdpTarget, error),
 	closeTarget func(string) error,
+	ensureBlank func(),
 ) int {
 	if fetch == nil || closeTarget == nil {
 		return 0
@@ -368,15 +460,41 @@ func closeAutomaticExtensionStartupPagesOnce(
 	if err != nil {
 		return 0
 	}
-	closed := 0
+	pageCount := 0
+	closeIDs := make([]string, 0)
+	hasSurvivor := false
 	for _, target := range targets {
-		if target.ID == "" || !shouldCloseAutomaticExtensionStartupTarget(target) {
+		if target.ID == "" || !strings.EqualFold(strings.TrimSpace(target.Type), "page") {
 			continue
 		}
-		if closeTarget(target.ID) == nil {
+		pageCount++
+		if shouldCloseAutomaticExtensionStartupTarget(target) {
+			closeIDs = append(closeIDs, target.ID)
+			continue
+		}
+		hasSurvivor = true
+	}
+	if len(closeIDs) == 0 {
+		return 0
+	}
+	// Closing every page (only extension auto-pages present) would exit Chrome.
+	if !hasSurvivor && ensureBlank != nil {
+		ensureBlank()
+		// Re-check after blank is created; still proceed to close extensions.
+	} else if !hasSurvivor && ensureBlank == nil {
+		// Without a blank factory, leave at least one page alive.
+		closeIDs = closeIDs[:len(closeIDs)-1]
+		if len(closeIDs) == 0 {
+			return 0
+		}
+	}
+	closed := 0
+	for _, id := range closeIDs {
+		if closeTarget(id) == nil {
 			closed++
 		}
 	}
+	_ = pageCount
 	return closed
 }
 

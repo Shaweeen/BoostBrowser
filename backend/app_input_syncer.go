@@ -179,16 +179,63 @@ func focusedCDPTarget(debugPort int) (cdpTarget, bool) {
 	if len(pages) == 1 {
 		return pages[0], true
 	}
+	// Wallet popups/unlock pages often sit alongside the main tab. Prefer the
+	// document that actually has OS/DOM focus, then one with an active editable
+	// (password/auth input), and only fall back to the first /json page.
+	const focusProbe = `(() => {
+		const e = document.activeElement;
+		const editable = !!(e && (
+			e.tagName === 'INPUT' || e.tagName === 'TEXTAREA' ||
+			(typeof e.isContentEditable === 'boolean' && e.isContentEditable)
+		));
+		return {focused: !!document.hasFocus(), editable: editable};
+	})()`
+	var focusedAny, editableAny cdpTarget
+	haveFocused, haveEditable := false, false
 	for _, target := range pages {
 		result, err := cdpCallTarget(target, "Runtime.evaluate", map[string]any{
-			"expression": "document.hasFocus()", "returnByValue": true,
+			"expression": focusProbe, "returnByValue": true,
 		})
 		if err != nil {
 			continue
 		}
 		value, ok := cdpRuntimeValue(result)
-		focused, _ := value.(bool)
-		if ok && focused {
+		if !ok {
+			continue
+		}
+		info, _ := value.(map[string]any)
+		if info == nil {
+			// Some CDP stacks return nested objects; tolerate bool-only legacy.
+			if focused, isBool := value.(bool); isBool && focused && !haveFocused {
+				focusedAny = target
+				haveFocused = true
+			}
+			continue
+		}
+		focused, _ := info["focused"].(bool)
+		editable, _ := info["editable"].(bool)
+		if focused && editable {
+			return target, true
+		}
+		if focused && !haveFocused {
+			focusedAny = target
+			haveFocused = true
+		}
+		if editable && !haveEditable {
+			editableAny = target
+			haveEditable = true
+		}
+	}
+	if haveFocused {
+		return focusedAny, true
+	}
+	if haveEditable {
+		return editableAny, true
+	}
+	// Prefer an open wallet/extension surface over a random first tab when focus
+	// probes all fail (common while the popup is still attaching).
+	for _, target := range pages {
+		if extensionLikeCDPTarget(target) {
 			return target, true
 		}
 	}
@@ -249,6 +296,25 @@ func cdpTargetURLDocument(raw string) string {
 	return raw
 }
 
+func chromeExtensionID(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	const prefix = "chrome-extension://"
+	if !strings.HasPrefix(raw, prefix) {
+		return ""
+	}
+	rest := raw[len(prefix):]
+	if idx := strings.IndexByte(rest, '/'); idx >= 0 {
+		rest = rest[:idx]
+	}
+	if idx := strings.IndexByte(rest, '?'); idx >= 0 {
+		rest = rest[:idx]
+	}
+	if idx := strings.IndexByte(rest, '#'); idx >= 0 {
+		rest = rest[:idx]
+	}
+	return rest
+}
+
 func syncCDPTargetMatchScore(master, candidate cdpTarget) int {
 	if !strings.EqualFold(strings.TrimSpace(master.Type), strings.TrimSpace(candidate.Type)) {
 		return -1
@@ -263,19 +329,48 @@ func syncCDPTargetMatchScore(master, candidate cdpTarget) int {
 	} else if masterURL != "" && cdpTargetURLDocument(masterURL) == cdpTargetURLDocument(candidateURL) {
 		score += 4000
 	}
+	// Same extension ID (MetaMask/Rabby unlock vs popup hash routes) still maps
+	// password/auth surfaces across followers even when the path fragment differs.
+	if masterID := chromeExtensionID(masterURL); masterID != "" {
+		if candidateID := chromeExtensionID(candidateURL); candidateID == masterID {
+			score += 2500
+		}
+	}
 	if master.Title != "" && strings.EqualFold(strings.TrimSpace(master.Title), strings.TrimSpace(candidate.Title)) {
 		score += 1000
 	}
 	return score
 }
 
+// extensionLikeCDPTarget is any top-level chrome-extension document. Wallet
+// unlock/home/onboarding pages are full extension documents, not only popup.html.
+func extensionLikeCDPTarget(target cdpTarget) bool {
+	url := strings.ToLower(strings.TrimSpace(target.URL))
+	return strings.HasPrefix(url, "chrome-extension://")
+}
+
 func popupLikeCDPTarget(target cdpTarget) bool {
 	if strings.TrimSpace(target.OpenerID) != "" {
 		return true
 	}
+	if !extensionLikeCDPTarget(target) {
+		return false
+	}
 	url := strings.ToLower(strings.TrimSpace(target.URL))
-	return strings.HasPrefix(url, "chrome-extension://") &&
-		(strings.Contains(url, "popup") || strings.Contains(url, "notification") || strings.Contains(url, "confirm"))
+	// Wallet password/auth/number UIs live on popup, notification, unlock, home,
+	// onboard, confirm, and sign routes — not only *popup* in the path.
+	for _, token := range []string{
+		"popup", "notification", "confirm", "unlock", "password",
+		"onboard", "onboarding", "sign", "approve", "connect",
+		"permission", "home.html", "index.html", "fullscreen",
+	} {
+		if strings.Contains(url, token) {
+			return true
+		}
+	}
+	// Any remaining chrome-extension page (unknown wallet) still needs follower
+	// target matching rather than falling through to the first /json tab.
+	return true
 }
 
 func matchingFollowerCDPTarget(master cdpTarget, debugPort int, waitForPopup bool) (cdpTarget, bool) {
@@ -393,6 +488,8 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	atomic.StoreInt32(&s.paused, 0)
 	atomic.StoreInt32(&s.escapeDown, 0)
 	atomic.StoreUint64(&s.dispatchGeneration, 0)
+	atomic.StoreInt32(&s.layoutUpdating, 0)
+	atomic.StoreInt32(&s.popupUpdating, 0)
 	atomic.StoreInt32(&s.mouseEnabled, 1)
 	atomic.StoreInt32(&s.keyEnabled, 1)
 	// Default to immediate delivery. Delay is enabled only after the user
@@ -1535,7 +1632,10 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 		}
 	}()
 
-	if nCode < 0 || !s.canDispatch() || atomic.LoadInt32(&s.mouseEnabled) == 0 || !s.isMasterForeground() {
+	// Do not require isMasterForeground(): the always-on-top sync panel often
+	// keeps focus while the user clicks the master browser, which previously
+	// dropped every mouse event and made sync appear "started but dead".
+	if nCode < 0 || !s.canDispatch() || atomic.LoadInt32(&s.mouseEnabled) == 0 {
 		return callNextHook(nCode, wParam, lParam)
 	}
 	if lParam == 0 {
@@ -1559,6 +1659,10 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 
 	if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN {
 		insidePage := pointInsideChromeRender(s.masterHwnd, screenX, screenY)
+		// Focus can move from main tab → wallet popup (or between extension
+		// routes). Drop the short-lived master CDP target cache so the next
+		// key/mouse event re-resolves the focused document.
+		s.invalidateMasterCDPTargetCache()
 		if insidePage {
 			atomic.StoreInt32(&s.pageKeyboardFocus, 1)
 			atomic.StoreInt32(&s.activePageMouseButton, int32(msg))
@@ -1764,7 +1868,22 @@ func (s *InputSyncer) keyHookCallback(nCode int, wParam uintptr, lParam uintptr)
 		}
 		return 1
 	}
-	if !s.canDispatch() || atomic.LoadInt32(&s.keyEnabled) == 0 || atomic.LoadInt32(&s.pointerInsideMaster) == 0 || !s.isMasterForeground() {
+	// Keyboard: allow when pointer is inside master, or master/owned chrome is FG.
+	// Requiring both FG and pointer broke typing when the sync panel held focus.
+	if !s.canDispatch() || atomic.LoadInt32(&s.keyEnabled) == 0 {
+		return callNextHook(nCode, wParam, lParam)
+	}
+	if atomic.LoadInt32(&s.pointerInsideMaster) == 0 && !s.isMasterForeground() {
+		return callNextHook(nCode, wParam, lParam)
+	}
+
+	// Never replay window/tab close chords to followers. Under multi-open sync
+	// a single Ctrl+W / Ctrl+Shift+W / Alt+F4 on master would tear down every
+	// follower tab or the whole environment window.
+	ctrlPressed := isKeyDown(VK_CONTROL)
+	altPressed := isKeyDown(VK_MENU)
+	shiftPressed := isKeyDown(VK_SHIFT)
+	if isBrowserWindowCloseChord(vk, ctrlPressed, altPressed, shiftPressed) {
 		return callNextHook(nCode, wParam, lParam)
 	}
 
@@ -1773,8 +1892,6 @@ func (s *InputSyncer) keyHookCallback(nCode int, wParam uintptr, lParam uintptr)
 	followers := s.getFollowerSnapshot()
 
 	// 检测修饰键状态
-	ctrlPressed := isKeyDown(VK_CONTROL)
-	altPressed := isKeyDown(VK_MENU)
 	pageFocused := atomic.LoadInt32(&s.pageKeyboardFocus) == 1
 	if ctrlPressed && isBrowserZoomVirtualKey(vk) {
 		if msg == WM_KEYDOWN || msg == WM_KEYUP {
@@ -1881,6 +1998,25 @@ func isBrowserZoomVirtualKey(vk uint32) bool {
 	}
 }
 
+// isBrowserWindowCloseChord detects shortcuts that close a tab or the whole
+// Chromium window. These must never be mirrored to follower environments.
+func isBrowserWindowCloseChord(vk uint32, ctrl, alt, shift bool) bool {
+	if alt && !ctrl && vk == VK_F4 { // Alt+F4
+		return true
+	}
+	if !ctrl {
+		return false
+	}
+	switch vk {
+	case 0x57: // Ctrl+W / Ctrl+Shift+W — close tab / close window
+		return true
+	case VK_F4: // Ctrl+F4 — close tab
+		return true
+	}
+	_ = shift
+	return false
+}
+
 func (s *InputSyncer) dispatchBrowserZoomShortcut(hwnd windows.HWND, vk uint32, shiftPressed bool) {
 	s.dispatchWithRandomDelay(hwnd, func() {
 		procPostMessageW.Call(uintptr(hwnd), WM_KEYDOWN, VK_CONTROL, makeKeyLParam(VK_CONTROL, true))
@@ -1925,6 +2061,12 @@ func (s *InputSyncer) dispatchPageKeyViaCDP(msg uint32, vk, scanCode, flags uint
 	// the original key sequence; urlSyncLoop mirrors the committed field value.
 	if !imeActive {
 		ch = toUnicode(uint16(vk), uint16(scanCode), (flags&0x01) != 0)
+		// Wallet password/PIN fields are almost always digits and latin letters.
+		// If ToUnicode fails (layout/IME edge cases, odd extended flags), still
+		// recover top-row and numpad digits so follower displays update.
+		if ch == 0 {
+			ch = digitRuneFromVirtualKey(vk)
+		}
 	}
 	event := cdpKeyEvent{
 		generation: atomic.LoadUint64(&s.dispatchGeneration),
@@ -1982,11 +2124,14 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
 							}
 							followerTarget, ok := matchingFollowerCDPTarget(masterTarget, debugPort, waitPopup)
 							if !ok {
+								// Never silently drop password/auth digits when the
+								// follower wallet surface is still attaching.
+								s.dispatchPageKeyFallback(follower, event)
 								return
 							}
-							// Direct latin input can use insertText for speed. IME must
-							// not: insertText breaks composition and leaves followers
-							// with wrong intermediate characters.
+							// Direct latin input (password digits/letters) uses insertText
+							// so React-controlled wallet fields update reliably. IME must
+							// not: insertText breaks composition.
 							if event.down && !event.imeActive && event.character != 0 && event.modifiers&3 == 0 && !isSpecialKey(event.vk) {
 								if _, err := cdpCallTarget(followerTarget, "Input.insertText", map[string]any{"text": string(event.character)}); err != nil {
 									s.dispatchPageKeyFallback(follower, event)
@@ -2004,6 +2149,16 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
 							}
 							if _, err := cdpCallTarget(followerTarget, "Input.dispatchKeyEvent", params); err != nil {
 								s.dispatchPageKeyFallback(follower, event)
+								return
+							}
+							// Space is classified special but still needs a char event for
+							// contenteditable/password-adjacent fields.
+							if event.down && !event.imeActive && event.vk == 0x20 {
+								_, _ = cdpCallTarget(followerTarget, "Input.dispatchKeyEvent", map[string]any{
+									"type": "char", "text": " ", "unmodifiedText": " ",
+									"windowsVirtualKeyCode": 0x20, "nativeVirtualKeyCode": 0x20,
+									"modifiers": event.modifiers, "key": " ",
+								})
 							}
 						})
 					}, wg.Done)
@@ -2146,6 +2301,7 @@ func (s *InputSyncer) dispatchPageMouseViaCDPNow(msg uint32, screenX, screenY in
 				s.withCDPPortLock(port, func() {
 					followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, waitPopup)
 					if !ok {
+						s.dispatchPageMouseFallback(hwnd, msg, screenX, screenY)
 						return
 					}
 					if _, err := cdpCallTarget(followerTarget, "Input.dispatchMouseEvent", map[string]any{
@@ -2383,6 +2539,17 @@ func (s *InputSyncer) dispatchPageMouseFallback(hwnd windows.HWND, msg uint32, s
 	s.postMessageWithRandomDelay(hwnd, uintptr(msg), wparam, lparam)
 }
 
+func digitRuneFromVirtualKey(vk uint32) rune {
+	if vk >= 0x30 && vk <= 0x39 {
+		return rune('0' + (vk - 0x30))
+	}
+	// Numpad 0-9 (VK_NUMPAD0..9). Only meaningful when NumLock produces digits.
+	if vk >= 0x60 && vk <= 0x69 {
+		return rune('0' + (vk - 0x60))
+	}
+	return 0
+}
+
 func cdpKeyName(vk uint32) string {
 	switch vk {
 	case 0x08:
@@ -2393,6 +2560,8 @@ func cdpKeyName(vk uint32) string {
 		return "Enter"
 	case 0x1B:
 		return "Escape"
+	case 0x20:
+		return " "
 	case VK_LEFT:
 		return "ArrowLeft"
 	case VK_RIGHT:
@@ -2407,6 +2576,10 @@ func cdpKeyName(vk uint32) string {
 		return "Home"
 	case VK_END:
 		return "End"
+	}
+	// Top-row and numpad digits (wallet PIN / password / amount fields).
+	if ch := digitRuneFromVirtualKey(vk); ch != 0 {
+		return string(ch)
 	}
 	if vk >= 0x41 && vk <= 0x5A {
 		return strings.ToLower(string(rune(vk)))
@@ -2570,9 +2743,11 @@ func (s *InputSyncer) urlSyncLoop(stopCh <-chan struct{}) {
 		s.mu.Unlock()
 
 		if masterDebug > 0 && len(followerDebug) > 0 {
-			if atomic.LoadInt32(&s.pageKeyboardFocus) == 1 {
-				if state := s.getMasterFocusedEditableState(masterDebug); state != "" && state != s.lastFocusedEditableState {
+			masterTarget, hasMasterTarget := s.focusedMasterCDPTarget(masterDebug)
+			if atomic.LoadInt32(&s.pageKeyboardFocus) == 1 && hasMasterTarget {
+				if state := s.getMasterFocusedEditableStateOnTarget(masterTarget); state != "" && state != s.lastFocusedEditableState {
 					s.lastFocusedEditableState = state
+					waitPopup := waitForFollowerCDPMatch(masterTarget)
 					var inputWG sync.WaitGroup
 					for _, port := range followerDebug {
 						if port <= 0 {
@@ -2582,7 +2757,7 @@ func (s *InputSyncer) urlSyncLoop(stopCh <-chan struct{}) {
 						go func(debugPort int) {
 							defer inputWG.Done()
 							s.withCDPPortLock(debugPort, func() {
-								s.applyFollowerFocusedEditableState(debugPort, state)
+								s.applyFollowerFocusedEditableStateOnTarget(debugPort, masterTarget, state, waitPopup)
 							})
 						}(port)
 					}
@@ -2592,23 +2767,37 @@ func (s *InputSyncer) urlSyncLoop(stopCh <-chan struct{}) {
 				s.lastFocusedEditableState = ""
 			}
 
-			url := s.getMasterURL(masterDebug)
+			url := ""
+			if hasMasterTarget {
+				url = strings.TrimSpace(masterTarget.URL)
+			}
+			if url == "" {
+				url = s.getMasterURL(masterDebug)
+			}
 			if url != "" && url != s.lastSyncURL && !isAboutBlank(url) {
-				s.lastSyncURL = url
-				s.invalidateMasterCDPTargetCache()
-				var wg sync.WaitGroup
-				for _, port := range followerDebug {
-					if port > 0 {
-						wg.Add(1)
-						go func(debugPort int) {
-							defer wg.Done()
-							s.withCDPPortLock(debugPort, func() {
-								s.navigateFollower(debugPort, url)
-							})
-						}(port)
+				// Do not force-navigate followers to a wallet popup/notification
+				// document: that replaces their main tab with a full-page extension
+				// UI and desyncs browsing. Extension password display is mirrored
+				// via focused-target insertText + editable-state sync instead.
+				if extensionLikeCDPTarget(cdpTarget{URL: url}) {
+					s.lastSyncURL = url
+				} else {
+					s.lastSyncURL = url
+					s.invalidateMasterCDPTargetCache()
+					var wg sync.WaitGroup
+					for _, port := range followerDebug {
+						if port > 0 {
+							wg.Add(1)
+							go func(debugPort int) {
+								defer wg.Done()
+								s.withCDPPortLock(debugPort, func() {
+									s.navigateFollower(debugPort, url)
+								})
+							}(port)
+						}
 					}
+					wg.Wait()
 				}
-				wg.Wait()
 			}
 		}
 	}
@@ -2645,18 +2834,38 @@ func (s *InputSyncer) getMasterURL(debugPort int) string {
 	return str
 }
 
-func (s *InputSyncer) getMasterFocusedEditableState(debugPort int) string {
-	const expression = `(() => {
-		const e = document.activeElement;
-		if (!e || (e.tagName !== 'INPUT' && e.tagName !== 'TEXTAREA')) return '';
+const focusedEditableStateExpression = `(() => {
+	const e = document.activeElement;
+	if (!e) return '';
+	if (e.tagName === 'INPUT' || e.tagName === 'TEXTAREA') {
 		return JSON.stringify({
+			kind: 'input',
+			tag: String(e.tagName || '').toLowerCase(),
+			type: String(e.type || ''),
+			name: String(e.name || ''),
+			id: String(e.id || ''),
+			testId: String(e.getAttribute('data-testid') || ''),
+			placeholder: String(e.getAttribute('placeholder') || ''),
 			value: String(e.value ?? ''),
 			start: typeof e.selectionStart === 'number' ? e.selectionStart : -1,
 			end: typeof e.selectionEnd === 'number' ? e.selectionEnd : -1
 		});
-	})()`
-	result, err := cdpCall(debugPort, "Runtime.evaluate", map[string]any{
-		"expression": expression, "returnByValue": true,
+	}
+	if (e.isContentEditable) {
+		return JSON.stringify({
+			kind: 'contenteditable',
+			value: String(e.innerText ?? e.textContent ?? '')
+		});
+	}
+	return '';
+})()`
+
+func (s *InputSyncer) getMasterFocusedEditableStateOnTarget(target cdpTarget) string {
+	if strings.TrimSpace(target.WebSocketDebuggerUrl) == "" {
+		return ""
+	}
+	result, err := cdpCallTarget(target, "Runtime.evaluate", map[string]any{
+		"expression": focusedEditableStateExpression, "returnByValue": true,
 	})
 	if err != nil {
 		return ""
@@ -2669,26 +2878,79 @@ func (s *InputSyncer) getMasterFocusedEditableState(debugPort int) string {
 	return state
 }
 
-func (s *InputSyncer) applyFollowerFocusedEditableState(debugPort int, state string) {
-	if state == "" {
+func (s *InputSyncer) applyFollowerFocusedEditableStateOnTarget(debugPort int, master cdpTarget, state string, waitPopup bool) {
+	if state == "" || debugPort <= 0 {
 		return
 	}
+	followerTarget, ok := matchingFollowerCDPTarget(master, debugPort, waitPopup)
+	if !ok {
+		return
+	}
+	// Resolve the matching password/auth field even when the follower click
+	// missed focus (common for wallet unlock/confirm UIs).
 	expression := `(() => {
 		const s = JSON.parse(` + strconv.Quote(state) + `);
-		const e = document.activeElement;
-		if (!e || (e.tagName !== 'INPUT' && e.tagName !== 'TEXTAREA')) return false;
-		if (String(e.value ?? '') !== s.value) {
-			const proto = e.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+		const isEditable = (el) => !!(el && (
+			el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' ||
+			(typeof el.isContentEditable === 'boolean' && el.isContentEditable)
+		));
+		const setInputValue = (el, next) => {
+			const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
 			const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-			if (setter) setter.call(e, s.value); else e.value = s.value;
-			e.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: null }));
+			if (setter) setter.call(el, next); else el.value = next;
+			el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: null }));
+			el.dispatchEvent(new Event('change', { bubbles: true }));
+		};
+		const resolveInput = () => {
+			let e = document.activeElement;
+			if (isEditable(e) && (e.tagName === 'INPUT' || e.tagName === 'TEXTAREA')) {
+				if (!s.type || !e.type || String(e.type) === String(s.type) || s.type === 'text' || e.type === 'password') {
+					return e;
+				}
+			}
+			const selectors = [];
+			if (s.testId) selectors.push('[data-testid="' + CSS.escape(String(s.testId)) + '"]');
+			if (s.id) selectors.push('#' + CSS.escape(String(s.id)));
+			if (s.name) selectors.push((s.tag === 'textarea' ? 'textarea' : 'input') + '[name="' + CSS.escape(String(s.name)) + '"]');
+			if (s.type === 'password') selectors.push('input[type="password"]');
+			if (s.placeholder) selectors.push((s.tag === 'textarea' ? 'textarea' : 'input') + '[placeholder="' + CSS.escape(String(s.placeholder)) + '"]');
+			selectors.push('input[type="password"]', 'input[type="text"]', 'input:not([type])', 'textarea');
+			for (const sel of selectors) {
+				try {
+					const found = document.querySelector(sel);
+					if (found && (found.tagName === 'INPUT' || found.tagName === 'TEXTAREA')) {
+						return found;
+					}
+				} catch (_) {}
+			}
+			return null;
+		};
+		if (s.kind === 'contenteditable') {
+			let e = document.activeElement;
+			if (!e || !e.isContentEditable) {
+				e = document.querySelector('[contenteditable="true"], [contenteditable=""]');
+			}
+			if (!e || !e.isContentEditable) return false;
+			const next = String(s.value ?? '');
+			if (String(e.innerText ?? e.textContent ?? '') !== next) {
+				e.focus();
+				e.innerText = next;
+				e.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: null }));
+			}
+			return true;
+		}
+		const e = resolveInput();
+		if (!e) return false;
+		try { e.focus(); } catch (_) {}
+		if (String(e.value ?? '') !== String(s.value ?? '')) {
+			setInputValue(e, String(s.value ?? ''));
 		}
 		if (s.start >= 0 && typeof e.setSelectionRange === 'function') {
 			try { e.setSelectionRange(s.start, s.end); } catch (_) {}
 		}
 		return true;
 	})()`
-	_, _ = cdpCall(debugPort, "Runtime.evaluate", map[string]any{
+	_, _ = cdpCallTarget(followerTarget, "Runtime.evaluate", map[string]any{
 		"expression": expression, "returnByValue": true,
 	})
 }

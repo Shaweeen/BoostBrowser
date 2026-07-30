@@ -604,13 +604,37 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 		}
 	}
 
-	cellW := screenW / cols
-	cellH := screenH / rows
+	// Gapless tile grid: distribute remainder pixels so the work area is fully
+	// covered with no leftover strip between cells. 1px internal overlap hides
+	// Chrome/DWM non-client borders so adjacent environments appear flush (相接).
+	const tileInternalOverlapPx = 1
 
-	// Chrome/Windows 在顶层窗口外缘会画 1~数 px 的深色 resize frame/DWM 阴影。
-	// 只把最外侧窗口边缘向工作区外轻推，遮掉黑边；内部相邻窗口不再互相重叠，
-	// 避免上下/左右内容被压盖。
-	const tileWindowBleedPx = 8
+	colWidths := make([]int, cols)
+	rowHeights := make([]int, rows)
+	baseW, remW := screenW/cols, screenW%cols
+	baseH, remH := screenH/rows, screenH%rows
+	for c := 0; c < cols; c++ {
+		colWidths[c] = baseW
+		if c < remW {
+			colWidths[c]++
+		}
+	}
+	for r := 0; r < rows; r++ {
+		rowHeights[r] = baseH
+		if r < remH {
+			rowHeights[r]++
+		}
+	}
+	colX := make([]int, cols)
+	rowY := make([]int, rows)
+	colX[0] = originX
+	for c := 1; c < cols; c++ {
+		colX[c] = colX[c-1] + colWidths[c-1]
+	}
+	rowY[0] = originY
+	for r := 1; r < rows; r++ {
+		rowY[r] = rowY[r-1] + rowHeights[r-1]
+	}
 
 	// SW_RESTORE = 9
 	procShowWindow := user32dll.NewProc("ShowWindow")
@@ -619,24 +643,25 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	for i, w := range wins {
 		col := i % cols
 		row := i / cols
-		x := originX + col*cellW
-		y := originY + row*cellH
-		winW := cellW
-		winH := cellH
+		x := colX[col]
+		y := rowY[row]
+		winW := colWidths[col]
+		winH := rowHeights[row]
 
-		if col == 0 {
-			x -= tileWindowBleedPx
-			winW += tileWindowBleedPx
+		// Overlap shared edges by 1px so windows touch with no visible gap.
+		if col > 0 {
+			x -= tileInternalOverlapPx
+			winW += tileInternalOverlapPx
 		}
-		if col == cols-1 {
-			winW += tileWindowBleedPx
+		if row > 0 {
+			y -= tileInternalOverlapPx
+			winH += tileInternalOverlapPx
 		}
-		if row == 0 {
-			y -= tileWindowBleedPx
-			winH += tileWindowBleedPx
+		if col+1 < cols {
+			winW += tileInternalOverlapPx
 		}
-		if row == rows-1 {
-			winH += tileWindowBleedPx
+		if row+1 < rows {
+			winH += tileInternalOverlapPx
 		}
 
 		// 先恢复窗口（如果被最小化）

@@ -11,7 +11,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const syncPopupBoundsInset = 2
+// Tight inset so extension popups can use almost the full tiled cell while
+// remaining inside the arranged environment bounds (clickable under layout limits).
+const syncPopupBoundsInset = 1
 
 func syncPopupBoundsIntervalForFollowers(followerCount int) time.Duration {
 	// Environment multi-open confinement is not input-critical. Prefer lower
@@ -121,13 +123,10 @@ var syncPopupBoundsEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lP
 		return 1
 	}
 
-	// Chrome and the extension own the popup's natural content size. The sync
-	// assistant only keeps that surface inside its current environment cell.
-	// In particular, do not apply the browser startup template or a wallet-
-	// specific width/height here: those fixed sizes create blank canvas after
-	// the environment has been tiled, stacked, or arranged horizontally. The
-	// native client remains untouched, so its vertical/horizontal overflow and
-	// the synchronizer's WM_MOUSEWHEEL/WM_MOUSEHWHEEL delivery keep working.
+	// Chrome and the extension own the popup's natural content size and click
+	// handling. Under tiled arrangement we only keep the surface inside the
+	// owning environment cell (allow operations within layout limits) without
+	// applying fixed wallet templates that break extension UI.
 	x, y, width, height, shouldMove := constrainSyncPopupRect(popupRect, owner.rect, syncPopupBoundsInset)
 	search.placements = append(search.placements, syncPopupPlacement{
 		hwnd:            hwnd,

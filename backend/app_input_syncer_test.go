@@ -394,6 +394,69 @@ func TestPopupLikeCDPTargetDoesNotConfuseMainPage(t *testing.T) {
 	}
 }
 
+func TestPopupLikeCDPTargetCoversWalletUnlockAndHome(t *testing.T) {
+	cases := []string{
+		"chrome-extension://nkbihfbeogaeaoehlefnkodbefgpgknn/home.html#unlock",
+		"chrome-extension://acmacodkjbdgmoleebolmdjonilkdbch/index.html#/unlock",
+		"chrome-extension://wallet/notification.html",
+		"chrome-extension://wallet/home.html#/onboarding/welcome",
+		"chrome-extension://wallet/unknown-surface.html",
+	}
+	for _, url := range cases {
+		if !popupLikeCDPTarget(cdpTarget{Type: "page", URL: url}) {
+			t.Fatalf("wallet surface must be popup-like for match wait: %s", url)
+		}
+		if !extensionLikeCDPTarget(cdpTarget{Type: "page", URL: url}) {
+			t.Fatalf("wallet surface must be extension-like: %s", url)
+		}
+	}
+	if extensionLikeCDPTarget(cdpTarget{URL: "https://app.uniswap.org/"}) {
+		t.Fatal("normal https page must not be extension-like")
+	}
+}
+
+func TestSyncCDPTargetMatchPrefersSameExtensionID(t *testing.T) {
+	master := cdpTarget{Type: "page", URL: "chrome-extension://nkbihfbeogaeaoehlefnkodbefgpgknn/home.html#unlock", Title: "MetaMask"}
+	sameExt := cdpTarget{Type: "page", URL: "chrome-extension://nkbihfbeogaeaoehlefnkodbefgpgknn/popup.html", Title: "MetaMask"}
+	otherSite := cdpTarget{Type: "page", URL: "https://example.com/", Title: "Example"}
+	if syncCDPTargetMatchScore(master, sameExt) <= syncCDPTargetMatchScore(master, otherSite) {
+		t.Fatal("same extension ID unlock/popup pair must outrank an unrelated main tab")
+	}
+	if chromeExtensionID(master.URL) != "nkbihfbeogaeaoehlefnkodbefgpgknn" {
+		t.Fatalf("extension id parse failed: %q", chromeExtensionID(master.URL))
+	}
+}
+
+func TestCDPKeyNameCoversDigits(t *testing.T) {
+	if cdpKeyName(0x35) != "5" {
+		t.Fatalf("top-row 5: got %q", cdpKeyName(0x35))
+	}
+	if cdpKeyName(0x65) != "5" {
+		t.Fatalf("numpad 5: got %q", cdpKeyName(0x65))
+	}
+	if cdpKeyName(0x20) != " " {
+		t.Fatalf("space key name: got %q", cdpKeyName(0x20))
+	}
+}
+
+func TestBrowserWindowCloseChordsAreDetected(t *testing.T) {
+	if !isBrowserWindowCloseChord(0x57, true, false, false) { // Ctrl+W
+		t.Fatal("Ctrl+W must be blocked from follower replay")
+	}
+	if !isBrowserWindowCloseChord(0x57, true, false, true) { // Ctrl+Shift+W
+		t.Fatal("Ctrl+Shift+W must be blocked from follower replay")
+	}
+	if !isBrowserWindowCloseChord(0x73, true, false, false) { // Ctrl+F4
+		t.Fatal("Ctrl+F4 must be blocked from follower replay")
+	}
+	if !isBrowserWindowCloseChord(0x73, false, true, false) { // Alt+F4
+		t.Fatal("Alt+F4 must be blocked from follower replay")
+	}
+	if isBrowserWindowCloseChord(0x41, true, false, false) { // Ctrl+A
+		t.Fatal("Ctrl+A must still sync")
+	}
+}
+
 func TestBrowserZoomVirtualKeys(t *testing.T) {
 	for _, vk := range []uint32{0x30, 0x6B, 0x6D, 0xBB, 0xBD} {
 		if !isBrowserZoomVirtualKey(vk) {

@@ -94,3 +94,22 @@ func TestSyncPanelShutdownNeverStopsSharedBrowserRuntimes(t *testing.T) {
 		t.Fatal("sync panel shutdown must not stop or rewrite shared browser runtimes")
 	}
 }
+
+func TestSyncPanelNeverRunsTabHandoffCollapse(t *testing.T) {
+	// Prevent panel process from racing main's Target.closeTarget handoff.
+	environmentTabsUserHandoffDone.Store(false)
+	app := NewApp(t.TempDir(), true)
+	if !app.panelMode {
+		t.Fatal("expected panel-mode app")
+	}
+	result := app.FinalizeEnvironmentTabsForUserHandoff()
+	if result["skipped"] != true {
+		t.Fatalf("panel handoff must be skipped, got %#v", result)
+	}
+	if result["reason"] != "panel_never_owns_tab_handoff" {
+		t.Fatalf("unexpected skip reason: %#v", result)
+	}
+	if environmentTabsUserHandoffDone.Load() {
+		t.Fatal("panel skip must not consume the main-process handoff latch")
+	}
+}
