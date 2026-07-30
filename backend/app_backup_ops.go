@@ -392,6 +392,9 @@ func (a *App) backupImportFromPathLocked(zipPath string, resetFirst bool) (map[s
 		return nil, err
 	}
 
+	a.backupEmitImportProgress("importing", 97, "正在对齐环境与数据目录...")
+	pointerStats := a.reconcileProfileDataPointersAfterImport()
+
 	totalComponents := len(componentUniverse)
 	failedCount := len(failedComponentIDs)
 	successCount := totalComponents - failedCount
@@ -399,11 +402,30 @@ func (a *App) backupImportFromPathLocked(zipPath string, resetFirst bool) (map[s
 		successCount = 0
 	}
 	partial := failedCount > 0
+	profileCount := 0
+	if a.browserMgr != nil {
+		profileCount = len(a.browserMgr.List())
+	}
 	message := "加载完成"
 	if partial {
 		message = fmt.Sprintf("加载完成（部分成功）：成功 %d 个模块，异常 %d 个模块", successCount, failedCount)
+	} else if profileCount > 0 {
+		message = fmt.Sprintf("加载完成：已就绪 %d 个环境，可直接在环境列表中检查与编辑", profileCount)
 	}
 	a.backupEmitImportProgress("done", 100, message)
+	if a.ctx != nil {
+		wailsruntime.EventsEmit(a.ctx, "backup:import:completed", map[string]interface{}{
+			"profileCount":    profileCount,
+			"pointersAligned": pointerStats.Aligned,
+			"pointersMissing": pointerStats.MissingDir,
+			"pointersFailed":  pointerStats.Failed,
+			"resetFirst":      resetFirst,
+			"partial":         partial,
+			"imported":        stats.Imported,
+			"skipped":         stats.Skipped,
+			"conflicts":       stats.Conflicts,
+		})
+	}
 
 	failedComponents := make([]map[string]string, 0, len(issues))
 	for _, item := range issues {
@@ -426,8 +448,51 @@ func (a *App) backupImportFromPathLocked(zipPath string, resetFirst bool) (map[s
 		"componentSuccess": successCount,
 		"componentFailed":  failedCount,
 		"failedComponents": failedComponents,
+		"profileCount":     profileCount,
+		"pointersAligned":  pointerStats.Aligned,
+		"pointersMissing":  pointerStats.MissingDir,
+		"pointersFailed":   pointerStats.Failed,
 		"message":          message,
 	}, nil
+}
+
+type backupPointerReconcileStats struct {
+	Aligned    int
+	MissingDir int
+	Failed     int
+}
+
+// reconcileProfileDataPointersAfterImport rewrites only the non-secret
+// .browserstudio-environment.json identity link so each imported profile ID
+// points at its resolved user-data directory. Cookie, extension and wallet
+// files are never opened or rewritten.
+func (a *App) reconcileProfileDataPointersAfterImport() backupPointerReconcileStats {
+	stats := backupPointerReconcileStats{}
+	if a == nil || a.browserMgr == nil {
+		return stats
+	}
+	profiles := a.browserMgr.List()
+	now := time.Now()
+	for i := range profiles {
+		profile := profiles[i]
+		dataDir := a.browserMgr.ResolveUserDataDir(&profile)
+		info, err := os.Stat(dataDir)
+		if err != nil || !info.IsDir() {
+			stats.MissingDir++
+			continue
+		}
+		if err := a.browserMgr.WriteProfileDataPointer(&profile, "closed", 0, now); err != nil {
+			stats.Failed++
+			logger.New("Backup").Warn("导入后环境数据指向对齐失败",
+				logger.F("profile_id", profile.ProfileId),
+				logger.F("user_data_dir", dataDir),
+				logger.F("error", err.Error()),
+			)
+			continue
+		}
+		stats.Aligned++
+	}
+	return stats
 }
 
 func (a *App) backupStopRuntimeForMaintenance() {

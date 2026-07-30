@@ -63,9 +63,17 @@ export function BrowserLogsPage() {
   }
 
   useEffect(() => {
-    load()
-    const timer = setInterval(load, 3000)
-    return () => clearInterval(timer)
+    void load()
+    // Logs are a diagnostic page: refresh on focus/visibility only, not every 3s.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void load()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
+    }
   }, [])
 
   useEffect(() => {

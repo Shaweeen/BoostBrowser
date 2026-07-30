@@ -23,9 +23,6 @@ function lazyNamed<TModule extends Record<string, ComponentType<any>>>(
 }
 
 const SettingsPage = lazyNamed(() => import('./modules/settings/SettingsPage'), 'SettingsPage')
-const ProfilePage = lazyNamed(() => import('./modules/profile/ProfilePage'), 'ProfilePage')
-
-const ChartsPage = lazyNamed(() => import('./modules/charts/ChartsPage'), 'ChartsPage')
 const BrowserListPage = lazyNamed(() => import('./modules/browser/pages/BrowserListPage'), 'BrowserListPage')
 const BrowserDetailPage = lazyNamed(() => import('./modules/browser/pages/BrowserDetailPage'), 'BrowserDetailPage')
 const BrowserEditPage = lazyNamed(() => import('./modules/browser/pages/BrowserEditPage'), 'BrowserEditPage')
@@ -479,28 +476,34 @@ function App() {
       void persistBounds()
     })
 
-    const interval = window.setInterval(() => {
-      void persistBounds()
-    }, 1500)
-
+    // Action-driven bounds persistence: no 1.5s polling. Save on hide, unload,
+    // and debounced resize — enough for restore without a permanent timer.
+    let resizeTimer: ReturnType<typeof window.setTimeout> | null = null
     const handleBeforeUnload = () => {
       void persistBounds()
     }
-
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
         void persistBounds()
       }
     }
+    const handleResize = () => {
+      if (resizeTimer) window.clearTimeout(resizeTimer)
+      resizeTimer = window.setTimeout(() => {
+        void persistBounds()
+      }, 400)
+    }
 
     window.addEventListener('beforeunload', handleBeforeUnload)
     document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('resize', handleResize)
 
     return () => {
       cancelled = true
-      window.clearInterval(interval)
+      if (resizeTimer) window.clearTimeout(resizeTimer)
       window.removeEventListener('beforeunload', handleBeforeUnload)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('resize', handleResize)
     }
   }, [panelModeLoaded, syncPanelMode])
 
@@ -529,10 +532,11 @@ function App() {
               ) : (
                 <>
                   <Route path="/" element={<Navigate to="/browser/list" replace />} />
-                  <Route path="/charts" element={<ChartsPage />} />
+                  {/* Scaffold leftovers: keep deep-link redirects, no primary nav. */}
+                  <Route path="/charts" element={<Navigate to="/browser/list" replace />} />
+                  <Route path="/profile" element={<Navigate to="/settings" replace />} />
                   <Route path="/settings" element={<SettingsPage />} />
-                  <Route path="/profile" element={<ProfilePage />} />
-                  
+
                   <Route path="/browser/list" element={<BrowserListPage />} />
                   <Route path="/browser/detail/:id" element={<BrowserDetailPage />} />
                   <Route path="/browser/edit/:id" element={<BrowserEditPage />} />

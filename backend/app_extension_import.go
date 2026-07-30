@@ -3,8 +3,10 @@ package backend
 import (
 	"archive/zip"
 	"boost-browser/backend/internal/fsutil"
+	"boost-browser/backend/internal/logger"
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -445,6 +447,9 @@ func (a *App) downloadAndInstallExtension(downloadAddress string) (string, strin
 	if extID != "" {
 		extDir := a.globalExtensionDir(extID)
 		if validateUnpackedExtensionManifest(extDir) == nil {
+			// Reuse the program package without a network round-trip. Missing
+			// manifest keys are repaired at environment start (and after a real
+			// CRX re-download) so offline distribution and unit tests stay fast.
 			version := readManifestVersionFromDir(extDir)
 			return extID, extDir, version, version, nil
 		}
@@ -457,9 +462,19 @@ func (a *App) downloadAndInstallExtension(downloadAddress string) (string, strin
 	if err != nil {
 		return "", "", "", "", err
 	}
-	zipPayload, err := extractZipPayloadFromCRX(payload)
+	zipPayload, publicKey, err := extractZipAndPublicKeyFromCRX(payload)
 	if err != nil {
 		return "", "", "", "", err
+	}
+	if derivedID := extensionIDFromPublicKey(publicKey); derivedID != "" {
+		// The CRX signature is the cryptographic authority for the extension ID.
+		// Prefer it over a path-guessed external ID so wallet storage stays under
+		// the same chrome-extension:// ID that dApps and content scripts expect.
+		if extID == "" || !isWebStoreExtensionID(extID) || !strings.EqualFold(extID, derivedID) {
+			if isWebStoreExtensionID(derivedID) {
+				extID = derivedID
+			}
+		}
 	}
 	if extID == "" {
 		sum := sha256.Sum256(payload)
@@ -467,10 +482,13 @@ func (a *App) downloadAndInstallExtension(downloadAddress string) (string, strin
 	}
 	extDir := a.globalExtensionDir(extID)
 	if validateUnpackedExtensionManifest(extDir) == nil {
+		if len(publicKey) > 0 {
+			_ = ensureManifestPublicKey(extDir, publicKey)
+		}
 		version := readManifestVersionFromDir(extDir)
 		return extID, extDir, version, version, nil
 	}
-	extDir, previousVersion, extensionVersion, err := installUnpackedExtension(a.appRoot, extID, zipPayload)
+	extDir, previousVersion, extensionVersion, err := installUnpackedExtension(a.appRoot, extID, zipPayload, publicKey)
 	if err != nil {
 		return "", "", "", "", err
 	}
@@ -621,8 +639,15 @@ func validateExtensionDownloadURL(rawURL string) error {
 }
 
 func downloadExtensionPayload(downloadURL string) ([]byte, error) {
+	return downloadExtensionPayloadWithTimeout(downloadURL, 90*time.Second)
+}
+
+func downloadExtensionPayloadWithTimeout(downloadURL string, timeout time.Duration) ([]byte, error) {
 	const maxExtensionDownloadBytes = 128 * 1024 * 1024
-	client := newPublicRemoteHTTPClient(90*time.Second, false)
+	if timeout <= 0 {
+		timeout = 90 * time.Second
+	}
+	client := newPublicRemoteHTTPClient(timeout, false)
 	req, err := http.NewRequest(http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("扩展下载地址无效：%w", err)
@@ -650,29 +675,313 @@ func downloadExtensionPayload(downloadURL string) ([]byte, error) {
 }
 
 func extractZipPayloadFromCRX(data []byte) ([]byte, error) {
+	zipPayload, _, err := extractZipAndPublicKeyFromCRX(data)
+	return zipPayload, err
+}
+
+// extractZipAndPublicKeyFromCRX unpacks the ZIP body of a CRX/ZIP payload and,
+// for CRX2/CRX3, returns the signing public key used by Chrome to derive the
+// stable extension ID. Pure ZIP inputs have no embedded key.
+func extractZipAndPublicKeyFromCRX(data []byte) ([]byte, []byte, error) {
 	if len(data) >= 4 && bytes.Equal(data[:4], []byte("PK\x03\x04")) {
-		return data, nil
+		return data, nil, nil
 	}
 	if len(data) < 16 || !bytes.Equal(data[:4], []byte("Cr24")) {
-		return nil, fmt.Errorf("扩展格式不支持：请提供 Chrome Web Store 地址、.crx 或 .zip 下载地址")
+		return nil, nil, fmt.Errorf("扩展格式不支持：请提供 Chrome Web Store 地址、.crx 或 .zip 下载地址")
 	}
 	version := binary.LittleEndian.Uint32(data[4:8])
 	var offset uint32
+	var publicKey []byte
 	switch version {
 	case 2:
 		pubLen := binary.LittleEndian.Uint32(data[8:12])
 		sigLen := binary.LittleEndian.Uint32(data[12:16])
+		if pubLen == 0 || int(16+pubLen) > len(data) {
+			return nil, nil, fmt.Errorf("CRX2 解包失败：公钥长度无效")
+		}
+		publicKey = append([]byte(nil), data[16:16+pubLen]...)
 		offset = 16 + pubLen + sigLen
 	case 3:
 		headerLen := binary.LittleEndian.Uint32(data[8:12])
+		if headerLen == 0 || int(12+headerLen) > len(data) {
+			return nil, nil, fmt.Errorf("CRX3 解包失败：header 长度无效")
+		}
+		header := data[12 : 12+headerLen]
+		publicKey = extractCRX3PublicKey(header)
 		offset = 12 + headerLen
 	default:
-		return nil, fmt.Errorf("扩展格式不支持：CRX version %d", version)
+		return nil, nil, fmt.Errorf("扩展格式不支持：CRX version %d", version)
 	}
 	if int(offset)+4 > len(data) || !bytes.Equal(data[offset:offset+4], []byte("PK\x03\x04")) {
-		return nil, fmt.Errorf("CRX 解包失败：未找到 ZIP 数据")
+		return nil, nil, fmt.Errorf("CRX 解包失败：未找到 ZIP 数据")
 	}
-	return data[offset:], nil
+	return data[offset:], publicKey, nil
+}
+
+// extractCRX3PublicKey reads the first RSA (field 2) or ECDSA (field 3)
+// AsymmetricKeyProof.public_key (field 1) from a CrxFileHeader protobuf.
+func extractCRX3PublicKey(header []byte) []byte {
+	var rsaKey, ecdsaKey []byte
+	for _, field := range parseProtobufBytesFields(header) {
+		switch field.number {
+		case 2: // sha256_with_rsa
+			if key := protobufMessageBytesField(field.value, 1); len(key) > 0 && len(rsaKey) == 0 {
+				rsaKey = key
+			}
+		case 3: // sha256_with_ecdsa
+			if key := protobufMessageBytesField(field.value, 1); len(key) > 0 && len(ecdsaKey) == 0 {
+				ecdsaKey = key
+			}
+		}
+	}
+	if len(rsaKey) > 0 {
+		return rsaKey
+	}
+	return ecdsaKey
+}
+
+type protobufBytesField struct {
+	number int
+	value  []byte
+}
+
+func parseProtobufBytesFields(data []byte) []protobufBytesField {
+	out := make([]protobufBytesField, 0, 4)
+	i := 0
+	for i < len(data) {
+		tag, n := readProtobufVarint(data[i:])
+		if n <= 0 {
+			break
+		}
+		i += n
+		fieldNumber := int(tag >> 3)
+		wireType := int(tag & 0x7)
+		switch wireType {
+		case 0: // varint
+			_, n = readProtobufVarint(data[i:])
+			if n <= 0 {
+				return out
+			}
+			i += n
+		case 1: // 64-bit
+			if i+8 > len(data) {
+				return out
+			}
+			i += 8
+		case 2: // length-delimited
+			length, n := readProtobufVarint(data[i:])
+			if n <= 0 {
+				return out
+			}
+			i += n
+			if length < 0 || i+int(length) > len(data) {
+				return out
+			}
+			out = append(out, protobufBytesField{
+				number: fieldNumber,
+				value:  append([]byte(nil), data[i:i+int(length)]...),
+			})
+			i += int(length)
+		case 5: // 32-bit
+			if i+4 > len(data) {
+				return out
+			}
+			i += 4
+		default:
+			return out
+		}
+	}
+	return out
+}
+
+func protobufMessageBytesField(message []byte, fieldNumber int) []byte {
+	for _, field := range parseProtobufBytesFields(message) {
+		if field.number == fieldNumber {
+			return field.value
+		}
+	}
+	return nil
+}
+
+func readProtobufVarint(data []byte) (uint64, int) {
+	var value uint64
+	for i := 0; i < len(data) && i < 10; i++ {
+		b := data[i]
+		value |= uint64(b&0x7f) << (uint(i) * 7)
+		if b < 0x80 {
+			return value, i + 1
+		}
+	}
+	return 0, 0
+}
+
+// extensionIDFromPublicKey derives the Chrome Web Store style extension ID from
+// a CRX public key (SHA-256, first 16 bytes, hex digits remapped onto a-p).
+func extensionIDFromPublicKey(publicKey []byte) string {
+	if len(publicKey) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(publicKey)
+	const alphabet = "abcdefghijklmnop"
+	var b strings.Builder
+	b.Grow(32)
+	for _, byt := range sum[:16] {
+		b.WriteByte(alphabet[byt>>4])
+		b.WriteByte(alphabet[byt&0x0f])
+	}
+	return b.String()
+}
+
+func isWebStoreExtensionID(id string) bool {
+	id = strings.ToLower(strings.TrimSpace(id))
+	return len(id) == 32 && chromeWebStoreIDPattern.MatchString(id)
+}
+
+func readManifestPublicKey(extDir string) []byte {
+	data, err := os.ReadFile(filepath.Join(extDir, "manifest.json"))
+	if err != nil || len(data) > 2*1024*1024 {
+		return nil
+	}
+	var manifest map[string]any
+	if json.Unmarshal(data, &manifest) != nil {
+		return nil
+	}
+	raw, _ := manifest["key"].(string)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	// Accept both raw base64 and PEM-wrapped public keys.
+	raw = strings.ReplaceAll(raw, "-----BEGIN PUBLIC KEY-----", "")
+	raw = strings.ReplaceAll(raw, "-----END PUBLIC KEY-----", "")
+	raw = strings.ReplaceAll(raw, "\n", "")
+	raw = strings.ReplaceAll(raw, "\r", "")
+	raw = strings.ReplaceAll(raw, " ", "")
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil
+	}
+	return decoded
+}
+
+func extensionManifestHasStableKey(extDir, expectedID string) bool {
+	expectedID = strings.ToLower(strings.TrimSpace(expectedID))
+	if !isWebStoreExtensionID(expectedID) {
+		return true
+	}
+	publicKey := readManifestPublicKey(extDir)
+	if len(publicKey) == 0 {
+		return false
+	}
+	return strings.EqualFold(extensionIDFromPublicKey(publicKey), expectedID)
+}
+
+// ensureManifestPublicKey writes the CRX public key into manifest.json so
+// --load-extension keeps the official chrome-extension:// ID. Wallet vaults
+// live under Local Extension Settings/<id>/; a path-derived ID makes the page
+// provider unable to read that vault even though the files still exist.
+func ensureManifestPublicKey(extDir string, publicKey []byte) error {
+	if strings.TrimSpace(extDir) == "" || len(publicKey) == 0 {
+		return nil
+	}
+	manifestPath := filepath.Join(extDir, "manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return fmt.Errorf("读取扩展 manifest.json 失败：%w", err)
+	}
+	if len(data) > 2*1024*1024 {
+		return fmt.Errorf("扩展 manifest.json 体积异常")
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("扩展 manifest.json 格式无效：%w", err)
+	}
+	keyB64 := base64.StdEncoding.EncodeToString(publicKey)
+	if existing, _ := manifest["key"].(string); strings.TrimSpace(existing) == keyB64 {
+		return nil
+	}
+	// If an existing key already yields the same extension ID, leave it alone.
+	if existingKey := readManifestPublicKey(extDir); len(existingKey) > 0 {
+		if strings.EqualFold(extensionIDFromPublicKey(existingKey), extensionIDFromPublicKey(publicKey)) {
+			return nil
+		}
+	}
+	manifest["key"] = keyB64
+	out, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("生成扩展 manifest.json 失败：%w", err)
+	}
+	out = append(out, '\n')
+	if err := fsutil.WriteFileAtomic(manifestPath, out, 0644); err != nil {
+		return fmt.Errorf("写入扩展 manifest.json 失败：%w", err)
+	}
+	return nil
+}
+
+func (a *App) tryRepairExtensionManifestKey(extDir, extID, downloadAddress string) bool {
+	extID = strings.ToLower(strings.TrimSpace(extID))
+	if a == nil || !isWebStoreExtensionID(extID) || validateUnpackedExtensionManifest(extDir) != nil {
+		return false
+	}
+	if extensionManifestHasStableKey(extDir, extID) {
+		return true
+	}
+	downloadURL := resolveExtensionDownloadURL(downloadAddress, extID)
+	if validateExtensionDownloadURL(downloadURL) != nil {
+		return false
+	}
+	// Key repair is best-effort metadata recovery. Keep it short so offline
+	// machines and unit tests never block environment start or distribution.
+	payload, err := downloadExtensionPayloadWithTimeout(downloadURL, 6*time.Second)
+	if err != nil {
+		return false
+	}
+	_, publicKey, err := extractZipAndPublicKeyFromCRX(payload)
+	if err != nil || len(publicKey) == 0 {
+		return false
+	}
+	if !strings.EqualFold(extensionIDFromPublicKey(publicKey), extID) {
+		return false
+	}
+	if err := ensureManifestPublicKey(extDir, publicKey); err != nil {
+		return false
+	}
+	return extensionManifestHasStableKey(extDir, extID)
+}
+
+// repairLoadExtensionStableIDs ensures every --load-extension package that is
+// stored under a Web Store ID folder has a matching manifest key before Chrome
+// starts. This is a one-shot package metadata repair: it never reads profile
+// Cookies, Local Extension Settings, or wallet vaults.
+func (a *App) repairLoadExtensionStableIDs(args []string) {
+	if a == nil {
+		return
+	}
+	log := logger.New("Extension")
+	for _, dir := range activeLoadExtensionDirs(args) {
+		extDir := strings.TrimSpace(dir)
+		if extDir == "" || validateUnpackedExtensionManifest(extDir) != nil {
+			continue
+		}
+		expectedID := strings.ToLower(filepath.Base(extDir))
+		if !isWebStoreExtensionID(expectedID) {
+			continue
+		}
+		if extensionManifestHasStableKey(extDir, expectedID) {
+			continue
+		}
+		if a.tryRepairExtensionManifestKey(extDir, expectedID, expectedID) {
+			log.Info("已修复扩展稳定 ID（写入 manifest key）",
+				logger.F("extension_id", expectedID),
+				logger.F("extension_dir", extDir),
+			)
+			continue
+		}
+		log.Warn("扩展缺少稳定 ID 公钥，网页可能无法读取钱包数据",
+			logger.F("extension_id", expectedID),
+			logger.F("extension_dir", extDir),
+		)
+	}
 }
 
 func unzipBytes(data []byte, dest string) error {
@@ -740,7 +1049,7 @@ func unzipBytes(data []byte, dest string) error {
 	return nil
 }
 
-func installUnpackedExtension(appRoot string, extID string, zipPayload []byte) (string, string, string, error) {
+func installUnpackedExtension(appRoot string, extID string, zipPayload []byte, publicKey []byte) (string, string, string, error) {
 	parent := filepath.Join(appRoot, "extensions", "imported")
 	if err := os.MkdirAll(parent, 0755); err != nil {
 		return "", "", "", fmt.Errorf("创建扩展目录失败：%w", err)
@@ -756,6 +1065,18 @@ func installUnpackedExtension(appRoot string, extID string, zipPayload []byte) (
 	}
 	if err := validateUnpackedExtensionManifest(stageDir); err != nil {
 		return "", "", "", err
+	}
+	// Inject the CRX public key before the package becomes live so the first
+	// Chrome launch already uses the official extension ID.
+	if len(publicKey) > 0 {
+		if err := ensureManifestPublicKey(stageDir, publicKey); err != nil {
+			return "", "", "", err
+		}
+		if expected := strings.ToLower(strings.TrimSpace(extID)); isWebStoreExtensionID(expected) {
+			if !extensionManifestHasStableKey(stageDir, expected) {
+				return "", "", "", fmt.Errorf("扩展公钥与声明的 ID 不一致：expected=%s derived=%s", expected, extensionIDFromPublicKey(publicKey))
+			}
+		}
 	}
 	newVersion := readManifestVersionFromDir(stageDir)
 	previousVersion := readManifestVersionFromDir(extDir)

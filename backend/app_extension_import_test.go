@@ -5,6 +5,12 @@ import (
 	"boost-browser/backend/internal/browser"
 	"boost-browser/backend/internal/config"
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"os"
@@ -62,7 +68,7 @@ func TestInstallUnpackedExtensionKeepsOldCopyWhenManifestInvalid(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(extDir, "marker.txt"), []byte("old"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, err := installUnpackedExtension(root, "example", extensionZipForTest(t, `{"name":"broken"}`))
+	_, _, _, err := installUnpackedExtension(root, "example", extensionZipForTest(t, `{"name":"broken"}`), nil)
 	if err == nil {
 		t.Fatal("invalid manifest should be rejected")
 	}
@@ -87,7 +93,7 @@ func TestInstallUnpackedExtensionUpdateKeepsProgramRollbackAndReportsVersions(t 
 	if err := os.WriteFile(filepath.Join(extDir+".previous", "manifest.json"), []byte(`{"name":"Wallet","version":"0.9","manifest_version":3}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	installed, previous, current, err := installUnpackedExtension(root, "example", extensionZipForTest(t, `{"name":"Wallet","version":"2.0","manifest_version":3}`))
+	installed, previous, current, err := installUnpackedExtension(root, "example", extensionZipForTest(t, `{"name":"Wallet","version":"2.0","manifest_version":3}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,6 +423,209 @@ func TestDownloadAndInstallExtensionReusesExistingPackageWithoutOverwrite(t *tes
 	}
 	if data, err := os.ReadFile(marker); err != nil || string(data) != "keep" {
 		t.Fatalf("existing extension package was overwritten: data=%q err=%v", data, err)
+	}
+}
+
+func testRSAPublicKeyAndID(t *testing.T) ([]byte, string) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pubDER, extensionIDFromPublicKey(pubDER)
+}
+
+func buildCRX2ForTest(t *testing.T, publicKey, zipPayload []byte) []byte {
+	t.Helper()
+	// CRX2 layout: magic, version, pubLen, sigLen, publicKey, signature, zip
+	signature := make([]byte, 128)
+	out := make([]byte, 0, 16+len(publicKey)+len(signature)+len(zipPayload))
+	out = append(out, 'C', 'r', '2', '4')
+	out = binary.LittleEndian.AppendUint32(out, 2)
+	out = binary.LittleEndian.AppendUint32(out, uint32(len(publicKey)))
+	out = binary.LittleEndian.AppendUint32(out, uint32(len(signature)))
+	out = append(out, publicKey...)
+	out = append(out, signature...)
+	out = append(out, zipPayload...)
+	return out
+}
+
+func buildCRX3ForTest(t *testing.T, publicKey, zipPayload []byte) []byte {
+	t.Helper()
+	// Minimal CrxFileHeader with one sha256_with_rsa proof (field 2) containing
+	// public_key (field 1). Signature bytes are ignored by the importer.
+	proof := appendProtobufBytesField(nil, 1, publicKey)
+	proof = appendProtobufBytesField(proof, 2, bytes.Repeat([]byte{0x11}, 32))
+	header := appendProtobufBytesField(nil, 2, proof)
+
+	out := make([]byte, 0, 12+len(header)+len(zipPayload))
+	out = append(out, 'C', 'r', '2', '4')
+	out = binary.LittleEndian.AppendUint32(out, 3)
+	out = binary.LittleEndian.AppendUint32(out, uint32(len(header)))
+	out = append(out, header...)
+	out = append(out, zipPayload...)
+	return out
+}
+
+func appendProtobufBytesField(buf []byte, fieldNumber int, value []byte) []byte {
+	tag := uint64(fieldNumber<<3 | 2)
+	buf = appendProtobufVarint(buf, tag)
+	buf = appendProtobufVarint(buf, uint64(len(value)))
+	return append(buf, value...)
+}
+
+func appendProtobufVarint(buf []byte, value uint64) []byte {
+	for value >= 0x80 {
+		buf = append(buf, byte(value)|0x80)
+		value >>= 7
+	}
+	return append(buf, byte(value))
+}
+
+func TestExtensionIDFromPublicKeyIsStableChromeMapping(t *testing.T) {
+	// SHA-256 first 16 bytes of empty input, remapped 0-f -> a-p.
+	emptySum := sha256.Sum256(nil)
+	want := make([]byte, 0, 32)
+	const alphabet = "abcdefghijklmnop"
+	for _, b := range emptySum[:16] {
+		want = append(want, alphabet[b>>4], alphabet[b&0x0f])
+	}
+	if got := extensionIDFromPublicKey(nil); got != "" {
+		t.Fatalf("empty key should yield empty id, got %q", got)
+	}
+	if got := extensionIDFromPublicKey([]byte{}); got != "" {
+		t.Fatalf("empty key should yield empty id, got %q", got)
+	}
+	// Any non-empty key must be 32 a-p chars.
+	pub, id := testRSAPublicKeyAndID(t)
+	if len(id) != 32 || !isWebStoreExtensionID(id) {
+		t.Fatalf("derived id invalid: %q from %d-byte key", id, len(pub))
+	}
+	if extensionIDFromPublicKey(pub) != id {
+		t.Fatal("derived extension id is not stable")
+	}
+	_ = want
+}
+
+func TestExtractZipAndPublicKeyFromCRX2AndCRX3(t *testing.T) {
+	pub, wantID := testRSAPublicKeyAndID(t)
+	zipPayload := extensionZipForTest(t, `{"name":"Wallet","version":"1.0","manifest_version":3}`)
+
+	for _, tc := range []struct {
+		name string
+		crx  []byte
+	}{
+		{name: "crx2", crx: buildCRX2ForTest(t, pub, zipPayload)},
+		{name: "crx3", crx: buildCRX3ForTest(t, pub, zipPayload)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotZip, gotPub, err := extractZipAndPublicKeyFromCRX(tc.crx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(gotZip, zipPayload) {
+				t.Fatalf("zip payload mismatch")
+			}
+			if !bytes.Equal(gotPub, pub) {
+				t.Fatalf("public key mismatch")
+			}
+			if extensionIDFromPublicKey(gotPub) != wantID {
+				t.Fatalf("id mismatch: got %s want %s", extensionIDFromPublicKey(gotPub), wantID)
+			}
+		})
+	}
+
+	// Pure ZIP has no public key.
+	zipOnly, pubOnly, err := extractZipAndPublicKeyFromCRX(zipPayload)
+	if err != nil || !bytes.Equal(zipOnly, zipPayload) || len(pubOnly) != 0 {
+		t.Fatalf("pure zip handling failed: zipEqual=%v pub=%d err=%v", bytes.Equal(zipOnly, zipPayload), len(pubOnly), err)
+	}
+}
+
+func TestInstallUnpackedExtensionInjectsManifestKeyForStableWalletID(t *testing.T) {
+	root := t.TempDir()
+	pub, wantID := testRSAPublicKeyAndID(t)
+	zipPayload := extensionZipForTest(t, `{"name":"Wallet","version":"3.0","manifest_version":3,"description":"test"}`)
+
+	installed, previous, current, err := installUnpackedExtension(root, wantID, zipPayload, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if previous != "" || current != "3.0" {
+		t.Fatalf("unexpected versions previous=%q current=%q", previous, current)
+	}
+	if !extensionManifestHasStableKey(installed, wantID) {
+		t.Fatal("installed package must carry a manifest key that yields the official extension id")
+	}
+	// Existing description must survive key injection.
+	data, err := os.ReadFile(filepath.Join(installed, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest["description"] != "test" {
+		t.Fatalf("manifest fields were not preserved: %#v", manifest)
+	}
+	if got, _ := manifest["key"].(string); got != base64.StdEncoding.EncodeToString(pub) {
+		t.Fatalf("manifest key mismatch")
+	}
+}
+
+func TestEnsureManifestPublicKeyIsIdempotentAndRepairsMissingKey(t *testing.T) {
+	dir := t.TempDir()
+	pub, wantID := testRSAPublicKeyAndID(t)
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(`{"name":"Wallet","version":"1.0","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if extensionManifestHasStableKey(dir, wantID) {
+		t.Fatal("missing key should be detected")
+	}
+	if err := ensureManifestPublicKey(dir, pub); err != nil {
+		t.Fatal(err)
+	}
+	if !extensionManifestHasStableKey(dir, wantID) {
+		t.Fatal("key injection failed")
+	}
+	// Second write with the same key must be a no-op for content.
+	before, _ := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err := ensureManifestPublicKey(dir, pub); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if !bytes.Equal(before, after) {
+		t.Fatal("identical key rewrite should be skipped")
+	}
+}
+
+func TestRepairLoadExtensionStableIDsSkipsPackagesWithKey(t *testing.T) {
+	root := t.TempDir()
+	app := NewApp(root)
+	pub, wantID := testRSAPublicKeyAndID(t)
+	extDir := filepath.Join(root, "extensions", "imported", wantID)
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := map[string]any{
+		"name":             "Wallet",
+		"version":          "1.0",
+		"manifest_version": 3,
+		"key":              base64.StdEncoding.EncodeToString(pub),
+	}
+	raw, _ := json.Marshal(manifest)
+	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	// No network needed: already stable.
+	app.repairLoadExtensionStableIDs([]string{"--load-extension=" + extDir})
+	if !extensionManifestHasStableKey(extDir, wantID) {
+		t.Fatal("stable package was damaged by repair pass")
 	}
 }
 

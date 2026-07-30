@@ -483,18 +483,39 @@ export function BrowserListPage() {
       }
       void loadProfiles({ silent: true, syncRuntimeState: true })
     })
+    // After full backup import, reload list/groups so the user can immediately
+    // inspect and edit the restored environments without a manual refresh.
+    const offImportCompleted = EventsOn('backup:import:completed', () => {
+      void Promise.all([
+        loadProfiles({ silent: true, syncRuntimeState: true }),
+        loadGroups(),
+        fetchBrowserProxies().then(setProxies),
+        fetchBrowserCores().then(setCores),
+      ])
+    })
 
-    const timer = window.setInterval(() => {
+    // Event-driven only: continuous 2s polling was burning CPU while the list
+    // already receives start/stop/update lifecycle events. Refresh once when the
+    // user returns to a visible/focused page so external stops stay consistent.
+    const refreshIfVisible = () => {
       if (document.visibilityState !== 'visible') return
       void loadProfiles({ silent: true, syncRuntimeState: true })
-    }, 2000)
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') refreshIfVisible()
+    }
+    const onFocus = () => refreshIfVisible()
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('focus', onFocus)
 
     return () => {
-      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('focus', onFocus)
       offStarted?.()
       offUpdated?.()
       offStopped?.()
       offCrashed?.()
+      offImportCompleted?.()
     }
   }, [])
 

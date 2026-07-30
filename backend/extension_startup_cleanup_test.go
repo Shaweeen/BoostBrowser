@@ -196,6 +196,8 @@ func TestCloseUnwantedStartupPagesDuringLaunchClosesDelayedTargetsAndReleases(t 
 			{ID: "blank-1", Type: "page", URL: "about:blank"},
 			{ID: "blank-2", Type: "page", URL: "about:blank"},
 		}
+		// Appear after the first quiet sample so delayed wallet pages are still
+		// covered by the bounded observation window.
 		if calls == 2 {
 			targets = append(targets, cdpTarget{
 				ID: "metamask-auto", Type: "page",
@@ -216,6 +218,7 @@ func TestCloseUnwantedStartupPagesDuringLaunchClosesDelayedTargetsAndReleases(t 
 		8,
 		2,
 	)
+	// pass1 quiet blanks, pass2 close extension+extra blank, pass3+pass4 quiet release
 	if calls != 4 {
 		t.Fatalf("startup cleanup must include the delayed target and release after quiet passes: calls=%d", calls)
 	}
@@ -235,7 +238,7 @@ func TestCloseUnwantedStartupPagesDuringLaunchClosesDelayedTargetsAndReleases(t 
 	}
 }
 
-func TestCloseUnwantedStartupPagesDuringLaunchHasHardPassLimit(t *testing.T) {
+func TestCloseUnwantedStartupPagesDuringLaunchReleasesWhenNoExtensionAppears(t *testing.T) {
 	fetches := 0
 	pauses := 0
 	closedExtensions, closedBlanks := closeUnwantedStartupPagesDuringLaunch(
@@ -248,13 +251,63 @@ func TestCloseUnwantedStartupPagesDuringLaunchHasHardPassLimit(t *testing.T) {
 			return nil
 		},
 		func(time.Duration) { pauses++ },
-		3,
+		10,
 		2,
 	)
 	if closedExtensions != 0 || closedBlanks != 0 {
 		t.Fatalf("unexpected close counts: extension=%d blanks=%d", closedExtensions, closedBlanks)
 	}
-	if fetches != 3 || pauses != 2 {
-		t.Fatalf("bounded startup cleanup mismatch: fetches=%d pauses=%d", fetches, pauses)
+	// Quiet-pass early exit: no extension UI means release after quietPasses only.
+	if fetches != 2 || pauses != 1 {
+		t.Fatalf("quiet early-exit mismatch: fetches=%d pauses=%d", fetches, pauses)
+	}
+}
+
+func TestEnsureSingleNaturalBlankStartupPageCreatesWhenEmpty(t *testing.T) {
+	created := false
+	changed := ensureSingleNaturalBlankStartupPage(
+		func() ([]cdpTarget, error) {
+			return []cdpTarget{{ID: "ext", Type: "page", URL: "chrome-extension://wallet/home.html"}}, nil
+		},
+		func() (string, error) {
+			created = true
+			return "blank-new", nil
+		},
+		func(string) error { return nil },
+	)
+	if !changed || !created {
+		t.Fatalf("expected blank creation when no natural blank remains: changed=%v created=%v", changed, created)
+	}
+}
+
+func TestEnsureSingleNaturalBlankStartupPageTrimsExtras(t *testing.T) {
+	closed := map[string]bool{}
+	changed := ensureSingleNaturalBlankStartupPage(
+		func() ([]cdpTarget, error) {
+			return []cdpTarget{
+				{ID: "blank-1", Type: "page", URL: "about:blank"},
+				{ID: "blank-2", Type: "page", URL: "chrome://new-tab-page/"},
+			}, nil
+		},
+		func() (string, error) {
+			t.Fatal("must not create blank when one already exists")
+			return "", nil
+		},
+		func(id string) error {
+			closed[id] = true
+			return nil
+		},
+	)
+	if !changed || !closed["blank-2"] || closed["blank-1"] {
+		t.Fatalf("expected only extra blank closed: changed=%v closed=%#v", changed, closed)
+	}
+}
+
+func TestIsNaturalBlankRecognizesNewTabPage(t *testing.T) {
+	if !isNaturalBlankPageTarget(cdpTarget{Type: "page", URL: "chrome://new-tab-page/"}) {
+		t.Fatal("chrome new-tab-page must count as the natural blank shell")
+	}
+	if isExtensionStartupURL("chrome://welcome") != true {
+		t.Fatal("chrome welcome page should be closed at startup")
 	}
 }

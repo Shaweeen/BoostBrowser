@@ -13,11 +13,32 @@ func TestSyncPopupUsesCurrentArrangedOwnerBounds(t *testing.T) {
 	if !changed {
 		t.Fatal("oversized wallet popup should be constrained")
 	}
-	if width != 816 || height != 556 {
-		t.Fatalf("popup must adapt to the current arranged owner: %dx%d", width, height)
+	// 1440x900 natural popup into 816x556 cell must shrink uniformly:
+	// scale = min(816/1440, 556/900) = 816/1440 → 816x510.
+	if width != 816 || height != 510 {
+		t.Fatalf("popup must shrink proportionally into the arranged owner: %dx%d", width, height)
 	}
 	if x < 2 || y < 2 || x+width > 818 || y+height > 558 {
 		t.Fatalf("popup escaped owner bounds: x=%d y=%d width=%d height=%d", x, y, width, height)
+	}
+}
+
+func TestSyncPopupProportionalShrinkPreservesAspectRatio(t *testing.T) {
+	// Tall wallet notification that only exceeds the cell height.
+	x, y, width, height, changed := constrainSyncPopupRect(
+		winRect{Left: 50, Top: 50, Right: 410, Bottom: 710}, // 360x660
+		winRect{Left: 0, Top: 0, Right: 500, Bottom: 400},   // cell 500x400, inset 2 → 496x396
+		2,
+	)
+	if !changed {
+		t.Fatal("tall popup must be scaled into the environment cell")
+	}
+	// scale = 396/660 = 0.6 → 216x396
+	if width != 216 || height != 396 {
+		t.Fatalf("aspect ratio not preserved: %dx%d", width, height)
+	}
+	if x < 2 || y < 2 || x+width > 498 || y+height > 398 {
+		t.Fatalf("scaled popup outside cell: %d,%d %dx%d", x, y, width, height)
 	}
 }
 
@@ -36,11 +57,14 @@ func TestSyncPopupPreservesExtensionNaturalSizeWhenItFits(t *testing.T) {
 }
 
 func TestPausedInputKeepsPopupConfinement(t *testing.T) {
+	// Multi-open environments own confinement now. "active" means environments
+	// are running; pause must not release geometry ownership. Layout hold still
+	// yields while tiles are moving.
 	if !syncPopupConfinementEnabled(true, true, 0) {
 		t.Fatal("pausing input must not disable popup containment")
 	}
 	if syncPopupConfinementEnabled(false, false, 0) {
-		t.Fatal("a stopped sync session must release popup containment")
+		t.Fatal("no running environment must release popup containment")
 	}
 	if syncPopupConfinementEnabled(true, false, 1) {
 		t.Fatal("popup containment must yield while an explicit layout is updating")
@@ -84,8 +108,45 @@ func TestSyncPopupPlacementNeverPromotesDesktopTopmost(t *testing.T) {
 func TestOtherExtensionPromptCandidateUsesOwnerBounds(t *testing.T) {
 	owner := winRect{Left: 0, Top: 0, Right: 600, Bottom: 500}
 	popup := winRect{Left: 520, Top: 50, Right: 920, Bottom: 450}
-	if !isSyncPopupSurfaceCandidate("Permission request", popup, owner, false) {
+	if !isSyncPopupSurfaceCandidate("Permission request", popup, owner, false, true) {
 		t.Fatal("non-wallet extension prompt must be contained after process-tree ownership is resolved")
+	}
+}
+
+func TestProcessLinkedWalletNotificationIsContained(t *testing.T) {
+	owner := winRect{Left: 100, Top: 100, Right: 900, Bottom: 700}
+	// Empty-title Aura shell sized like a MetaMask notification host.
+	popup := winRect{Left: 400, Top: 200, Right: 760, Bottom: 800}
+	if !isSyncPopupSurfaceCandidate("", popup, owner, false, true) {
+		t.Fatal("process-linked empty-title wallet shell must be constrained to its environment")
+	}
+	// Full-size frame with a browser title must never be treated as a popup.
+	full := winRect{Left: 100, Top: 100, Right: 900, Bottom: 700}
+	if isSyncPopupSurfaceCandidate("example.com - Google Chrome", full, owner, false, true) {
+		t.Fatal("main browser frames must not be adopted as wallet popups")
+	}
+}
+
+func TestOwnerLinkedSurfaceAlwaysContained(t *testing.T) {
+	owner := winRect{Left: 0, Top: 0, Right: 800, Bottom: 600}
+	popup := winRect{Left: 10, Top: 10, Right: 790, Bottom: 590}
+	if !isSyncPopupSurfaceCandidate("", popup, owner, true, false) {
+		t.Fatal("Win32-owned Chrome surfaces must stay confined to the owner cell")
+	}
+}
+
+func TestConstrainSyncPopupKeepsZOrderAboveOwnerCell(t *testing.T) {
+	// Geometry: oversized notification that spilled outside a tiled cell.
+	x, y, w, h, changed := constrainSyncPopupRect(
+		winRect{Left: -40, Top: 20, Right: 400, Bottom: 700},
+		winRect{Left: 0, Top: 0, Right: 420, Bottom: 560},
+		2,
+	)
+	if !changed {
+		t.Fatal("spilled wallet popup must be moved back into the environment cell")
+	}
+	if x < 2 || y < 2 || x+w > 418 || y+h > 558 {
+		t.Fatalf("popup left its environment cell: %d,%d %dx%d", x, y, w, h)
 	}
 }
 

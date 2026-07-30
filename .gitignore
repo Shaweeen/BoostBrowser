@@ -41,3 +41,8 @@ __pycache__/
 .env
 .env.local
 config.yaml.bak*
+
+# Accidental cookie-import staging under the backend package cwd
+# (profile UUID folders with .boost-browser-import-cookies.json).
+# Real environment data must live under the app data root, never backend/.
+backend/*-*-*-*-*/

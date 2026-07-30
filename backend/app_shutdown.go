@@ -12,6 +12,10 @@ func (a *App) stopRuntimeServices() {
 			a.speedScheduler = nil
 		}
 
+		// Stop multi-open popup confinement before environments close so it does
+		// not enumerate disappearing HWNDs during shutdown.
+		a.unregisterEnvironmentPopupConfiner()
+
 		// 跟随上游 Ant-Browser：退出时按顺序停止浏览器实例，避免并发 taskkill
 		// 和残留进程扫描把 Wails 主进程/子进程状态打乱，造成主程序闪退或 watchdog 重启。
 		a.stopTrackedBrowserProcesses()

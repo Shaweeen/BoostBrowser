@@ -148,9 +148,13 @@ type startupPageCloseAction struct {
 }
 
 const (
-	startupPageCleanupObservationWindow = 2500 * time.Millisecond
+	// Observation stays bounded so multi-window batch starts remain responsive,
+	// while quiet-pass early exit releases machines that never open extension UI.
+	startupPageCleanupObservationWindow = 3500 * time.Millisecond
 	startupPageCleanupPollInterval      = 100 * time.Millisecond
-	startupPageCleanupQuietPasses       = 6
+	// Quiet passes apply whenever no automatic extension page is visible, not
+	// only after the first close. Delayed MetaMask tabs still reset the counter.
+	startupPageCleanupQuietPasses = 8
 )
 
 func finalizeBrowserStartupTabs(debugPort int, profileId string) {
@@ -185,11 +189,30 @@ func finalizeBrowserStartupTabs(debugPort int, profileId string) {
 		maxPasses,
 		startupPageCleanupQuietPasses,
 	)
-	if closedExtensions > 0 || closedBlanks > 0 {
+	blankEnsured := ensureSingleNaturalBlankStartupPage(
+		func() ([]cdpTarget, error) { return listCDPTargets(debugPort) },
+		func() (string, error) {
+			result, createErr := browserClient.call("Target.createTarget", map[string]any{"url": "about:blank"}, 2*time.Second)
+			if createErr != nil {
+				return "", createErr
+			}
+			if result == nil {
+				return "", fmt.Errorf("Target.createTarget 返回空 result")
+			}
+			targetID, _ := result["targetId"].(string)
+			return strings.TrimSpace(targetID), nil
+		},
+		func(targetID string) error {
+			_, closeErr := browserClient.call("Target.closeTarget", map[string]any{"targetId": targetID}, 1500*time.Millisecond)
+			return closeErr
+		},
+	)
+	if closedExtensions > 0 || closedBlanks > 0 || blankEnsured {
 		logger.New("Browser").Info("启动页面已收敛为唯一空白页",
 			logger.F("profile_id", profileId),
 			logger.F("closed_extension_pages", closedExtensions),
 			logger.F("closed_extra_blank_pages", closedBlanks),
+			logger.F("blank_ensured", blankEnsured),
 		)
 	}
 	// Browser windows are launched at their real onscreen position now.  Do not
@@ -206,25 +229,31 @@ func closeUnwantedStartupPagesDuringLaunch(
 	closeTarget func(string) error,
 	pause func(time.Duration),
 	maxPasses int,
-	quietPassesAfterExtension int,
+	quietPassesRequired int,
 ) (int, int) {
 	if fetch == nil || closeTarget == nil || maxPasses <= 0 {
 		return 0, 0
 	}
-	if quietPassesAfterExtension <= 0 {
-		quietPassesAfterExtension = 1
+	if quietPassesRequired <= 0 {
+		quietPassesRequired = 1
 	}
 
 	closedTargetIDs := make(map[string]struct{})
 	closedExtensions := 0
 	closedBlanks := 0
-	extensionClosed := false
 	quietPasses := 0
 
 	for pass := 0; pass < maxPasses; pass++ {
 		targets, err := fetch()
 		closedExtensionThisPass := false
+		liveExtensionPages := false
 		if err == nil {
+			for _, target := range targets {
+				if shouldCloseAutomaticExtensionStartupTarget(target) {
+					liveExtensionPages = true
+					break
+				}
+			}
 			for _, action := range planStartupPageCleanup(targets) {
 				if _, alreadyClosed := closedTargetIDs[action.targetID]; alreadyClosed {
 					continue
@@ -236,7 +265,6 @@ func closeUnwantedStartupPagesDuringLaunch(
 				switch action.kind {
 				case startupPageCloseExtension:
 					closedExtensions++
-					extensionClosed = true
 					closedExtensionThisPass = true
 				case startupPageCloseExtraBlank:
 					closedBlanks++
@@ -244,14 +272,15 @@ func closeUnwantedStartupPagesDuringLaunch(
 			}
 		}
 
-		if extensionClosed {
-			if closedExtensionThisPass || err != nil {
-				quietPasses = 0
-			} else {
-				quietPasses++
-				if quietPasses >= quietPassesAfterExtension {
-					break
-				}
+		// Exit once the page set is quiet: no live automatic extension page and
+		// no close action this pass. This covers both "no extension UI ever" and
+		// "extension UI already closed", while a late MetaMask tab resets quiet.
+		if err != nil || closedExtensionThisPass || liveExtensionPages {
+			quietPasses = 0
+		} else {
+			quietPasses++
+			if quietPasses >= quietPassesRequired {
+				break
 			}
 		}
 		if pass+1 < maxPasses && pause != nil {
@@ -286,13 +315,70 @@ func planStartupPageCleanup(targets []cdpTarget) []startupPageCloseAction {
 	return actions
 }
 
+// ensureSingleNaturalBlankStartupPage guarantees the user-facing startup set is
+// exactly one natural blank page. Closing every auto-opened wallet tab can leave
+// Chrome with zero pages; creating about:blank restores the expected shell.
+// Returns true when a blank was created or an extra blank was closed.
+func ensureSingleNaturalBlankStartupPage(
+	fetch func() ([]cdpTarget, error),
+	createBlank func() (string, error),
+	closeTarget func(string) error,
+) bool {
+	if fetch == nil {
+		return false
+	}
+	targets, err := fetch()
+	if err != nil {
+		return false
+	}
+	blankIDs := make([]string, 0, 2)
+	for _, target := range targets {
+		if target.ID == "" {
+			continue
+		}
+		if isNaturalBlankPageTarget(target) {
+			blankIDs = append(blankIDs, target.ID)
+		}
+	}
+	changed := false
+	if len(blankIDs) == 0 {
+		if createBlank == nil {
+			return false
+		}
+		id, createErr := createBlank()
+		if createErr != nil || strings.TrimSpace(id) == "" {
+			return false
+		}
+		return true
+	}
+	if closeTarget == nil {
+		return false
+	}
+	for _, id := range blankIDs[1:] {
+		if closeTarget(id) == nil {
+			changed = true
+		}
+	}
+	return changed
+}
+
 func isNaturalBlankPageTarget(target cdpTarget) bool {
 	if !strings.EqualFold(strings.TrimSpace(target.Type), "page") {
 		return false
 	}
 	url := strings.ToLower(strings.TrimSpace(target.URL))
-	return url == "" || url == "about:blank" || url == "about:blank#" ||
-		url == "chrome://newtab/" || url == "chrome://newtab"
+	switch {
+	case url == "" || url == "about:blank" || url == "about:blank#":
+		return true
+	case url == "chrome://newtab/" || url == "chrome://newtab":
+		return true
+	case url == "chrome://new-tab-page/" || url == "chrome://new-tab-page":
+		return true
+	case strings.HasPrefix(url, "chrome://new-tab-page/"):
+		return true
+	default:
+		return false
+	}
 }
 
 func shouldCloseAutomaticExtensionStartupTarget(target cdpTarget) bool {
@@ -328,5 +414,18 @@ func isExtensionStartupURL(rawURL string) bool {
 	if u == "" {
 		return false
 	}
-	return strings.HasPrefix(u, "chrome-extension://") || strings.HasPrefix(u, "chrome://extensions")
+	if strings.HasPrefix(u, "chrome-extension://") || strings.HasPrefix(u, "chrome://extensions") {
+		return true
+	}
+	// Chromium first-run / product pages that compete with the single blank shell.
+	for _, prefix := range []string{
+		"chrome://welcome",
+		"chrome://whats-new",
+		"chrome://settings/help",
+	} {
+		if u == prefix || strings.HasPrefix(u, prefix+"/") || strings.HasPrefix(u, prefix+"#") {
+			return true
+		}
+	}
+	return false
 }

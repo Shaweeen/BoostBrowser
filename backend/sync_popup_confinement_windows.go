@@ -5,11 +5,8 @@ package backend
 import (
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"time"
 	"unsafe"
-
-	"boost-browser/backend/internal/logger"
 
 	"golang.org/x/sys/windows"
 )
@@ -17,13 +14,15 @@ import (
 const syncPopupBoundsInset = 2
 
 func syncPopupBoundsIntervalForFollowers(followerCount int) time.Duration {
+	// Environment multi-open confinement is not input-critical. Prefer lower
+	// CPU over sub-frame popup repositioning; geometry still settles quickly.
 	switch {
 	case followerCount >= 20:
-		return 250 * time.Millisecond
+		return 450 * time.Millisecond
 	case followerCount >= 8:
-		return 180 * time.Millisecond
+		return 350 * time.Millisecond
 	default:
-		return 120 * time.Millisecond
+		return 280 * time.Millisecond
 	}
 }
 
@@ -104,13 +103,21 @@ var syncPopupBoundsEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lP
 		return 1
 	}
 	owner, ownerLinked, ok := findSyncPopupOwner(hwnd, search.owners)
+	processLinked := false
 	if !ok {
+		// MetaMask/Rabby notification hosts often live in a Chrome child process
+		// whose Win32 owner is not the browser frame. Resolve via the process
+		// tree so multi-environment wallets still map to the correct cell.
 		if processOwner, found := search.findProcessTreeOwner(windowPID(hwnd)); found {
 			owner = processOwner
 			ok = true
+			processLinked = true
 		}
+	} else if !ownerLinked {
+		// Same-PID match without GW_OWNER is still a process-level link.
+		processLinked = true
 	}
-	if !ok || !isSyncPopupSurfaceCandidate(title, popupRect, owner.rect, ownerLinked) {
+	if !ok || !isSyncPopupSurfaceCandidate(title, popupRect, owner.rect, ownerLinked, processLinked) {
 		return 1
 	}
 
@@ -134,64 +141,10 @@ var syncPopupBoundsEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lP
 	return 1
 })
 
-func (s *InputSyncer) syncPopupBoundsLoop(stop <-chan struct{}) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			logger.New("InputSyncer").Error("sync popup bounds loop panic recovered", logger.F("error", recovered))
-		}
-	}()
-	ticker := time.NewTicker(syncPopupBoundsIntervalForFollowers(len(s.getFollowerSnapshot())))
-	defer ticker.Stop()
-
-	// Run once immediately. Toolbar menus can be opened before the first timer
-	// tick when the user starts sync with the master already focused.
-	s.constrainSyncPopupSurfaces()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-ticker.C:
-			s.constrainSyncPopupSurfaces()
-		}
-	}
-}
-
-func syncPopupConfinementEnabled(active, paused bool, layoutUpdating int32) bool {
-	// `paused` intentionally does not disable geometry ownership. Pause controls
-	// input delivery only; popup containment lasts for the active sync session.
-	_ = paused
-	return active && layoutUpdating == 0
-}
-
-func (s *InputSyncer) constrainSyncPopupSurfaces() {
-	// Pausing input synchronization must not abandon popup geometry. Users can
-	// still open wallet prompts while paused, and those surfaces must remain
-	// inside the environment's current arranged rectangle. StopSync still ends
-	// this loop and releases all synchronization-owned resources.
-	if s == nil || !syncPopupConfinementEnabled(s.IsActive(), s.IsPaused(), atomic.LoadInt32(&s.layoutUpdating)) {
-		return
-	}
-	if !atomic.CompareAndSwapInt32(&s.popupUpdating, 0, 1) {
-		return
-	}
-	defer atomic.StoreInt32(&s.popupUpdating, 0)
-	mainWindows := append([]windows.HWND{s.masterHwnd}, s.getFollowerSnapshot()...)
-	owners := make([]syncPopupOwnerWindow, 0, len(mainWindows))
-	seen := make(map[windows.HWND]struct{}, len(mainWindows))
-	for _, hwnd := range mainWindows {
-		if hwnd == 0 || !isWindow(hwnd) {
-			continue
-		}
-		if _, duplicate := seen[hwnd]; duplicate {
-			continue
-		}
-		seen[hwnd] = struct{}{}
-		rect, ok := getTopLevelWindowRect(hwnd)
-		if !ok || rect.Right <= rect.Left || rect.Bottom <= rect.Top {
-			continue
-		}
-		owners = append(owners, syncPopupOwnerWindow{hwnd: hwnd, pid: windowPID(hwnd), rect: rect})
-	}
+// constrainPopupSurfacesToOwners is the single popup geometry implementation used
+// by the environment-wide confiner. Callers supply the current environment main
+// windows (every running profile), not only the active sync master/followers.
+func constrainPopupSurfacesToOwners(owners []syncPopupOwnerWindow) {
 	if len(owners) == 0 {
 		return
 	}
@@ -199,6 +152,13 @@ func (s *InputSyncer) constrainSyncPopupSurfaces() {
 	procEnumWindows.Call(syncPopupBoundsEnumCallback, uintptr(unsafe.Pointer(search)))
 	search.applyPlacements()
 	runtime.KeepAlive(search)
+}
+
+func syncPopupConfinementEnabled(active, paused bool, layoutUpdating int32) bool {
+	// Legacy name kept for tests. Pause no longer gates geometry; multi-open
+	// environments own confinement even without the sync assistant.
+	_ = paused
+	return active && layoutUpdating == 0
 }
 
 func findSyncPopupOwner(hwnd windows.HWND, owners []syncPopupOwnerWindow) (syncPopupOwnerWindow, bool, bool) {
@@ -317,7 +277,7 @@ func (search *syncPopupBoundsSearch) applyPlacements() {
 	}
 }
 
-func isSyncPopupSurfaceCandidate(title string, popupRect, ownerRect winRect, ownerLinked bool) bool {
+func isSyncPopupSurfaceCandidate(title string, popupRect, ownerRect winRect, ownerLinked bool, processLinked bool) bool {
 	width := int(popupRect.Right - popupRect.Left)
 	height := int(popupRect.Bottom - popupRect.Top)
 	ownerWidth := int(ownerRect.Right - ownerRect.Left)
@@ -329,11 +289,23 @@ func isSyncPopupSurfaceCandidate(title string, popupRect, ownerRect winRect, own
 	if looksLikeServiceWorkerDevToolsTitle(lowerTitle) {
 		return false
 	}
+	// Direct Win32 owner chain: every Chrome surface under that frame belongs to
+	// the tiled environment (menus, wallet prompts, nested submenus).
 	if ownerLinked {
 		return true
 	}
+	// Never adopt another full browser frame even when the PID matches.
 	if looksLikeMainBrowserWindowTitle(lowerTitle) && !isDefinitiveExtensionPopupTitle(lowerTitle) {
 		return false
+	}
+	// Process-tree ownership (typical for MV3 wallet notification hosts): accept
+	// wallet/extension titles and any smaller-than-owner Chrome widget, including
+	// empty-title Aura notification shells.
+	if processLinked {
+		if isDefinitiveExtensionPopupTitle(lowerTitle) || isCompactExtensionPopupTitle(title) {
+			return true
+		}
+		return width < ownerWidth || height < ownerHeight
 	}
 	// Empty-title Aura widgets cover Chrome menus, comboboxes and nested menu
 	// surfaces, but a full-size empty Chrome frame can be a second browser
@@ -356,16 +328,38 @@ func constrainSyncPopupRect(popup, owner winRect, inset int) (x, y, width, heigh
 		return int(popup.Left), int(popup.Top), int(popup.Right - popup.Left), int(popup.Bottom - popup.Top), false
 	}
 
-	width = int(popup.Right - popup.Left)
-	height = int(popup.Bottom - popup.Top)
-	if width <= 0 || height <= 0 {
-		return int(popup.Left), int(popup.Top), width, height, false
+	naturalWidth := int(popup.Right - popup.Left)
+	naturalHeight := int(popup.Bottom - popup.Top)
+	if naturalWidth <= 0 || naturalHeight <= 0 {
+		return int(popup.Left), int(popup.Top), naturalWidth, naturalHeight, false
 	}
-	if width > availableWidth {
-		width = availableWidth
-	}
-	if height > availableHeight {
-		height = availableHeight
+	// Keep the extension's natural aspect ratio. Only shrink uniformly when the
+	// popup cannot fit the current environment cell (tiled/stacked/side-by-side).
+	// Never stretch or apply a fixed wallet size template.
+	width, height = naturalWidth, naturalHeight
+	if width > availableWidth || height > availableHeight {
+		scaleW := float64(availableWidth) / float64(width)
+		scaleH := float64(availableHeight) / float64(height)
+		scale := scaleW
+		if scaleH < scaleW {
+			scale = scaleH
+		}
+		if scale < 1 {
+			width = int(float64(naturalWidth) * scale)
+			height = int(float64(naturalHeight) * scale)
+			if width < 1 {
+				width = 1
+			}
+			if height < 1 {
+				height = 1
+			}
+			if width > availableWidth {
+				width = availableWidth
+			}
+			if height > availableHeight {
+				height = availableHeight
+			}
+		}
 	}
 	x = int(popup.Left)
 	y = int(popup.Top)
@@ -381,6 +375,6 @@ func constrainSyncPopupRect(popup, owner winRect, inset int) (x, y, width, heigh
 	if y+height > bottom {
 		y = bottom - height
 	}
-	changed = x != int(popup.Left) || y != int(popup.Top) || width != int(popup.Right-popup.Left) || height != int(popup.Bottom-popup.Top)
+	changed = x != int(popup.Left) || y != int(popup.Top) || width != naturalWidth || height != naturalHeight
 	return x, y, width, height, changed
 }

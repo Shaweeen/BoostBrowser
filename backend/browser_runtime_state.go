@@ -70,6 +70,9 @@ func (a *App) emitBrowserInstanceStarted(profile *BrowserProfile, reused bool) {
 		return
 	}
 	runtime.EventsEmit(a.ctx, "browser:instance:started", browserInstanceEventPayload(profile, reused))
+	// Multi-open popup confinement is owned by the main client and must track
+	// every running environment, not only the sync assistant session.
+	a.scheduleEnvironmentPopupConfinementRefresh()
 }
 
 func (a *App) emitBrowserInstanceUpdated(profile *BrowserProfile) {
@@ -77,6 +80,7 @@ func (a *App) emitBrowserInstanceUpdated(profile *BrowserProfile) {
 		return
 	}
 	runtime.EventsEmit(a.ctx, "browser:instance:updated", browserInstanceEventPayload(profile, false))
+	a.scheduleEnvironmentPopupConfinementRefresh()
 }
 
 func (a *App) markProfileRunningLocked(profileId string, profile *BrowserProfile, cmd *exec.Cmd, pid int, debugPort int, debugReady bool, runtimeWarning string) {

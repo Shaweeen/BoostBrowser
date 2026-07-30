@@ -788,6 +788,7 @@ export function WindowSyncPage() {
                 {isSyncPaused ? '同步已暂停' : `${activeSyncCount} 个环境同步中`}
               </div>
               <div className="mt-0.5 text-[11px] text-white/72">主控 {masterProfile?.profileName || masterProfile?.profileId || '-'} · 跟随 {followerCount} · {statusLayoutLabel} · Esc {isSyncPaused ? '恢复' : '暂停'}</div>
+              <div className="mt-0.5 text-[10px] text-white/55">Ctrl+滚轮缩放 · Shift+滚轮横向 · 中文输入法自动跟打</div>
             </div>
             <button
               type="button"
@@ -820,12 +821,13 @@ export function WindowSyncPage() {
           </div>
 
           <div className="mt-2 grid grid-cols-3 gap-2" style={{ ['--wails-draggable' as any]: 'no-drag' }}>
-            {([['1ms', '1 ms'], ['5ms', '5 ms'], ['random', '随机延时']] as Array<[DelayPreset, string]>).map(([value, label]) => (
+            {([['1ms', '即时'], ['5ms', '轻抖动'], ['random', '随机延时']] as Array<[DelayPreset, string]>).map(([value, label]) => (
               <button
                 key={value}
                 type="button"
                 className={`h-8 rounded-xl border px-2 text-xs font-semibold transition ${delayPreset === value ? 'border-[#4ade80] bg-[#22c55e] text-white shadow-[0_6px_16px_rgba(34,197,94,.24)]' : 'border-white/16 bg-white/10 text-white/80 hover:bg-white/16'}`}
                 onClick={() => void handleDelayPresetChange(value)}
+                title={value === '1ms' ? '几乎无延迟，日常操作推荐' : value === '5ms' ? '轻微错峰，减轻同时点击压力' : '随机 1–30ms，模拟人工差异'}
               >
                 {label}
               </button>
@@ -1037,9 +1039,14 @@ export function WindowSyncPage() {
 
           {!compactRunningMode && (
             <div className="mt-5 rounded-2xl border border-[#cddcff] bg-[#edf3ff] px-4 py-3 text-sm text-[#4c6fb8]">
-              <div className="flex items-center gap-2">
-                <Info className="h-4 w-4 shrink-0" />
-                <span>主控窗口位置已支持自定义输入，请按需设置。同步开始后顶部会显示运行条，可随时停止和调整窗口排列。</span>
+              <div className="flex items-start gap-2">
+                <Info className="mt-0.5 h-4 w-4 shrink-0" />
+                <div className="space-y-1.5">
+                  <div className="font-medium text-[#3a5fad]">同步操作提示</div>
+                  <div>1. 勾选环境 → 设主控 → 开始同步。在主控窗口操作，跟随窗口实时复现。</div>
+                  <div>2. <span className="font-medium">Esc</span> 暂停/恢复 · <span className="font-medium">Ctrl+滚轮</span> 缩放 · <span className="font-medium">Shift+滚轮</span> 横向滚动 · 滚轮/滚动条/键鼠/输入法均可同步。</div>
+                  <div>3. 延迟默认关闭（最跟手）；需要错峰时再选「即时 / 轻抖动 / 随机延时」。</div>
+                </div>
               </div>
             </div>
           )}

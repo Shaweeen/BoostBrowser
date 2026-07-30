@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -334,6 +335,23 @@ func (m *Manager) Create(input ProfileInput) (*Profile, error) {
 	log.Info("浏览器配置创建", logger.F("profile_id", profileId), logger.F("profile_name", input.ProfileName))
 	if err := m.commitProfileLocked(profile); err != nil {
 		return nil, err
+	}
+	// Create the empty data shell and identity pointer immediately so backup,
+	// edit and recover always resolve Profile ID → physical directory even
+	// before the first browser start. No Cookies/wallet content is written.
+	if dataDir := m.ResolveUserDataDir(profile); dataDir != "" {
+		if err := os.MkdirAll(dataDir, 0755); err != nil {
+			log.Warn("环境数据目录预创建失败（不阻塞创建）",
+				logger.F("profile_id", profileId),
+				logger.F("dir", dataDir),
+				logger.F("error", err.Error()),
+			)
+		} else if err := m.WriteProfileDataPointer(profile, "closed", 0, time.Now()); err != nil {
+			log.Warn("环境数据指向写入失败（不阻塞创建）",
+				logger.F("profile_id", profileId),
+				logger.F("error", err.Error()),
+			)
+		}
 	}
 	if m.CodeProvider != nil {
 		if code, err := m.CodeProvider.EnsureCode(profile.ProfileId); err == nil {

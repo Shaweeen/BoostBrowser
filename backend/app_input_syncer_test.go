@@ -77,14 +77,92 @@ func TestEscapePauseKeepsSessionAndTogglesImmediately(t *testing.T) {
 }
 
 func TestLargeFollowerSchedulingUsesStableCadence(t *testing.T) {
-	if got := syncMouseMoveThrottle(2); got != 8*time.Millisecond {
+	if got := syncMouseMoveThrottle(2); got != 6*time.Millisecond {
 		t.Fatalf("small follower throttle=%v", got)
 	}
-	if got := syncMouseMoveThrottle(20); got != 32*time.Millisecond {
+	if got := syncMouseMoveThrottle(20); got != 28*time.Millisecond {
 		t.Fatalf("20 follower throttle=%v", got)
 	}
-	if got := syncPopupBoundsIntervalForFollowers(20); got != 250*time.Millisecond {
+	if got := syncMouseDragThrottle(2); got != 4*time.Millisecond {
+		t.Fatalf("drag throttle should be denser than idle hover: %v", got)
+	}
+	if got := syncMouseDragThrottle(20); got >= syncMouseMoveThrottle(20) {
+		t.Fatalf("drag throttle must stay denser under large follower counts")
+	}
+	if got := syncPopupBoundsIntervalForFollowers(20); got != 450*time.Millisecond {
 		t.Fatalf("20 follower popup interval=%v", got)
+	}
+	if got := syncPopupBoundsIntervalForFollowers(2); got != 280*time.Millisecond {
+		t.Fatalf("small multi-open popup interval=%v", got)
+	}
+}
+
+func TestPageWheelDeltaMappingForZoomAndHorizontal(t *testing.T) {
+	// Ctrl+wheel keeps vertical delta for browser zoom; Shift+vertical becomes horizontal.
+	deltaX, deltaY := pageWheelDeltas(WM_MOUSEWHEEL, 120, MK_CONTROL)
+	if deltaX != 0 || deltaY != -120 {
+		t.Fatalf("ctrl zoom deltas: dx=%v dy=%v", deltaX, deltaY)
+	}
+	deltaX, deltaY = pageWheelDeltas(WM_MOUSEWHEEL, 120, MK_SHIFT)
+	if deltaX != -120 || deltaY != 0 {
+		t.Fatalf("shift horizontal deltas: dx=%v dy=%v", deltaX, deltaY)
+	}
+	deltaX, deltaY = pageWheelDeltas(WM_MOUSEHWHEEL, 80, 0)
+	if deltaX != 80 || deltaY != 0 {
+		t.Fatalf("native horizontal wheel: dx=%v dy=%v", deltaX, deltaY)
+	}
+}
+
+func TestWaitForFollowerCDPMatchOnlyForPopupLikeTargets(t *testing.T) {
+	if waitForFollowerCDPMatch(cdpTarget{Type: "page", URL: "https://example.com/"}) {
+		t.Fatal("normal web pages must not enable popup wait retries")
+	}
+	if !waitForFollowerCDPMatch(cdpTarget{
+		Type:     "page",
+		URL:      "chrome-extension://nkbihfbeogaeaoehlefnkodbefgpgknn/notification.html",
+		OpenerID: "parent",
+	}) {
+		t.Fatal("wallet notification surfaces must keep popup wait")
+	}
+}
+
+func TestFocusedMasterCDPTargetCacheIsShortLived(t *testing.T) {
+	s := NewInputSyncer()
+	s.mu.Lock()
+	s.cachedMasterPort = 9222
+	s.cachedMasterTarget = cdpTarget{ID: "page-1", Type: "page", WebSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/1"}
+	s.cachedMasterTargetExp = time.Now().Add(focusedMasterCDPTargetCacheTTL)
+	s.mu.Unlock()
+
+	got, ok := s.focusedMasterCDPTarget(9222)
+	if !ok || got.ID != "page-1" {
+		t.Fatalf("expected cached master target, got ok=%v id=%q", ok, got.ID)
+	}
+	s.invalidateMasterCDPTargetCache()
+	s.mu.Lock()
+	if s.cachedMasterPort != 0 || s.cachedMasterTarget.ID != "" {
+		t.Fatalf("cache was not cleared: port=%d id=%q", s.cachedMasterPort, s.cachedMasterTarget.ID)
+	}
+	s.mu.Unlock()
+}
+
+func TestEnqueuePageInputDropsMovesBeforeCriticalEvents(t *testing.T) {
+	s := NewInputSyncer()
+	atomic.StoreInt32(&s.active, 1)
+	s.pageInputQueue = make(chan pageInputEvent, 1)
+	// Fill the queue so the next enqueue hits the overflow path.
+	s.pageInputQueue <- pageInputEvent{generation: 1, kind: pageInputMove, action: func() {}}
+
+	s.enqueuePageInput(pageInputMove, func() {})
+	if atomic.LoadInt32(&s.pageInputDrops) != 1 {
+		t.Fatalf("move overflow should drop immediately, drops=%d", atomic.LoadInt32(&s.pageInputDrops))
+	}
+
+	// Critical path may wait briefly; with a full queue and no consumer it should
+	// still count as a drop after the short wait, without panicking.
+	s.enqueuePageInput(pageInputCritical, func() {})
+	if atomic.LoadInt32(&s.pageInputDrops) < 1 {
+		t.Fatal("critical overflow accounting missing")
 	}
 }
 
@@ -261,17 +339,20 @@ func TestConstrainSyncPopupRectLeavesContainedPopupUnchanged(t *testing.T) {
 func TestSyncPopupCandidateRejectsMainWindowAndDevTools(t *testing.T) {
 	owner := winRect{Left: 0, Top: 0, Right: 500, Bottom: 700}
 	popup := winRect{Left: 200, Top: 100, Right: 480, Bottom: 600}
-	if isSyncPopupSurfaceCandidate("Example - Google Chrome", popup, owner, false) {
+	if isSyncPopupSurfaceCandidate("Example - Google Chrome", popup, owner, false, false) {
 		t.Fatal("unowned browser frame must not be constrained as a popup")
 	}
-	if isSyncPopupSurfaceCandidate("DevTools - chrome-extension://example", popup, owner, true) {
+	if isSyncPopupSurfaceCandidate("DevTools - chrome-extension://example", popup, owner, true, false) {
 		t.Fatal("DevTools must not be constrained as a popup")
 	}
-	if !isSyncPopupSurfaceCandidate("", popup, owner, false) {
-		t.Fatal("empty-title Chrome menu surface should be constrained")
+	if !isSyncPopupSurfaceCandidate("", popup, owner, false, true) {
+		t.Fatal("empty-title Chrome menu surface should be constrained when process-linked")
 	}
-	if isSyncPopupSurfaceCandidate("", owner, owner, false) {
+	if isSyncPopupSurfaceCandidate("", owner, owner, false, true) {
 		t.Fatal("full-size empty Chrome frame must not be adopted as a popup")
+	}
+	if !isSyncPopupSurfaceCandidate("MetaMask Notification", popup, owner, false, true) {
+		t.Fatal("titled wallet notification must be confined to its environment cell")
 	}
 }
 

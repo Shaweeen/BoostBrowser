@@ -484,6 +484,10 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
+	// Wallet/content-script providers key off chrome-extension://<id>. Repair
+	// missing CRX public keys in --load-extension packages before Chrome starts
+	// so path-derived IDs cannot hide Local Extension Settings vault data.
+	a.repairLoadExtensionStableIDs(args)
 	// Final authoritative placement pass: fingerprint/profile/API arguments are
 	// already appended, so stale sizes and maximised/fullscreen flags cannot win.
 	args, removedWindowArgs := sanitizeManagedWindowPlacementArgs(args)
@@ -1213,25 +1217,31 @@ func (a *App) waitDetachedBrowser(profileId string, debugPort int) {
 }
 
 func tryCloseBrowserViaCDP(debugPort int, timeout time.Duration) bool {
-	if debugPort <= 0 || !canConnectDebugPort(debugPort, 250*time.Millisecond) {
+	if debugPort <= 0 || !canConnectDebugPort(debugPort, 200*time.Millisecond) {
 		return false
 	}
 
 	_ = cdpBrowserCall(debugPort, "Browser.close", nil)
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if !canConnectDebugPort(debugPort, 250*time.Millisecond) {
+		if !canConnectDebugPort(debugPort, 150*time.Millisecond) {
 			return true
 		}
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(80 * time.Millisecond)
 	}
 	return false
 }
 
 func waitEnvironmentDataFlush(debugPort, pid int, userDataDir string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
+	// Require two consecutive ready samples so a transient lock disappearance
+	// does not report success before Chromium finishes LevelDB flushes.
+	// Poll faster than the previous fixed 150ms+150ms path once the process is
+	// already exiting, without shortening the safety barrier itself.
+	const readySamplesNeeded = 2
+	readySamples := 0
 	for time.Now().Before(deadline) {
-		debugClosed := debugPort <= 0 || !canConnectDebugPort(debugPort, 200*time.Millisecond)
+		debugClosed := debugPort <= 0 || !canConnectDebugPort(debugPort, 120*time.Millisecond)
 		processClosed := pid <= 0
 		if pid > 0 {
 			alive, err := isProcessAlivePID(pid)
@@ -1239,12 +1249,16 @@ func waitEnvironmentDataFlush(debugPort, pid int, userDataDir string, timeout ti
 		}
 		profileUnlocked := !browserSingletonArtifactsPresent(userDataDir)
 		if debugClosed && processClosed && profileUnlocked {
-			// Give Chromium's completed close handlers one final scheduling turn
-			// after the process and profile lock have both disappeared.
-			time.Sleep(150 * time.Millisecond)
-			return true
+			readySamples++
+			if readySamples >= readySamplesNeeded {
+				return true
+			}
+			time.Sleep(40 * time.Millisecond)
+			continue
 		}
-		time.Sleep(150 * time.Millisecond)
+		readySamples = 0
+		// While any barrier is still open, poll a little slower to avoid hot loops.
+		time.Sleep(80 * time.Millisecond)
 	}
 	return false
 }
@@ -1300,6 +1314,8 @@ func (a *App) markProfileStoppedLocked(profileId string, profile *BrowserProfile
 		a.launchServer.ClearActiveProfile(profileId)
 	}
 	a.persistBrowserRuntimeSnapshotLocked()
+	// Async: this helper may already hold browserMgr.Mutex.
+	a.scheduleEnvironmentPopupConfinementRefresh()
 }
 
 func (a *App) openBrowserWindowForRunningProfile(profile *BrowserProfile, extraLaunchArgs []string, startURLs []string) error {

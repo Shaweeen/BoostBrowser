@@ -551,9 +551,7 @@ export async function testProxyConnectivity(proxyId: string, proxyConfig: string
   if (bindings?.TestProxyConnectivity) {
     return (await bindings.TestProxyConnectivity(proxyId, proxyConfig)) || { proxyId, ok: false, latencyMs: 0, error: '调用失败' }
   }
-  // mock: simulate latency
-  await new Promise(r => setTimeout(r, 300 + Math.random() * 500))
-  return { proxyId, ok: true, latencyMs: Math.floor(100 + Math.random() * 200), error: '' }
+  return { proxyId, ok: false, latencyMs: 0, error: 'Wails 绑定不可用，请重新打包客户端' }
 }
 
 export async function testProxyRealConnectivity(proxyId: string): Promise<{ proxyId: string; ok: boolean; latencyMs: number; error: string }> {
@@ -561,9 +559,7 @@ export async function testProxyRealConnectivity(proxyId: string): Promise<{ prox
   if (bindings?.TestProxyRealConnectivity) {
     return (await bindings.TestProxyRealConnectivity(proxyId)) || { proxyId, ok: false, latencyMs: 0, error: '调用失败' }
   }
-  // mock: simulate latency 300-800ms
-  await new Promise(r => setTimeout(r, 300 + Math.random() * 500))
-  return { proxyId, ok: true, latencyMs: Math.floor(100 + Math.random() * 400), error: '' }
+  return { proxyId, ok: false, latencyMs: 0, error: 'Wails 绑定不可用，请重新打包客户端' }
 }
 
 export interface ProxyConnectivityTestResult {
@@ -591,8 +587,7 @@ export async function browserProxyTestSpeed(proxyId: string): Promise<ProxyConne
   if (bindings?.BrowserProxyTestSpeed) {
     return (await bindings.BrowserProxyTestSpeed(proxyId)) || { proxyId, ok: false, latencyMs: 0, error: '调用失败' }
   }
-  await new Promise(r => setTimeout(r, 300 + Math.random() * 500))
-  return { proxyId, ok: true, latencyMs: Math.floor(100 + Math.random() * 400), error: '' }
+  return { proxyId, ok: false, latencyMs: 0, error: 'Wails 绑定不可用，请重新打包客户端' }
 }
 
 export async function browserProxyBatchTestSpeed(proxyIds: string[], concurrency: number = 8): Promise<ProxyConnectivityTestResult[]> {
@@ -600,9 +595,7 @@ export async function browserProxyBatchTestSpeed(proxyIds: string[], concurrency
   if (bindings?.BrowserProxyBatchTestSpeed) {
     return (await bindings.BrowserProxyBatchTestSpeed(proxyIds, concurrency)) || []
   }
-  // mock
-  await new Promise(r => setTimeout(r, 1000))
-  return proxyIds.map(id => ({ proxyId: id, ok: true, latencyMs: Math.floor(100 + Math.random() * 400), error: '' }))
+  return proxyIds.map(id => ({ proxyId: id, ok: false, latencyMs: 0, error: 'Wails 绑定不可用，请重新打包客户端' }))
 }
 
 export async function browserProxyCheckIPHealth(proxyId: string): Promise<ProxyIPHealthResult> {
@@ -625,20 +618,19 @@ export async function browserProxyCheckIPHealth(proxyId: string): Promise<ProxyI
       updatedAt: new Date().toISOString(),
     }
   }
-  await new Promise(r => setTimeout(r, 600))
   return {
     proxyId,
-    ok: true,
+    ok: false,
     source: 'ippure',
-    error: '',
-    ip: '127.0.0.1',
-    fraudScore: Math.floor(Math.random() * 100),
-    isResidential: Math.random() > 0.5,
+    error: 'Wails 绑定不可用，请重新打包客户端',
+    ip: '',
+    fraudScore: 0,
+    isResidential: false,
     isBroadcast: false,
-    country: 'Mock',
-    region: 'Mock',
-    city: 'Mock',
-    asOrganization: 'Mock ISP',
+    country: '',
+    region: '',
+    city: '',
+    asOrganization: '',
     rawData: {},
     updatedAt: new Date().toISOString(),
   }
@@ -649,20 +641,19 @@ export async function browserProxyBatchCheckIPHealth(proxyIds: string[], concurr
   if (bindings?.BrowserProxyBatchCheckIPHealth) {
     return (await bindings.BrowserProxyBatchCheckIPHealth(proxyIds, concurrency)) || []
   }
-  await new Promise(r => setTimeout(r, 1200))
   return proxyIds.map(proxyId => ({
     proxyId,
-    ok: true,
+    ok: false,
     source: 'ippure',
-    error: '',
-    ip: '127.0.0.1',
-    fraudScore: Math.floor(Math.random() * 100),
-    isResidential: Math.random() > 0.5,
+    error: 'Wails 绑定不可用，请重新打包客户端',
+    ip: '',
+    fraudScore: 0,
+    isResidential: false,
     isBroadcast: false,
-    country: 'Mock',
-    region: 'Mock',
-    city: 'Mock',
-    asOrganization: 'Mock ISP',
+    country: '',
+    region: '',
+    city: '',
+    asOrganization: '',
     rawData: {},
     updatedAt: new Date().toISOString(),
   }))

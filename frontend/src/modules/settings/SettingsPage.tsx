@@ -290,6 +290,12 @@ export function SettingsPage() {
       const componentTotal = Number.isFinite(res.componentTotal) ? Math.max(0, Math.round(res.componentTotal || 0)) : 0
       const failedComponents = Array.isArray(res.failedComponents) ? res.failedComponents : []
 
+      const profileCount = Number.isFinite((res as any).profileCount)
+        ? Math.max(0, Math.round((res as any).profileCount || 0))
+        : 0
+      const pointersAligned = Number.isFinite((res as any).pointersAligned)
+        ? Math.max(0, Math.round((res as any).pointersAligned || 0))
+        : 0
       if (res.partial || componentFailed > 0) {
         const moduleNames = failedComponents
           .map(item => (item?.componentName || item?.componentId || '').trim())
@@ -303,6 +309,12 @@ export function SettingsPage() {
         } else {
           toast.warning(`加载完成（部分成功）：异常模块 ${componentFailed}${moduleHint}`)
         }
+      } else if (profileCount > 0) {
+        toast.success(
+          `加载完成：${profileCount} 个环境已就绪` +
+          (pointersAligned > 0 ? `，${pointersAligned} 个数据目录已对齐` : '') +
+          `。请到「环境列表」检查后编辑或启动。`,
+        )
       } else {
         toast.success(`加载完成：导入 ${imported}，跳过 ${skipped}，冲突 ${conflicts}`)
       }

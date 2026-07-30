@@ -24,33 +24,33 @@ export interface NavSection {
   items: NavItem[]
 }
 
+// Navigation is ordered by daily use. Secondary tools stay available by route
+// but are not flattened into a long primary list that forces scanning.
 export const navigationConfig: NavSection[] = [
   {
-    title: '主菜单',
-    items: [
-      { name: '控制台', path: '/', icon: 'LayoutDashboard' },
-    ]
-  },
-  {
-    title: '指纹浏览器',
+    title: '日常',
     items: [
       { name: '环境列表', path: '/browser/list', icon: 'Monitor' },
-      { name: '自动化接口（实验）', path: '/browser/automation', icon: 'Bot' },
-      { name: '内核管理', path: '/browser/cores', icon: 'Cpu' },
-      { name: '代理池配置', path: '/browser/proxy-pool', icon: 'Globe' },
-      { name: '默认书签', path: '/browser/bookmarks', icon: 'Bookmark' },
-      { name: '标签管理', path: '/browser/tags', icon: 'Tag' },
-      { name: '窗口同步', path: '/browser/sync', icon: 'Activity' },
+      { name: '代理池', path: '/browser/proxy-pool', icon: 'Globe' },
       { name: '扩展管理', path: '/browser/extensions', icon: 'Puzzle' },
+      { name: '窗口同步', path: '/browser/sync', icon: 'Activity' },
     ]
   },
   {
-    title: '系统维护',
+    title: '配置',
     items: [
+      { name: '内核管理', path: '/browser/cores', icon: 'Cpu' },
+      { name: '标签管理', path: '/browser/tags', icon: 'Tag' },
+      { name: '默认书签', path: '/browser/bookmarks', icon: 'Bookmark' },
       { name: '系统设置', path: '/settings', icon: 'Settings' },
+    ]
+  },
+  {
+    title: '帮助',
+    items: [
       { name: '使用教程', path: '/system/tutorial', icon: 'BookOpen' },
-      { name: '日志查看', path: '/browser/logs', icon: 'FileText' },
-      { name: '接口文档', path: '/browser/launch-api', icon: 'BookOpen' },
+      { name: '接口文档', path: '/browser/launch-api', icon: 'FileText' },
+      { name: '日志', path: '/browser/logs', icon: 'FileText' },
     ]
   },
 ]
