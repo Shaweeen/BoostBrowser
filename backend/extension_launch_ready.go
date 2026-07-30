@@ -89,16 +89,38 @@ func readExtensionLaunchReadyMarker(userDataDir string) (extensionLaunchReadyMar
 
 func isExtensionLaunchPrepReady(userDataDir, assignmentFingerprint string) bool {
 	assignmentFingerprint = strings.TrimSpace(assignmentFingerprint)
-	// Empty assignment: keep the normal light prep path (prefs/bookmarks); there
-	// is nothing extension-specific to short-circuit.
+	// No --load-extension packages: once first-start prep marker exists, skip
+	// Preferences rewrites and other slow prep on every launch.
 	if assignmentFingerprint == "" {
-		return false
+		return isStartPrepDone(userDataDir)
 	}
 	marker, ok := readExtensionLaunchReadyMarker(userDataDir)
 	if !ok {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(marker.AssignmentFingerprint), assignmentFingerprint)
+}
+
+// Lightweight one-time start prep marker (session restore sanitization etc.).
+// Independent of extension assignment fingerprint.
+const startPrepDoneMarkerName = ".boost_start_prep_done"
+
+func isStartPrepDone(userDataDir string) bool {
+	userDataDir = strings.TrimSpace(userDataDir)
+	if userDataDir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(userDataDir, startPrepDoneMarkerName))
+	return err == nil
+}
+
+func markStartPrepDone(userDataDir string) {
+	userDataDir = strings.TrimSpace(userDataDir)
+	if userDataDir == "" {
+		return
+	}
+	_ = os.MkdirAll(userDataDir, 0755)
+	_ = os.WriteFile(filepath.Join(userDataDir, startPrepDoneMarkerName), []byte("1\n"), 0600)
 }
 
 func clearExtensionLaunchReadyMarker(userDataDir string) {
@@ -132,9 +154,13 @@ func writeExtensionLaunchReadyMarker(userDataDir, profileID, assignmentFingerpri
 }
 
 // verifyAssignedExtensionsAgainstProfileData checks that every assigned
-// extension package is present and that Web Store IDs have a corresponding
-// profile data surface (existing Local Extension Settings and/or Preferences
-// extensions.settings). Existing vault/account files are never modified here.
+// extension package is present and safe for launch. Policy:
+//   - manifest.json must exist;
+//   - Web Store-style folders should have a stable public key (or already have
+//     profile vault/settings under that ID — never overwrite those vaults);
+//   - missing LES on first open is OK once the package ID is stable, so Chrome
+//     can create vaults under the correct path on first use.
+// Existing vault/account files are never modified here.
 func verifyAssignedExtensionsAgainstProfileData(userDataDir string, launchArgs []string) bool {
 	dirs := activeLoadExtensionDirs(launchArgs)
 	if len(dirs) == 0 {
@@ -151,21 +177,18 @@ func verifyAssignedExtensionsAgainstProfileData(userDataDir string, launchArgs [
 		}
 		id := strings.ToLower(filepath.Base(extDir))
 		if !isWebStoreExtensionID(id) {
-			// Custom folder names still require a live package; Chrome will
-			// derive the runtime ID. No profile vault path to match yet.
+			// Custom folder names: live package is enough.
 			continue
 		}
-		// Existing profile data under this ID means the environment already has
-		// wallet/social state — accept without forcing package key rewrite.
+		// Vault/settings already present under this ID — package alignment OK.
 		if profileHasExtensionData(userDataDir, id, prefIDs) {
 			continue
 		}
-		// No user data yet: package must expose a stable ID so the first Chrome
-		// write lands under the correct Local Extension Settings path.
+		// First open before Chrome writes LES: require stable package ID so the
+		// first vault write uses the correct path. Do not fail forever.
 		if !extensionManifestHasStableKey(extDir, id) {
 			return false
 		}
-		return false
 	}
 	return true
 }
@@ -211,8 +234,9 @@ func (a *App) completeAssignedExtensionProfileData(userDataDir string, launchArg
 			createdScaffolds++
 		}
 	}
-	// Preferences: only enable developer_mode when missing; never touch settings[id].
-	_ = mergeExtensionSettingsNeverOverwrite(userDataDir, nil)
+	// Never rewrite Preferences here. This helper may run while Chrome already
+	// owns the profile after start; concurrent Preferences RMW can corrupt or
+	// discard extension/wallet metadata Chrome just wrote.
 	return missingKeysBefore, createdScaffolds
 }
 

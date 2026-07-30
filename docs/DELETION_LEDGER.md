@@ -185,3 +185,9 @@ behavior is intentionally retired.
 | ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
 | --- | --- | --- | --- | --- | --- | --- |
 | CLEAN-057 | Multi-pass / budgeted `closeUnwantedStartupPagesDuringLaunch`, 1–20 slot tab-manage budgets, and background delayed extension-tab polling after start | `v1.7.58` (`88c5e78` / post-tag packaging commits) | Long observation windows and real-time-style rechecks closed tabs the user opened (extension toolbar clicks) and kept CDP busy during multi-open. | Single-shot `finalizeBrowserStartupTabs` / `closeUnwantedStartupPagesOnce` at debug-ready only; no post-handoff watcher. Extension package prep is one-shot via `.boost_extension_launch_ready` without overwriting vaults. | Single-pass cleanup tests, extension launch-ready tests, Windows cross-compile. | Inspect `git show 88c5e78:backend/extension_startup_cleanup.go`. Do not restore multi-second post-start polling. |
+
+## v1.7.60 startup blank policy and prep skip
+
+| ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
+| --- | --- | --- | --- | --- | --- | --- |
+| CLEAN-058 | Blank-page create/keep/close logic (`ensureSingleNaturalBlank`, `trimExtraNaturalBlank`, `startupPageCloseExtraBlank`, multi-blank planning) and long post-start tab observation budgets | `v1.7.59` (`1b2366e`) | Mutually exclusive blank create-then-close logic fought Chromium's natural single startup blank and risked closing user tabs when combined with delayed polling. | Browser owns the single default blank; startup only closes automatic extension pages once at debug-ready. Hot path skips heavy prep after one-time markers. | Extension startup single-pass tests; launch-ready tests; Windows cross-compile. | Inspect `git show 1b2366e:backend/extension_startup_cleanup.go`. Do not restore blank create/close pairs. |

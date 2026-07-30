@@ -770,11 +770,8 @@ export function BrowserListPage() {
     let success = 0, pending = 0, failed = 0
     const pendingMessages: string[] = []
     const failureMessages: string[] = []
-    // Chromium + wallet extensions create several renderer/extension processes per
-    // environment. A small worker pool overlaps slow debug-port waits without
-    // starting every extension host at once and exhausting CPU/disk resources.
-    const logicalCores = Math.max(4, Number(window.navigator?.hardwareConcurrency) || 8)
-    const concurrency = Math.min(ids.length, Math.max(2, Math.min(4, Math.floor(logicalCores / 4))))
+    // Fixed pool of 5 concurrent environment starts (product requirement).
+    const concurrency = Math.min(ids.length, 5)
     let cursor = 0
     const launchNext = async () => {
       while (cursor < ids.length) {

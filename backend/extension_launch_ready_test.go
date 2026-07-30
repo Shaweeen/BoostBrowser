@@ -85,6 +85,8 @@ func TestVerifyAssignedExtensionsAgainstProfileData(t *testing.T) {
 	if !verifyAssignedExtensionsAgainstProfileData(userData, args) {
 		t.Fatal("Local Extension Settings with real files should satisfy verification")
 	}
+	// Without vault data, package with stable key is still acceptably "ready"
+	// so first-open can mark and subsequent starts skip heavy prep.
 
 	userData2 := filepath.Join(root, "user2")
 	prefDir := filepath.Join(userData2, "Default")
@@ -107,9 +109,45 @@ func TestVerifyAssignedExtensionsAgainstProfileData(t *testing.T) {
 	}
 }
 
-func TestEmptyAssignmentIsNotPrepReady(t *testing.T) {
-	if isExtensionLaunchPrepReady(t.TempDir(), "") {
-		t.Fatal("empty assignment must keep normal prep path")
+func TestEmptyAssignmentUsesStartPrepMarker(t *testing.T) {
+	dir := t.TempDir()
+	if isExtensionLaunchPrepReady(dir, "") {
+		t.Fatal("without start-prep marker, empty assignment is not ready")
+	}
+	markStartPrepDone(dir)
+	if !isExtensionLaunchPrepReady(dir, "") {
+		t.Fatal("with start-prep marker, empty assignment should skip heavy prep")
+	}
+}
+
+func TestCompleteAssignedDoesNotRewritePreferences(t *testing.T) {
+	root := t.TempDir()
+	extID := "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh"
+	extDir := filepath.Join(root, "pkg", extID)
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"t","version":"1","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	userData := filepath.Join(root, "user")
+	prefDir := filepath.Join(userData, "Default")
+	if err := os.MkdirAll(prefDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte(`{"extensions":{"settings":{"` + extID + `":{"account":"keep-me"}}}}`)
+	prefPath := filepath.Join(prefDir, "Preferences")
+	if err := os.WriteFile(prefPath, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+	var app *App
+	app.completeAssignedExtensionProfileData(userData, []string{"--load-extension=" + extDir})
+	got, err := os.ReadFile(prefPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("Preferences must not be rewritten during completeAssigned: got %s", got)
 	}
 }
 

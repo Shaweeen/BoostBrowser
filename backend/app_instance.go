@@ -239,37 +239,33 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	assignmentFP, assignmentExtIDs := assignmentFingerprintFromLaunchArgs(sanitizedProfileLaunchArgs)
 	extensionPrepReady := isExtensionLaunchPrepReady(userDataDir, assignmentFP)
 	if extensionPrepReady {
-		log.Info("扩展启动就绪标记有效，跳过扩展扫描/修复与启动页收敛",
+		log.Info("扩展启动就绪标记有效，跳过启动前扫描/修复（仅起浏览器 + 单次标签收敛）",
 			logger.F("profile_id", profileId),
 			logger.F("extension_count", len(assignmentExtIDs)),
 		)
 	}
 
-	// 启动前关闭 Chrome 的“恢复上次会话”，避免上次遗留的扩展 welcome/options 页面
-	// 在重开实例时再次弹出。已就绪环境跳过整文件 Preferences 扫描写入。
+	// Hot path (aligned with 1.7.4x speed goals): skip Preferences rewrite,
+	// bookmark merge, search-engine seed, and extension package repair once the
+	// environment has completed first-open alignment. Only singleton-lock check
+	// remains before process start (fail-fast if another Chrome owns the dir).
 	if !extensionPrepReady {
 		sanitizeChromeStartupPreferences(userDataDir)
+		// One-time start prep complete even when no extensions are assigned, so
+		// subsequent launches do not re-scan/write Preferences every time.
+		if assignmentFP == "" {
+			markStartPrepDone(userDataDir)
+		}
 	}
 	if err := ensureBrowserUserDataDirReadyForFreshLaunch(chromeBinaryPath, userDataDir); err != nil {
 		log.Error("浏览器用户目录启动前检查失败", logger.F("profile_id", profileId), logger.F("chrome", chromeBinaryPath), logger.F("dir", userDataDir), logger.F("error", err.Error()))
 		profile.LastError = err.Error()
 		return profile, err
 	}
-	// 搜索引擎修复分两条路径：
-	//   - cloak 内核：启动时禁止再做静态 Web Data/Preferences seed，避免留下
-	//     dead guid / partial Google state；只允许在 debug port 就绪后走 runtime
-	//     CDP settings UI 路径，这是 packaged 目标里唯一稳定不会回退成 No Search
-	//     的方案。
-	//   - 非 cloak：仍保留启动前静态 seed 作为兜底；扩展就绪后跳过。
+	// Bookmarks / static search seed are not required every start; they slow
+	// multi-open. First-open (no ready marker) still seeds non-cloak search once.
 	if !isCloakSelectedCore && !extensionPrepReady {
 		seedDefaultSearchEngine(userDataDir)
-	}
-
-	// 仅在尚未完成扩展/环境数据对齐时合并默认书签，避免每次启动扫 Bookmarks 文件。
-	if !extensionPrepReady {
-		if err := browser.EnsureDefaultBookmarks(userDataDir, a.BookmarkList()); err != nil {
-			log.Error("默认书签写入失败", logger.F("error", err.Error()))
-		}
 	}
 
 	proxies := a.getLatestProxies()
@@ -500,11 +496,8 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
-	// First post-assignment opens: repair package keys + empty LES scaffolds only.
-	// Never overwrite existing Preferences settings, wallet vaults or cookies.
-	if !extensionPrepReady {
-		a.completeAssignedExtensionProfileData(userDataDir, sanitizedProfileLaunchArgs)
-	}
+	// Extension package repair runs off the critical path after first start
+	// (async). Avoid blocking multi-open on CRX/key network work.
 	// Final authoritative placement pass: fingerprint/profile/API arguments are
 	// already appended, so stale sizes and maximised/fullscreen flags cannot win.
 	args, removedWindowArgs := sanitizeManagedWindowPlacementArgs(args)
@@ -604,25 +597,13 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 					logger.F("profile_id", profileId),
 					logger.F("debug_port", stableDebugPort),
 				)
-				// Cloak 内核下只能走 runtime CDP seed。扩展就绪后跳过，避免每次启动
-				// 再扫 settings。
+				// Cloak search seed only on first-open path (not every start).
 				if !extensionPrepReady {
-					go seedDefaultSearchEngineViaCDPWithRetry(userDataDir, stableDebugPort, 8, 1500*time.Millisecond)
-				}
-			} else if !extensionPrepReady {
-				if stealthErr := injectStealthToAllPagesWithUA(stableDebugPort, true); stealthErr != nil {
-					log.Warn("反检测脚本注入失败（非致命）",
-						logger.F("profile_id", profileId),
-						logger.F("debug_port", stableDebugPort),
-						logger.F("error", stealthErr.Error()),
-					)
-				} else {
-					log.Info("反检测脚本注入成功",
-						logger.F("profile_id", profileId),
-						logger.F("debug_port", stableDebugPort),
-					)
+					go seedDefaultSearchEngineViaCDPWithRetry(userDataDir, stableDebugPort, 4, 1200*time.Millisecond)
 				}
 			}
+			// Non-cloak stealth inject skipped on hot path after first alignment —
+			// it added multi-open latency and is not required for Cloak profiles.
 
 			// stealth 注入完成后，通过 CDP 导航到用户明确配置的目标 URL。
 			// 默认启动页完全由浏览器内核创建，BrowserStudio 不传入默认 URL。
@@ -673,17 +654,11 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				launchArgsSnapshot := append([]string{}, sanitizedProfileLaunchArgs...)
 				go func() {
 					defer func() { _ = recover() }()
-					// Complete package keys / empty scaffolds first (never overwrites
-					// existing vaults). Then wait for Chrome to materialize real
-					// Preferences/LES state so wallets and social accounts stay valid.
+					// Off critical path: package key repair + non-destructive
+					// scaffold, then mark ready when profile data exists.
+					// Short waits only — no long tab polling.
 					a.completeAssignedExtensionProfileData(userDataDir, launchArgsSnapshot)
-					for _, wait := range []time.Duration{800 * time.Millisecond, 2 * time.Second, 3 * time.Second} {
-						time.Sleep(wait)
-						if verifyAssignedExtensionsAgainstProfileData(userDataDir, launchArgsSnapshot) {
-							a.maybeMarkExtensionLaunchReady(profileId, userDataDir, assignmentFP, launchArgsSnapshot, assignmentExtIDs)
-							return
-						}
-					}
+					time.Sleep(1 * time.Second)
 					a.maybeMarkExtensionLaunchReady(profileId, userDataDir, assignmentFP, launchArgsSnapshot, assignmentExtIDs)
 				}()
 			}

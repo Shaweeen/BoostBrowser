@@ -135,203 +135,77 @@ func ensureJSONMap(parent map[string]any, key string) map[string]any {
 	return created
 }
 
-type startupPageCloseKind uint8
-
 const (
-	startupPageCloseExtension startupPageCloseKind = iota + 1
-	startupPageCloseExtraBlank
-)
-
-type startupPageCloseAction struct {
-	targetID string
-	kind     startupPageCloseKind
-}
-
-const (
-	// Single-shot close only. No long-lived polling, no real-time tab watcher,
-	// and no delayed window that could close user-opened extension pages.
+	// Single-shot close of automatic *extension* pages only at debug-ready.
+	// The browser owns its natural blank startup tab — we never create, keep,
+	// or close about:blank / new-tab pages (no mutually exclusive blank logic).
 	startupPageCloseTargetTimeout = 800 * time.Millisecond
 )
 
 // finalizeBrowserStartupTabs runs exactly once at environment debug-ready:
-// one CDP list snapshot, close automatic extension startup pages + extra blanks,
-// ensure a single natural blank, then disconnect. No background recheck, no
-// multi-second observation, no continuous Target events — so tabs the user
-// later opens (toolbar extension click, manual navigation) are never auto-closed.
+// close chrome-extension:// (and similar) auto-opened pages only.
+// Blank/new-tab pages are left entirely to Chromium.
 func finalizeBrowserStartupTabs(debugPort int, profileId string) {
 	if debugPort <= 0 {
 		return
 	}
-	closedExtensions, closedBlanks, blankEnsured := runStartupTabCleanupOnce(debugPort)
-	if closedExtensions > 0 || closedBlanks > 0 || blankEnsured {
-		logger.New("Browser").Info("启动时已单次关闭扩展自动标签（无持续监听）",
+	closedExtensions := runStartupTabCleanupOnce(debugPort)
+	if closedExtensions > 0 {
+		logger.New("Browser").Info("启动时已单次关闭扩展自动页（不触碰空白标签）",
 			logger.F("profile_id", profileId),
 			logger.F("closed_extension_pages", closedExtensions),
-			logger.F("closed_extra_blank_pages", closedBlanks),
-			logger.F("blank_ensured", blankEnsured),
 		)
 	}
 }
 
-func runStartupTabCleanupOnce(debugPort int) (closedExtensions, closedBlanks int, blankEnsured bool) {
+func runStartupTabCleanupOnce(debugPort int) int {
 	browserWsURL, err := getBrowserWebSocketURL(debugPort)
 	if err != nil {
-		return 0, 0, false
+		return 0
 	}
 	browserClient, err := newRabbyCDPClient(browserWsURL)
 	if err != nil {
-		return 0, 0, false
+		return 0
 	}
 	defer browserClient.close()
 
-	closeTarget := func(targetID string) error {
-		_, closeErr := browserClient.call("Target.closeTarget", map[string]any{"targetId": targetID}, startupPageCloseTargetTimeout)
-		return closeErr
-	}
-	closedExtensions, closedBlanks = closeUnwantedStartupPagesOnce(
+	return closeAutomaticExtensionStartupPagesOnce(
 		func() ([]cdpTarget, error) { return listCDPTargets(debugPort) },
-		closeTarget,
-	)
-	blankEnsured = ensureSingleNaturalBlankStartupPage(
-		func() ([]cdpTarget, error) { return listCDPTargets(debugPort) },
-		func() (string, error) {
-			result, createErr := browserClient.call("Target.createTarget", map[string]any{"url": "about:blank"}, 1500*time.Millisecond)
-			if createErr != nil {
-				return "", createErr
-			}
-			if result == nil {
-				return "", fmt.Errorf("Target.createTarget 返回空 result")
-			}
-			targetID, _ := result["targetId"].(string)
-			return strings.TrimSpace(targetID), nil
+		func(targetID string) error {
+			_, closeErr := browserClient.call("Target.closeTarget", map[string]any{"targetId": targetID}, startupPageCloseTargetTimeout)
+			return closeErr
 		},
-		closeTarget,
 	)
-	return closedExtensions, closedBlanks, blankEnsured
 }
 
-// closeUnwantedStartupPagesOnce is the only startup tab action: one snapshot.
-func closeUnwantedStartupPagesOnce(
+// closeAutomaticExtensionStartupPagesOnce closes only automatic extension
+// startup pages. It does not open blanks, close blanks, or manage new-tab pages.
+func closeAutomaticExtensionStartupPagesOnce(
 	fetch func() ([]cdpTarget, error),
 	closeTarget func(string) error,
-) (int, int) {
+) int {
 	if fetch == nil || closeTarget == nil {
-		return 0, 0
+		return 0
 	}
 	targets, err := fetch()
 	if err != nil {
-		return 0, 0
+		return 0
 	}
-	closedExtensions := 0
-	closedBlanks := 0
-	for _, action := range planStartupPageCleanup(targets) {
-		if closeTarget(action.targetID) != nil {
-			continue
-		}
-		switch action.kind {
-		case startupPageCloseExtension:
-			closedExtensions++
-		case startupPageCloseExtraBlank:
-			closedBlanks++
-		}
-	}
-	return closedExtensions, closedBlanks
-}
-
-func planStartupPageCleanup(targets []cdpTarget) []startupPageCloseAction {
-	keeperBlankID := ""
+	closed := 0
 	for _, target := range targets {
-		if target.ID != "" && isNaturalBlankPageTarget(target) {
-			keeperBlankID = target.ID
-			break
-		}
-	}
-
-	actions := make([]startupPageCloseAction, 0)
-	for _, target := range targets {
-		if target.ID == "" {
+		if target.ID == "" || !shouldCloseAutomaticExtensionStartupTarget(target) {
 			continue
 		}
-		if shouldCloseAutomaticExtensionStartupTarget(target) {
-			actions = append(actions, startupPageCloseAction{targetID: target.ID, kind: startupPageCloseExtension})
-			continue
-		}
-		if isNaturalBlankPageTarget(target) && target.ID != keeperBlankID {
-			actions = append(actions, startupPageCloseAction{targetID: target.ID, kind: startupPageCloseExtraBlank})
+		if closeTarget(target.ID) == nil {
+			closed++
 		}
 	}
-	return actions
-}
-
-// ensureSingleNaturalBlankStartupPage guarantees the user-facing startup set is
-// exactly one natural blank page. Closing every auto-opened wallet tab can leave
-// Chrome with zero pages; creating about:blank restores the expected shell.
-// Returns true when a blank was created or an extra blank was closed.
-func ensureSingleNaturalBlankStartupPage(
-	fetch func() ([]cdpTarget, error),
-	createBlank func() (string, error),
-	closeTarget func(string) error,
-) bool {
-	if fetch == nil {
-		return false
-	}
-	targets, err := fetch()
-	if err != nil {
-		return false
-	}
-	blankIDs := make([]string, 0, 2)
-	for _, target := range targets {
-		if target.ID == "" {
-			continue
-		}
-		if isNaturalBlankPageTarget(target) {
-			blankIDs = append(blankIDs, target.ID)
-		}
-	}
-	changed := false
-	if len(blankIDs) == 0 {
-		if createBlank == nil {
-			return false
-		}
-		id, createErr := createBlank()
-		if createErr != nil || strings.TrimSpace(id) == "" {
-			return false
-		}
-		return true
-	}
-	if closeTarget == nil {
-		return false
-	}
-	for _, id := range blankIDs[1:] {
-		if closeTarget(id) == nil {
-			changed = true
-		}
-	}
-	return changed
-}
-
-func isNaturalBlankPageTarget(target cdpTarget) bool {
-	if !strings.EqualFold(strings.TrimSpace(target.Type), "page") {
-		return false
-	}
-	url := strings.ToLower(strings.TrimSpace(target.URL))
-	switch {
-	case url == "" || url == "about:blank" || url == "about:blank#":
-		return true
-	case url == "chrome://newtab/" || url == "chrome://newtab":
-		return true
-	case url == "chrome://new-tab-page/" || url == "chrome://new-tab-page":
-		return true
-	case strings.HasPrefix(url, "chrome://new-tab-page/"):
-		return true
-	default:
-		return false
-	}
+	return closed
 }
 
 func shouldCloseAutomaticExtensionStartupTarget(target cdpTarget) bool {
-	// Only the single startup snapshot may call this. After handoff there is no
-	// watcher, so user-opened extension tabs (toolbar click) are never closed.
+	// Only the single startup snapshot may call this. Blank/new-tab pages are
+	// never closed. After handoff there is no watcher.
 	return strings.EqualFold(strings.TrimSpace(target.Type), "page") &&
 		isExtensionStartupURL(target.URL)
 }

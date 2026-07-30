@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 )
 
@@ -157,46 +156,18 @@ func TestAutomaticExtensionStartupCleanupKeepsBlankAndWebPages(t *testing.T) {
 	}
 }
 
-func TestPlanStartupPageCleanupKeepsOneNaturalBlank(t *testing.T) {
-	targets := []cdpTarget{
-		{ID: "blank-1", Type: "page", URL: "about:blank"},
-		{ID: "blank-2", Type: "page", URL: "about:blank"},
-		{ID: "blank-3", Type: "page", URL: "about:blank"},
-		{ID: "metamask", Type: "page", URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/home.html#/onboarding/welcome"},
-		{ID: "worker", Type: "service_worker", URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/background.js"},
-		{ID: "web", Type: "page", URL: "https://example.com/"},
-	}
-	actions := planStartupPageCleanup(targets)
-	got := map[string]startupPageCloseKind{}
-	for _, action := range actions {
-		got[action.targetID] = action.kind
-	}
-	want := map[string]startupPageCloseKind{
-		"blank-2":  startupPageCloseExtraBlank,
-		"blank-3":  startupPageCloseExtraBlank,
-		"metamask": startupPageCloseExtension,
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("startup cleanup actions mismatch: got=%#v want=%#v", got, want)
-	}
-	if _, exists := got["worker"]; exists {
-		t.Fatal("extension service worker must remain available")
-	}
-	if _, exists := got["web"]; exists {
-		t.Fatal("normal web page must remain available")
-	}
-}
-
-func TestCloseUnwantedStartupPagesOnceIsSinglePass(t *testing.T) {
+func TestCloseAutomaticExtensionStartupPagesLeavesBlanksUntouched(t *testing.T) {
 	fetches := 0
 	closed := map[string]bool{}
-	ext, blanks := closeUnwantedStartupPagesOnce(
+	n := closeAutomaticExtensionStartupPagesOnce(
 		func() ([]cdpTarget, error) {
 			fetches++
 			return []cdpTarget{
 				{ID: "blank-1", Type: "page", URL: "about:blank"},
 				{ID: "blank-2", Type: "page", URL: "about:blank"},
 				{ID: "metamask", Type: "page", URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/home.html#/onboarding/welcome"},
+				{ID: "worker", Type: "service_worker", URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/background.js"},
+				{ID: "web", Type: "page", URL: "https://example.com/"},
 			}, nil
 		},
 		func(targetID string) error {
@@ -205,61 +176,21 @@ func TestCloseUnwantedStartupPagesOnceIsSinglePass(t *testing.T) {
 		},
 	)
 	if fetches != 1 {
-		t.Fatalf("fast path must use a single snapshot: fetches=%d", fetches)
+		t.Fatalf("must use a single snapshot: fetches=%d", fetches)
 	}
-	if ext != 1 || blanks != 1 {
-		t.Fatalf("unexpected close counts: extension=%d blanks=%d", ext, blanks)
+	if n != 1 || !closed["metamask"] {
+		t.Fatalf("only extension auto page must close: n=%d closed=%#v", n, closed)
 	}
-	if !closed["metamask"] || !closed["blank-2"] || closed["blank-1"] {
-		t.Fatalf("unexpected close set: %#v", closed)
-	}
-}
-
-func TestEnsureSingleNaturalBlankStartupPageCreatesWhenEmpty(t *testing.T) {
-	created := false
-	changed := ensureSingleNaturalBlankStartupPage(
-		func() ([]cdpTarget, error) {
-			return []cdpTarget{{ID: "ext", Type: "page", URL: "chrome-extension://wallet/home.html"}}, nil
-		},
-		func() (string, error) {
-			created = true
-			return "blank-new", nil
-		},
-		func(string) error { return nil },
-	)
-	if !changed || !created {
-		t.Fatalf("expected blank creation when no natural blank remains: changed=%v created=%v", changed, created)
+	if closed["blank-1"] || closed["blank-2"] || closed["worker"] || closed["web"] {
+		t.Fatalf("blanks, workers and web pages must never be closed: %#v", closed)
 	}
 }
 
-func TestEnsureSingleNaturalBlankStartupPageTrimsExtras(t *testing.T) {
-	closed := map[string]bool{}
-	changed := ensureSingleNaturalBlankStartupPage(
-		func() ([]cdpTarget, error) {
-			return []cdpTarget{
-				{ID: "blank-1", Type: "page", URL: "about:blank"},
-				{ID: "blank-2", Type: "page", URL: "chrome://new-tab-page/"},
-			}, nil
-		},
-		func() (string, error) {
-			t.Fatal("must not create blank when one already exists")
-			return "", nil
-		},
-		func(id string) error {
-			closed[id] = true
-			return nil
-		},
-	)
-	if !changed || !closed["blank-2"] || closed["blank-1"] {
-		t.Fatalf("expected only extra blank closed: changed=%v closed=%#v", changed, closed)
+func TestIsExtensionStartupURLDoesNotMatchBlank(t *testing.T) {
+	if isExtensionStartupURL("about:blank") || isExtensionStartupURL("chrome://new-tab-page/") {
+		t.Fatal("blank/new-tab must not be treated as extension startup pages")
 	}
-}
-
-func TestIsNaturalBlankRecognizesNewTabPage(t *testing.T) {
-	if !isNaturalBlankPageTarget(cdpTarget{Type: "page", URL: "chrome://new-tab-page/"}) {
-		t.Fatal("chrome new-tab-page must count as the natural blank shell")
-	}
-	if isExtensionStartupURL("chrome://welcome") != true {
-		t.Fatal("chrome welcome page should be closed at startup")
+	if !isExtensionStartupURL("chrome://welcome") {
+		t.Fatal("chrome welcome page should still be closed at startup")
 	}
 }

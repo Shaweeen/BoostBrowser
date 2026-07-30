@@ -54,8 +54,12 @@ func (m *Manager) DownloadAndExtractCore(ctx context.Context, coreName string, t
 
 	sendEvent("downloading", 0, "开始解析地址并创建下载请求: "+targetUrl)
 
-	// 1. 检查名称重复
-	coreName = strings.TrimSpace(coreName)
+	// 1. 检查名称重复 — only a single safe path segment (no .. / separators).
+	coreName = sanitizeCoreDownloadName(coreName)
+	if coreName == "" {
+		sendEvent("error", 0, "内核名称无效（禁止路径分隔符与 ..）")
+		return
+	}
 	for _, c := range m.ListCores() {
 		if strings.EqualFold(c.CoreName, coreName) || filepath.Base(c.CorePath) == coreName {
 			sendEvent("error", 0, "名称已存在，请换一个名称")
@@ -71,6 +75,16 @@ func (m *Manager) DownloadAndExtractCore(ctx context.Context, coreName string, t
 	}
 
 	targetDir := filepath.Join(chromeDir, coreName)
+	// Refuse escape even if sanitization is bypassed later.
+	if absChrome, err := filepath.Abs(chromeDir); err == nil {
+		if absTarget, err2 := filepath.Abs(targetDir); err2 == nil {
+			prefix := absChrome + string(os.PathSeparator)
+			if absTarget != absChrome && !strings.HasPrefix(absTarget, prefix) {
+				sendEvent("error", 0, "内核安装路径越界")
+				return
+			}
+		}
+	}
 	if _, err := os.Stat(targetDir); !os.IsNotExist(err) {
 		sendEvent("error", 0, "同名文件夹已存在: "+coreName)
 		return
@@ -158,6 +172,28 @@ func (m *Manager) DownloadAndExtractCore(ctx context.Context, coreName string, t
 		os.RemoveAll(targetDir) // 删除不正确的解压内容
 		sendEvent("error", 0, fmt.Sprintf("解压后未找到浏览器可执行文件（候选：%s），请检查压缩包内容！", strings.Join(CoreExecutableCandidates(), ", ")))
 	}
+}
+
+// sanitizeCoreDownloadName allows only a single directory name under chrome/.
+func sanitizeCoreDownloadName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." {
+		return ""
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return ""
+	}
+	cleaned := filepath.Clean(name)
+	if cleaned != name || strings.Contains(cleaned, "..") {
+		return ""
+	}
+	// Reject Windows device-ish names and control characters.
+	for _, r := range cleaned {
+		if r < 32 || r == '<' || r == '>' || r == ':' || r == '"' || r == '|' || r == '?' || r == '*' {
+			return ""
+		}
+	}
+	return cleaned
 }
 
 // extractZipAndStripRoot 解压 ZIP 包，如果其所有文件全被同一个根目录包裹，则剥离这层根目录解压至 dest
