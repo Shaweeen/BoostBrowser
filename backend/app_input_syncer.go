@@ -76,6 +76,9 @@ type InputSyncer struct {
 	urlStopCh                chan struct{}
 	lastSyncURL              string
 	lastFocusedEditableState string
+	// After Esc pause/resume, re-baseline master URL/editable without pushing to
+	// followers so resume only restores input sync — never reloads pages.
+	urlSyncReseed int32
 
 	// Short-lived master page target cache. Focused-target resolution used to
 	// open a WebSocket per tab on every mouse event; that cost dominates with
@@ -733,6 +736,7 @@ func (s *InputSyncer) clearRuntimeState() {
 	s.randomDelayMu.Unlock()
 
 	atomic.StoreInt32(&s.paused, 0)
+	atomic.StoreInt32(&s.urlSyncReseed, 0)
 	atomic.StoreInt32(&s.escapeDown, 0)
 	atomic.StoreInt32(&s.mouseEnabled, 0)
 	atomic.StoreInt32(&s.keyEnabled, 0)
@@ -782,7 +786,24 @@ func (s *InputSyncer) togglePausedFromEscape() bool {
 		paused := next == 1
 		atomic.AddUint64(&s.dispatchGeneration, 1)
 		if paused {
+			// Pause only freezes input dispatch. Drop any in-flight drag and
+			// forget URL/editable mirrors so they cannot apply mid-pause.
 			atomic.StoreInt32(&s.activePageMouseButton, 0)
+			s.mu.Lock()
+			s.lastSyncURL = ""
+			s.lastFocusedEditableState = ""
+			s.mu.Unlock()
+			s.invalidateMasterCDPTargetCache()
+		} else {
+			// Resume input sync only. Re-baseline master URL/editable on the next
+			// urlSyncLoop tick without Page.navigate / value push — followers keep
+			// whatever page they had while the user was paused.
+			s.invalidateMasterCDPTargetCache()
+			s.mu.Lock()
+			s.lastSyncURL = ""
+			s.lastFocusedEditableState = ""
+			s.mu.Unlock()
+			atomic.StoreInt32(&s.urlSyncReseed, 1)
 		}
 		handler := s.pauseChanged
 		// Never write logs or call Wails/UI work on the low-level hook thread.
@@ -2728,11 +2749,8 @@ func (s *InputSyncer) urlSyncLoop(stopCh <-chan struct{}) {
 			return
 		}
 		if s.IsPaused() {
-			s.lastFocusedEditableState = ""
-			continue
-		}
-		if atomic.LoadInt32(&s.pointerInsideMaster) == 0 {
-			s.lastFocusedEditableState = ""
+			// Esc pause must not touch follower pages. Do not navigate, reload,
+			// or mirror editable fields while input sync is suspended.
 			continue
 		}
 
@@ -2741,66 +2759,119 @@ func (s *InputSyncer) urlSyncLoop(stopCh <-chan struct{}) {
 		followerDebug := make([]int, len(s.followerDebug))
 		copy(followerDebug, s.followerDebug)
 		s.mu.Unlock()
+		if masterDebug <= 0 || len(followerDebug) == 0 {
+			continue
+		}
 
-		if masterDebug > 0 && len(followerDebug) > 0 {
-			masterTarget, hasMasterTarget := s.focusedMasterCDPTarget(masterDebug)
-			if atomic.LoadInt32(&s.pageKeyboardFocus) == 1 && hasMasterTarget {
-				if state := s.getMasterFocusedEditableStateOnTarget(masterTarget); state != "" && state != s.lastFocusedEditableState {
-					s.lastFocusedEditableState = state
-					waitPopup := waitForFollowerCDPMatch(masterTarget)
-					var inputWG sync.WaitGroup
-					for _, port := range followerDebug {
-						if port <= 0 {
-							continue
-						}
-						inputWG.Add(1)
+		// Esc resume reseed: record master's current URL/editable as the new
+		// baseline without pushing anything to followers. This runs even when
+		// the pointer is outside the master so a later pointer-enter cannot
+		// suddenly navigate every follower to the pre-pause URL.
+		if atomic.LoadInt32(&s.urlSyncReseed) == 1 {
+			s.reseedURLSyncBaseline(masterDebug)
+			continue
+		}
+
+		if atomic.LoadInt32(&s.pointerInsideMaster) == 0 {
+			s.lastFocusedEditableState = ""
+			continue
+		}
+
+		masterTarget, hasMasterTarget := s.focusedMasterCDPTarget(masterDebug)
+		if atomic.LoadInt32(&s.pageKeyboardFocus) == 1 && hasMasterTarget {
+			if state := s.getMasterFocusedEditableStateOnTarget(masterTarget); state != "" && state != s.lastFocusedEditableState {
+				s.lastFocusedEditableState = state
+				waitPopup := waitForFollowerCDPMatch(masterTarget)
+				var inputWG sync.WaitGroup
+				for _, port := range followerDebug {
+					if port <= 0 {
+						continue
+					}
+					inputWG.Add(1)
+					go func(debugPort int) {
+						defer inputWG.Done()
+						s.withCDPPortLock(debugPort, func() {
+							s.applyFollowerFocusedEditableStateOnTarget(debugPort, masterTarget, state, waitPopup)
+						})
+					}(port)
+				}
+				inputWG.Wait()
+			}
+		} else {
+			s.lastFocusedEditableState = ""
+		}
+
+		url := ""
+		if hasMasterTarget {
+			url = strings.TrimSpace(masterTarget.URL)
+		}
+		if url == "" {
+			url = s.getMasterURL(masterDebug)
+		}
+		if url != "" && url != s.lastSyncURL && !isAboutBlank(url) {
+			// Do not force-navigate followers to a wallet popup/notification
+			// document: that replaces their main tab with a full-page extension
+			// UI and desyncs browsing. Extension password display is mirrored
+			// via focused-target insertText + editable-state sync instead.
+			if extensionLikeCDPTarget(cdpTarget{URL: url}) {
+				s.lastSyncURL = url
+			} else {
+				s.lastSyncURL = url
+				s.invalidateMasterCDPTargetCache()
+				var wg sync.WaitGroup
+				for _, port := range followerDebug {
+					if port > 0 {
+						wg.Add(1)
 						go func(debugPort int) {
-							defer inputWG.Done()
+							defer wg.Done()
 							s.withCDPPortLock(debugPort, func() {
-								s.applyFollowerFocusedEditableStateOnTarget(debugPort, masterTarget, state, waitPopup)
+								s.navigateFollower(debugPort, url)
 							})
 						}(port)
 					}
-					inputWG.Wait()
 				}
-			} else {
-				s.lastFocusedEditableState = ""
-			}
-
-			url := ""
-			if hasMasterTarget {
-				url = strings.TrimSpace(masterTarget.URL)
-			}
-			if url == "" {
-				url = s.getMasterURL(masterDebug)
-			}
-			if url != "" && url != s.lastSyncURL && !isAboutBlank(url) {
-				// Do not force-navigate followers to a wallet popup/notification
-				// document: that replaces their main tab with a full-page extension
-				// UI and desyncs browsing. Extension password display is mirrored
-				// via focused-target insertText + editable-state sync instead.
-				if extensionLikeCDPTarget(cdpTarget{URL: url}) {
-					s.lastSyncURL = url
-				} else {
-					s.lastSyncURL = url
-					s.invalidateMasterCDPTargetCache()
-					var wg sync.WaitGroup
-					for _, port := range followerDebug {
-						if port > 0 {
-							wg.Add(1)
-							go func(debugPort int) {
-								defer wg.Done()
-								s.withCDPPortLock(debugPort, func() {
-									s.navigateFollower(debugPort, url)
-								})
-							}(port)
-						}
-					}
-					wg.Wait()
-				}
+				wg.Wait()
 			}
 		}
 	}
+}
+
+// reseedURLSyncBaseline captures the master's current URL and focused editable
+// value as the sync baseline without navigating or writing followers. Used
+// after Esc resume so only subsequent user navigations are mirrored.
+func (s *InputSyncer) reseedURLSyncBaseline(masterDebug int) {
+	if s == nil || masterDebug <= 0 {
+		return
+	}
+	s.invalidateMasterCDPTargetCache()
+	masterTarget, hasMasterTarget := s.focusedMasterCDPTarget(masterDebug)
+	url := ""
+	if hasMasterTarget {
+		url = strings.TrimSpace(masterTarget.URL)
+	}
+	if url == "" {
+		url = s.getMasterURL(masterDebug)
+	}
+	// Keep the reseed pending until CDP answers; otherwise the first successful
+	// URL read later would look like a "change" and Page.navigate every follower.
+	if url == "" {
+		return
+	}
+	editable := ""
+	if hasMasterTarget && atomic.LoadInt32(&s.pageKeyboardFocus) == 1 {
+		editable = s.getMasterFocusedEditableStateOnTarget(masterTarget)
+	}
+	s.mu.Lock()
+	if !isAboutBlank(url) {
+		s.lastSyncURL = url
+	} else {
+		// about:blank is intentionally not mirrored; store a stable sentinel so
+		// a later real navigation is still detected without a false resume push.
+		s.lastSyncURL = "about:blank"
+	}
+	s.lastFocusedEditableState = editable
+	s.mu.Unlock()
+	atomic.StoreInt32(&s.urlSyncReseed, 0)
 }
 
 func cdpRuntimeValue(result map[string]any) (any, bool) {

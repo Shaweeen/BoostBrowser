@@ -76,6 +76,42 @@ func TestEscapePauseKeepsSessionAndTogglesImmediately(t *testing.T) {
 	}
 }
 
+func TestEscapeResumeReseedsURLBaselineWithoutStaleNavigate(t *testing.T) {
+	// Pause/resume must only freeze and restore *input* sync. URL/editable
+	// mirrors are re-baselined so resume cannot Page.navigate followers back to
+	// a pre-pause master URL or overwrite their form values.
+	s := NewInputSyncer()
+	atomic.StoreInt32(&s.active, 1)
+	s.lastSyncURL = "https://master.example/before-pause"
+	s.lastFocusedEditableState = `{"kind":"input","value":"secret"}`
+
+	if !s.togglePausedFromEscape() {
+		t.Fatal("expected pause")
+	}
+	if s.lastSyncURL != "" || s.lastFocusedEditableState != "" {
+		t.Fatalf("pause must drop URL/editable baseline: url=%q editable=%q", s.lastSyncURL, s.lastFocusedEditableState)
+	}
+	if atomic.LoadInt32(&s.urlSyncReseed) != 0 {
+		t.Fatal("pause must not schedule a reseed push")
+	}
+	if s.canDispatch() {
+		t.Fatal("paused session must not dispatch input")
+	}
+
+	if s.togglePausedFromEscape() {
+		t.Fatal("expected resume")
+	}
+	if atomic.LoadInt32(&s.urlSyncReseed) != 1 {
+		t.Fatal("resume must reseed baseline (record master URL only, no navigate)")
+	}
+	if s.lastSyncURL != "" || s.lastFocusedEditableState != "" {
+		t.Fatalf("resume must not restore the pre-pause baseline: url=%q editable=%q", s.lastSyncURL, s.lastFocusedEditableState)
+	}
+	if !s.canDispatch() {
+		t.Fatal("resumed session must dispatch input again")
+	}
+}
+
 func TestLargeFollowerSchedulingUsesStableCadence(t *testing.T) {
 	if got := syncMouseMoveThrottle(2); got != 6*time.Millisecond {
 		t.Fatalf("small follower throttle=%v", got)
