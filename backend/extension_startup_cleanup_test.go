@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestPatchChromePreferencesFileDisablesSessionRestore(t *testing.T) {
@@ -192,5 +193,40 @@ func TestIsExtensionStartupURLDoesNotMatchBlank(t *testing.T) {
 	}
 	if !isExtensionStartupURL("chrome://welcome") {
 		t.Fatal("chrome welcome page should still be closed at startup")
+	}
+	// MetaMask onboarding from the user screenshot must be closed.
+	mm := "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/home.html#/onboarding/welcome"
+	if !isExtensionStartupURL(mm) {
+		t.Fatal("MetaMask onboarding URL must be closed at startup")
+	}
+}
+
+func TestNormalizeBrowserTabsToSingleBlankClosesExtensionKeepsOneBlank(t *testing.T) {
+	// Unit-level policy check via classifiers used by normalizeBrowserTabsToSingleBlank.
+	if !isExtensionStartupURL("chrome-extension://x/home.html#/onboarding/welcome") {
+		t.Fatal("onboarding must be closable")
+	}
+	if isNaturalBlankPageTarget(cdpTarget{Type: "page", URL: "about:blank"}) != true {
+		t.Fatal("about:blank is the sole kept shell")
+	}
+	if isNaturalBlankPageTarget(cdpTarget{Type: "page", URL: "https://example.com"}) {
+		t.Fatal("https pages must not count as blank shell")
+	}
+}
+
+func TestStartupExtensionAutoTabCloseScheduleIsDiscreteNotContinuous(t *testing.T) {
+	if len(startupExtensionAutoTabCloseSchedule) < 2 {
+		t.Fatal("need discrete follow-up passes for delayed wallet onboarding")
+	}
+	// Total span stays short (seconds, not session-long).
+	last := startupExtensionAutoTabCloseSchedule[len(startupExtensionAutoTabCloseSchedule)-1]
+	if last > 5*time.Second {
+		t.Fatalf("schedule too long for a non-watcher design: %v", last)
+	}
+	// Delays are absolute from ready and strictly increasing after the first.
+	for i := 1; i < len(startupExtensionAutoTabCloseSchedule); i++ {
+		if startupExtensionAutoTabCloseSchedule[i] <= startupExtensionAutoTabCloseSchedule[i-1] {
+			t.Fatalf("schedule must be strictly increasing: %v", startupExtensionAutoTabCloseSchedule)
+		}
 	}
 }

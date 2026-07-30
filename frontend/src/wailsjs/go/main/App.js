@@ -426,6 +426,10 @@ export function OpenUserDataDir(arg1) {
   return window['go']['main']['App']['OpenUserDataDir'](arg1);
 }
 
+export function NormalizeAllRunningEnvironmentTabsToBlank() {
+  return window['go']['main']['App']['NormalizeAllRunningEnvironmentTabsToBlank']();
+}
+
 export function OpenWindowSyncPanel() {
   return window['go']['main']['App']['OpenWindowSyncPanel']();
 }
