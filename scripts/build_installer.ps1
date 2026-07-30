@@ -26,13 +26,58 @@ function Get-MicrosoftPrerequisite([string]$Url, [string]$Path, [string]$Label) 
     }
 
     Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-    Write-Host "   Downloading $Label ..." -ForegroundColor Cyan
-    Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing
-    $signature = Get-AuthenticodeSignature -LiteralPath $Path
-    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Microsoft Corporation*') {
-        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-        throw "$Label did not have a valid Microsoft Authenticode signature"
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
+    # Windows PowerShell 5.1 defaults can fail TLS negotiation to Microsoft CDNs.
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls
+    } catch {}
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        try {
+            Write-Host "   Downloading $Label (attempt $attempt/4) ..." -ForegroundColor Cyan
+            # curl.exe is more reliable than Invoke-WebRequest on flaky links / China networks.
+            $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+            if ($curl) {
+                & curl.exe -L --retry 3 --retry-delay 2 --connect-timeout 30 --max-time 300 -o $Path $Url
+                if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $Path)) {
+                    throw "curl.exe failed with exit $LASTEXITCODE"
+                }
+            } else {
+                Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing -TimeoutSec 300
+            }
+            if (-not (Test-Path -LiteralPath $Path) -or (Get-Item -LiteralPath $Path).Length -lt 1024) {
+                throw "Downloaded file missing or too small: $Path"
+            }
+            $signature = Get-AuthenticodeSignature -LiteralPath $Path
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Microsoft Corporation*') {
+                Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+                throw "$Label did not have a valid Microsoft Authenticode signature"
+            }
+            Write-Host "   $Label ready" -ForegroundColor Green
+            return
+        } catch {
+            $lastError = $_
+            Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+            if ($attempt -lt 4) {
+                Start-Sleep -Seconds (3 * $attempt)
+            }
+        }
     }
+
+    throw @"
+Failed to download $Label after 4 attempts.
+URL: $Url
+Cache path: $Path
+Last error: $lastError
+
+Manual fix (then re-run build_installer.ps1):
+  1) Download the file in a browser or:
+       curl.exe -L -o `"$Path`" `"$Url`"
+  2) Confirm the file is Microsoft-signed.
+  3) Re-run only:
+       powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_installer.ps1 -ManagerOnly
+"@
 }
 
 function Copy-Dir([string]$Source, [string]$Destination) {

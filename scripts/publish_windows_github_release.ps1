@@ -103,6 +103,7 @@ if ($Head -ne $TagCommit) {
     }
     $allowedPostTagFiles = @(
         'scripts/publish_windows_github_release.ps1',
+        'scripts/build_installer.ps1',
         'scripts/repair_upgrade_windows.ps1',
         'scripts/test_packaging_scripts.py',
         'docs/DELETION_LEDGER.md',
