@@ -604,76 +604,37 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 		}
 	}
 
-	// Gapless tile grid: distribute remainder pixels so the work area is fully
-	// covered with no leftover strip between cells. 1px internal overlap hides
-	// Chrome/DWM non-client borders so adjacent environments appear flush (相接).
-	const tileInternalOverlapPx = 1
-
-	colWidths := make([]int, cols)
-	rowHeights := make([]int, rows)
-	baseW, remW := screenW/cols, screenW%cols
-	baseH, remH := screenH/rows, screenH%rows
-	for c := 0; c < cols; c++ {
-		colWidths[c] = baseW
-		if c < remW {
-			colWidths[c]++
-		}
-	}
-	for r := 0; r < rows; r++ {
-		rowHeights[r] = baseH
-		if r < remH {
-			rowHeights[r]++
-		}
-	}
-	colX := make([]int, cols)
-	rowY := make([]int, rows)
-	colX[0] = originX
-	for c := 1; c < cols; c++ {
-		colX[c] = colX[c-1] + colWidths[c-1]
-	}
-	rowY[0] = originY
-	for r := 1; r < rows; r++ {
-		rowY[r] = rowY[r-1] + rowHeights[r-1]
-	}
+	// Chrome/DWM paints ~7–12px resize borders + soft shadows. 1px was not
+	// enough under multi-open (small cells amplify the seam). Overlap adjacent
+	// outer frames by the system border estimate and bleed outer edges past the
+	// work area so 平铺/堆叠/横排 all look flush.
+	// SM_CXFRAME=32, SM_CXPADDEDBORDER=92
+	smCXFrame, _, _ := procGetSystemMetrics.Call(32)
+	smPad, _, _ := procGetSystemMetrics.Call(92)
+	frameOverlap := chromeTileFrameOverlapPx(int(smCXFrame), int(smPad))
+	const outerBleedPx = 8
+	rects := computeGaplessTileRects(n, cols, rows, originX, originY, screenW, screenH, frameOverlap, outerBleedPx)
 
 	// SW_RESTORE = 9
 	procShowWindow := user32dll.NewProc("ShowWindow")
 
 	tiledIds := make([]string, 0, n)
 	for i, w := range wins {
-		col := i % cols
-		row := i / cols
-		x := colX[col]
-		y := rowY[row]
-		winW := colWidths[col]
-		winH := rowHeights[row]
+		if i >= len(rects) {
+			break
+		}
+		r := rects[i]
 
-		// Overlap shared edges by 1px so windows touch with no visible gap.
-		if col > 0 {
-			x -= tileInternalOverlapPx
-			winW += tileInternalOverlapPx
-		}
-		if row > 0 {
-			y -= tileInternalOverlapPx
-			winH += tileInternalOverlapPx
-		}
-		if col+1 < cols {
-			winW += tileInternalOverlapPx
-		}
-		if row+1 < rows {
-			winH += tileInternalOverlapPx
-		}
-
-		// 先恢复窗口（如果被最小化）
+		// 先恢复窗口（如果被最小化）；去掉最大化再定位，否则 SetWindowPos 会被忽略。
 		procShowWindow.Call(uintptr(w.hwnd), 9) // SW_RESTORE
 
 		procSetWindowPos.Call(
 			uintptr(w.hwnd),
 			0, // HWND_TOP
-			uintptr(x),
-			uintptr(y),
-			uintptr(winW),
-			uintptr(winH),
+			uintptr(r.X),
+			uintptr(r.Y),
+			uintptr(r.W),
+			uintptr(r.H),
 			uintptr(SWP_NOZORDER|SWP_SHOWWINDOW),
 		)
 		tiledIds = append(tiledIds, w.profileId)
