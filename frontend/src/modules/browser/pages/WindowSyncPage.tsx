@@ -15,7 +15,7 @@ import {
   X,
 } from 'lucide-react'
 import { Button, Input, Select, toast } from '../../../shared/components'
-import { ExitWindowSyncPanel, IsWindowSyncPanelMode, NormalizeAllRunningEnvironmentTabsToBlank } from '../../../wailsjs/go/main/App'
+import { ExitWindowSyncPanel, FinalizeEnvironmentTabsForUserHandoff, IsWindowSyncPanelMode } from '../../../wailsjs/go/main/App'
 import { EventsOn, ScreenGetAll, WindowCenter, WindowGetPosition, WindowSetAlwaysOnTop, WindowSetMinSize, WindowSetPosition, WindowSetSize, WindowShow, WindowUnminimise } from '../../../wailsjs/runtime/runtime'
 import {
   getSyncSnapshot,
@@ -166,9 +166,8 @@ export function WindowSyncPage() {
     // user-driven; focus changes and one-second timers must not mutate a
     // configuration while the user is pausing, closing or replacing windows.
     void loadProfiles()
-    // One-shot: collapse all environment browsers to a single about:blank when
-    // the sync panel first mounts (covers opening from sidebar / direct route).
-    void NormalizeAllRunningEnvironmentTabsToBlank().catch(() => {})
+    // Final handoff when user opens sync panel (once; backend no-ops if already done).
+    void FinalizeEnvironmentTabsForUserHandoff().catch(() => {})
     const offPauseChanged = EventsOn('window-sync:pause-changed', (payload: { paused?: boolean }) => {
       const paused = payload?.paused === true
       setSyncStatus(prev => prev ? { ...prev, paused } : prev)

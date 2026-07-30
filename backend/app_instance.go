@@ -115,11 +115,15 @@ func resolveBadgeDisplayNumber(profileId, profileName string, profiles map[strin
 }
 
 func (a *App) BrowserInstanceStart(profileId string) (*BrowserProfile, error) {
+	// Every start (including stop→open again) re-arms the full tab-management
+	// cycle until the next user handoff click.
+	armEnvironmentTabsUserHandoff()
 	return a.browserInstanceStartInternal(profileId, nil, nil, false, false, false)
 }
 
 // BrowserInstanceStartWithParams 通过额外参数启动实例（仅本次启动生效，不落库）
 func (a *App) BrowserInstanceStartWithParams(profileId string, extraLaunchArgs []string, startURLs []string, skipDefaultStartURLs bool) (*BrowserProfile, error) {
+	armEnvironmentTabsUserHandoff()
 	return a.browserInstanceStartInternal(profileId, extraLaunchArgs, startURLs, skipDefaultStartURLs, true, false)
 }
 
@@ -245,17 +249,13 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		)
 	}
 
-	// Hot path (aligned with 1.7.4x speed goals): skip Preferences rewrite,
-	// bookmark merge, search-engine seed, and extension package repair once the
-	// environment has completed first-open alignment. Only singleton-lock check
-	// remains before process start (fail-fast if another Chrome owns the dir).
-	if !extensionPrepReady {
-		sanitizeChromeStartupPreferences(userDataDir)
-		// One-time start prep complete even when no extensions are assigned, so
-		// subsequent launches do not re-scan/write Preferences every time.
-		if assignmentFP == "" {
-			markStartPrepDone(userDataDir)
-		}
+	// Foundation: pin Chromium session startup to a single about:blank via
+	// Preferences (restore_on_startup=4 + startup_urls). No post-start CDP
+	// rewrite of newtab is needed when prefs already match. patch is a no-op
+	// write when values are already correct.
+	sanitizeChromeStartupPreferences(userDataDir)
+	if !extensionPrepReady && assignmentFP == "" {
+		markStartPrepDone(userDataDir)
 	}
 	if err := ensureBrowserUserDataDirReadyForFreshLaunch(chromeBinaryPath, userDataDir); err != nil {
 		log.Error("浏览器用户目录启动前检查失败", logger.F("profile_id", profileId), logger.F("chrome", chromeBinaryPath), logger.F("dir", userDataDir), logger.F("error", err.Error()))
@@ -1328,6 +1328,8 @@ func (a *App) markProfileStoppedLocked(profileId string, profile *BrowserProfile
 		a.launchServer.ClearActiveProfile(profileId)
 	}
 	a.persistBrowserRuntimeSnapshotLocked()
+	// Stop ends this cycle; next open must run the full tab-management flow again.
+	armEnvironmentTabsUserHandoff()
 	// Async: this helper may already hold browserMgr.Mutex.
 	a.scheduleEnvironmentPopupConfinementRefresh()
 }

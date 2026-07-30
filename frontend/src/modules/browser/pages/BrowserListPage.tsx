@@ -9,7 +9,7 @@ import { InstanceFilterBar, EMPTY_FILTERS, isFiltersEmpty } from '../components/
 import type { InstanceFilters } from '../components/InstanceFilterBar'
 import { KeywordsModal } from '../components/KeywordsModal'
 import { EventsOn } from '../../../wailsjs/runtime/runtime'
-import { NormalizeAllRunningEnvironmentTabsToBlank } from '../../../wailsjs/go/main/App'
+import { FinalizeEnvironmentTabsForUserHandoff } from '../../../wailsjs/go/main/App'
 import { resolveActionErrorMessage, resolveActionFeedback } from '../utils/actionErrors'
 import {
   cleanBrowserCache,
@@ -258,18 +258,10 @@ export function BrowserListPage() {
   const [loading, setLoading] = useState(true)
   const [proxies, setProxies] = useState<BrowserProxy[]>([])
   const [groups, setGroups] = useState<BrowserGroupWithCount[]>([])
-  // First user click after environments are running: one-shot tab normalize to blank.
-  const firstTabNormalizeDoneRef = useRef(false)
-
-  const maybeNormalizeTabsOnFirstUserClick = useCallback(() => {
-    if (firstTabNormalizeDoneRef.current) return
-    const hasRunning = profiles.some(p => p.running)
-    if (!hasRunning) return
-    firstTabNormalizeDoneRef.current = true
-    void NormalizeAllRunningEnvironmentTabsToBlank().catch(() => {
-      // Allow retry if backend rejected (e.g. no bindings in browser-only preview).
-      firstTabNormalizeDoneRef.current = false
-    })
+  // Final handoff: backend enforces once per arm cycle (re-armed on every start/stop).
+  const requestUserTabHandoff = useCallback(() => {
+    if (!profiles.some(p => p.running)) return
+    void FinalizeEnvironmentTabsForUserHandoff().catch(() => {})
   }, [profiles])
 
   // 视图模式
@@ -1269,7 +1261,7 @@ export function BrowserListPage() {
   return (
     <div
       className="overflow-auto p-5 space-y-5 animate-fade-in h-full"
-      onPointerDownCapture={maybeNormalizeTabsOnFirstUserClick}
+      onPointerDownCapture={requestUserTabHandoff}
     >
       {/* 页头 */}
       <div className="flex items-center justify-between">

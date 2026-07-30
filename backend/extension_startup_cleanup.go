@@ -10,12 +10,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
-// sanitizeChromeStartupPreferences disables explicit URL/session restoration
-// without deleting session files or extension data. Chrome owns its natural
-// initial page; BrowserStudio does not configure or pass a replacement page.
+// sanitizeChromeStartupPreferences sets the profile foundation so Chromium
+// itself opens a single about:blank tab on start. No post-start CDP rewrite of
+// newtab → blank is required when these prefs stick.
+//
+// Chrome session.restore_on_startup:
+//
+//	4 = open the URLs in session.startup_urls
+//	5 = open the New Tab Page (chrome://new-tab-page) — NOT what we want
+//
+// We pin restore_on_startup=4 and startup_urls=["about:blank"].
 func sanitizeChromeStartupPreferences(userDataDir string) {
 	if strings.TrimSpace(userDataDir) == "" {
 		return
@@ -64,15 +72,22 @@ func patchChromePreferencesFile(path string) error {
 	}
 
 	sessionPrefs := ensureJSONMap(prefs, "session")
-	// Let Chrome create its natural initial page. Configured startup URLs,
-	// restored sessions and positional launch URLs are competing tab owners and
-	// must not participate in a managed environment launch.
-	if sessionPrefs["restore_on_startup"] != float64(5) {
-		sessionPrefs["restore_on_startup"] = 5
+	// Foundation: single startup document is about:blank (not New Tab Page).
+	// restore_on_startup=4 + startup_urls=["about:blank"] is the Chromium
+	// setting for "open these URLs"; value 5 is New Tab Page and causes
+	// chrome://new-tab-page which we previously tried to "fix" after launch.
+	if !sessionRestoreIsAboutBlank(sessionPrefs) {
+		sessionPrefs["restore_on_startup"] = float64(4)
+		sessionPrefs["startup_urls"] = []any{"about:blank"}
 		changed = true
 	}
-	if _, exists := sessionPrefs["startup_urls"]; exists {
-		delete(sessionPrefs, "startup_urls")
+	// Homepage also points at blank so "home" does not reopen NTP.
+	if browserPrefs["homepage"] != "about:blank" {
+		browserPrefs["homepage"] = "about:blank"
+		changed = true
+	}
+	if browserPrefs["homepage_is_newtabpage"] != false {
+		browserPrefs["homepage_is_newtabpage"] = false
 		changed = true
 	}
 
@@ -135,73 +150,189 @@ func ensureJSONMap(parent map[string]any, key string) map[string]any {
 	return created
 }
 
+// sessionRestoreIsAboutBlank reports whether session prefs already pin a single
+// about:blank startup URL (Chromium restore_on_startup=4).
+func sessionRestoreIsAboutBlank(sessionPrefs map[string]any) bool {
+	if sessionPrefs == nil {
+		return false
+	}
+	switch v := sessionPrefs["restore_on_startup"].(type) {
+	case float64:
+		if int(v) != 4 {
+			return false
+		}
+	case int:
+		if v != 4 {
+			return false
+		}
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil || n != 4 {
+			return false
+		}
+	default:
+		return false
+	}
+	urls, ok := sessionPrefs["startup_urls"].([]any)
+	if !ok || len(urls) != 1 {
+		return false
+	}
+	s, _ := urls[0].(string)
+	return strings.TrimSpace(strings.ToLower(s)) == "about:blank"
+}
+
 const (
-	// Discrete one-shot closes only (not a continuous poller / event watcher).
-	// MetaMask and similar wallets often open onboarding AFTER first debug-ready,
-	// so a single immediate close is not enough; a short fixed schedule is.
+	// Startup pass closes extension auto-pages only. Final handoff (user click)
+	// collapses to a single about:blank; after that flag is set, never again.
 	startupPageCloseTargetTimeout = 800 * time.Millisecond
 )
 
-// Fixed delays after debug-ready. Each tick is an independent list+close, then
-// CDP disconnects. No timer loop that stays attached for the session lifetime.
-var startupExtensionAutoTabCloseSchedule = []time.Duration{
-	0,
-	350 * time.Millisecond,
-	900 * time.Millisecond,
-	1800 * time.Millisecond,
-	3000 * time.Millisecond,
+// environmentTabsUserHandoffDone is set after the user-triggered final tab
+// check. While true, no further tab management runs until new environments start.
+var environmentTabsUserHandoffDone atomic.Bool
+
+// armEnvironmentTabsUserHandoff re-enables the one final user-triggered tab
+// check after new environments are started.
+func armEnvironmentTabsUserHandoff() {
+	environmentTabsUserHandoffDone.Store(false)
 }
 
-// finalizeBrowserStartupTabs manages automatic extension tabs at environment
-// start. Root cause of MetaMask "onboarding/welcome" tabs is the extension's
-// own service worker opening a page when it loads via --load-extension — not
-// BrowserStudio re-scanning the extension list every launch.
-//
-// Policy:
-//   - never create/close about:blank (browser owns the single default blank);
-//   - only close automatic extension/product pages (onboarding, welcome, …);
-//   - use a few fixed one-shot passes (not realtime scanning) so late opens
-//     are still caught without long-lived listeners that could close user clicks.
+// finalizeBrowserStartupTabs is phase-1 of tab management for every environment
+// start (including stop → open again). Foundation prefs pin about:blank; this
+// closes extension auto-pages present at debug-ready. Phase-2 (sole about:blank
+// + permanent user control) is FinalizeEnvironmentTabsForUserHandoff on user click.
 func finalizeBrowserStartupTabs(debugPort int, profileId string) {
 	if debugPort <= 0 {
 		return
 	}
-	// Immediate pass on the start path (first opportunity).
+	// Every start re-arms handoff so stop→restart runs the full cycle again.
+	armEnvironmentTabsUserHandoff()
 	if n := runStartupTabCleanupOnce(debugPort); n > 0 {
-		logger.New("Browser").Info("启动时已关闭扩展自动页",
+		logger.New("Browser").Info("启动时已关闭扩展自动页（等待用户点击完成最终接管）",
 			logger.F("profile_id", profileId),
 			logger.F("closed_extension_pages", n),
-			logger.F("pass", "immediate"),
 		)
 	}
-	// Follow-up discrete passes for delayed wallet onboarding tabs.
-	go scheduleStartupExtensionAutoTabCloses(debugPort, profileId)
 }
 
-func scheduleStartupExtensionAutoTabCloses(debugPort int, profileId string) {
-	defer func() { _ = recover() }()
-	// Skip the 0 delay entry — already done synchronously above.
-	for i, delay := range startupExtensionAutoTabCloseSchedule {
-		if delay <= 0 {
+// FinalizeEnvironmentTabsForUserHandoff is the LAST tab-management action of the
+// current start cycle: user clicks sync tool / main client / list. Collapse every
+// running environment to exactly one about:blank, then stop all tab management
+// until the next environment start or stop re-arms the cycle.
+func (a *App) FinalizeEnvironmentTabsForUserHandoff() map[string]interface{} {
+	result := map[string]interface{}{
+		"skipped":    false,
+		"profiles":   0,
+		"closedTabs": 0,
+	}
+	if !environmentTabsUserHandoffDone.CompareAndSwap(false, true) {
+		result["skipped"] = true
+		result["reason"] = "already_handed_off"
+		return result
+	}
+	if a == nil || a.browserMgr == nil {
+		return result
+	}
+	type item struct {
+		id   string
+		port int
+	}
+	a.browserMgr.Mutex.Lock()
+	items := make([]item, 0)
+	for id, p := range a.browserMgr.Profiles {
+		if p == nil || !p.Running || p.DebugPort <= 0 {
 			continue
 		}
-		time.Sleep(delay - previousScheduleDelay(i))
-		n := runStartupTabCleanupOnce(debugPort)
-		if n > 0 {
-			logger.New("Browser").Info("启动后续一拍关闭扩展自动页",
-				logger.F("profile_id", profileId),
-				logger.F("closed_extension_pages", n),
-				logger.F("delay_ms", delay.Milliseconds()),
-			)
-		}
+		items = append(items, item{id: id, port: p.DebugPort})
 	}
+	a.browserMgr.Mutex.Unlock()
+
+	closedTotal := 0
+	for _, it := range items {
+		closedTotal += collapseEnvironmentTabsToSoleAboutBlank(it.port)
+	}
+	result["profiles"] = len(items)
+	result["closedTabs"] = closedTotal
+	logger.New("Browser").Info("用户触发最终标签检查：仅保留 about:blank，此后完全由用户接管",
+		logger.F("profiles", len(items)),
+		logger.F("closed_tabs", closedTotal),
+	)
+	return result
 }
 
-func previousScheduleDelay(index int) time.Duration {
-	if index <= 0 {
+// collapseEnvironmentTabsToSoleAboutBlank closes every page that is not
+// about:blank, keeps one blank (navigating chrome://newtab → about:blank in
+// place), or creates about:blank if none remain. One-shot, no watcher.
+func collapseEnvironmentTabsToSoleAboutBlank(debugPort int) int {
+	if debugPort <= 0 {
 		return 0
 	}
-	return startupExtensionAutoTabCloseSchedule[index-1]
+	browserWsURL, err := getBrowserWebSocketURL(debugPort)
+	if err != nil {
+		return 0
+	}
+	browserClient, err := newRabbyCDPClient(browserWsURL)
+	if err != nil {
+		return 0
+	}
+	defer browserClient.close()
+
+	closeTarget := func(id string) error {
+		_, e := browserClient.call("Target.closeTarget", map[string]any{"targetId": id}, startupPageCloseTargetTimeout)
+		return e
+	}
+	targets, err := listCDPTargets(debugPort)
+	if err != nil {
+		return 0
+	}
+
+	closed := 0
+	var keepBlank *cdpTarget
+	for i := range targets {
+		t := &targets[i]
+		if t.ID == "" || !strings.EqualFold(strings.TrimSpace(t.Type), "page") {
+			continue
+		}
+		u := strings.ToLower(strings.TrimSpace(t.URL))
+		isBlank := u == "about:blank" || u == "about:blank#" ||
+			u == "chrome://newtab" || u == "chrome://newtab/" ||
+			u == "chrome://new-tab-page" || u == "chrome://new-tab-page/" ||
+			strings.HasPrefix(u, "chrome://new-tab-page/")
+		if isBlank {
+			if keepBlank == nil {
+				keepBlank = t
+			} else if closeTarget(t.ID) == nil {
+				closed++
+			}
+			continue
+		}
+		if closeTarget(t.ID) == nil {
+			closed++
+		}
+	}
+	if keepBlank == nil {
+		_, _ = browserClient.call("Target.createTarget", map[string]any{"url": "about:blank"}, 1500*time.Millisecond)
+		return closed
+	}
+	// Foundation wants about:blank; rewrite NTP shell in place on this same tab.
+	u := strings.ToLower(strings.TrimSpace(keepBlank.URL))
+	if u != "about:blank" && u != "about:blank#" {
+		if strings.TrimSpace(keepBlank.WebSocketDebuggerUrl) == "" {
+			if all, e := listCDPTargets(debugPort); e == nil {
+				for _, t := range all {
+					if t.ID == keepBlank.ID && strings.TrimSpace(t.WebSocketDebuggerUrl) != "" {
+						*keepBlank = t
+						break
+					}
+				}
+			}
+		}
+		if strings.TrimSpace(keepBlank.WebSocketDebuggerUrl) != "" {
+			_, _ = cdpCallTarget(*keepBlank, "Page.enable", map[string]any{})
+			_, _ = cdpCallTarget(*keepBlank, "Page.navigate", map[string]any{"url": "about:blank"})
+		}
+	}
+	return closed
 }
 
 func runStartupTabCleanupOnce(debugPort int) int {
@@ -253,188 +384,6 @@ func shouldCloseAutomaticExtensionStartupTarget(target cdpTarget) bool {
 	// Blank/new-tab pages are never closed here. Only automatic extension/product pages.
 	return strings.EqualFold(strings.TrimSpace(target.Type), "page") &&
 		isExtensionStartupURL(target.URL)
-}
-
-// normalizeBrowserTabsToSingleBlank closes every top-level page that is not a
-// natural blank, then ensures exactly one about:blank remains. Used as a
-// one-shot user-triggered pass (sync tool open / first interaction), not a
-// background watcher.
-func normalizeBrowserTabsToSingleBlank(debugPort int) (closed int, ensuredBlank bool) {
-	if debugPort <= 0 {
-		return 0, false
-	}
-	browserWsURL, err := getBrowserWebSocketURL(debugPort)
-	if err != nil {
-		return 0, false
-	}
-	browserClient, err := newRabbyCDPClient(browserWsURL)
-	if err != nil {
-		return 0, false
-	}
-	defer browserClient.close()
-
-	closeTarget := func(targetID string) error {
-		_, closeErr := browserClient.call("Target.closeTarget", map[string]any{"targetId": targetID}, startupPageCloseTargetTimeout)
-		return closeErr
-	}
-	createBlank := func() (string, error) {
-		result, createErr := browserClient.call("Target.createTarget", map[string]any{"url": "about:blank"}, 1500*time.Millisecond)
-		if createErr != nil {
-			return "", createErr
-		}
-		if result == nil {
-			return "", fmt.Errorf("Target.createTarget 返回空 result")
-		}
-		id, _ := result["targetId"].(string)
-		return strings.TrimSpace(id), nil
-	}
-
-	targets, err := listCDPTargets(debugPort)
-	if err != nil {
-		return 0, false
-	}
-	blankIDs := make([]string, 0, 2)
-	for _, target := range targets {
-		if target.ID == "" || !strings.EqualFold(strings.TrimSpace(target.Type), "page") {
-			continue
-		}
-		if isNaturalBlankPageTarget(target) {
-			blankIDs = append(blankIDs, target.ID)
-			continue
-		}
-		// Close extension pages, product pages, and any other content tabs so
-		// the environment returns to a single blank shell for sync/work.
-		if closeTarget(target.ID) == nil {
-			closed++
-		}
-	}
-	// Keep one blank if present; drop extras.
-	for i, id := range blankIDs {
-		if i == 0 {
-			continue
-		}
-		if closeTarget(id) == nil {
-			closed++
-		}
-	}
-	if len(blankIDs) == 0 {
-		if id, createErr := createBlank(); createErr == nil && id != "" {
-			ensuredBlank = true
-		}
-	}
-	return closed, ensuredBlank
-}
-
-func isNaturalBlankPageTarget(target cdpTarget) bool {
-	if !strings.EqualFold(strings.TrimSpace(target.Type), "page") {
-		return false
-	}
-	url := strings.ToLower(strings.TrimSpace(target.URL))
-	switch {
-	case url == "" || url == "about:blank" || url == "about:blank#":
-		return true
-	case url == "chrome://newtab/" || url == "chrome://newtab":
-		return true
-	case url == "chrome://new-tab-page/" || url == "chrome://new-tab-page":
-		return true
-	case strings.HasPrefix(url, "chrome://new-tab-page/"):
-		return true
-	default:
-		return false
-	}
-}
-
-// NormalizeAllRunningEnvironmentTabsToBlank is a one-shot user action: after
-// environments are open, when the user opens the sync tool or first interacts,
-// collapse every running browser to a single about:blank tab. Not a watcher.
-func (a *App) NormalizeAllRunningEnvironmentTabsToBlank() map[string]interface{} {
-	result := map[string]interface{}{
-		"profiles":     0,
-		"closedTabs":   0,
-		"ensuredBlank": 0,
-	}
-	if a == nil || a.browserMgr == nil {
-		return result
-	}
-	type target struct {
-		id   string
-		port int
-	}
-	a.browserMgr.Mutex.Lock()
-	targets := make([]target, 0)
-	for id, p := range a.browserMgr.Profiles {
-		if p == nil || !p.Running || p.DebugPort <= 0 {
-			continue
-		}
-		targets = append(targets, target{id: id, port: p.DebugPort})
-	}
-	a.browserMgr.Mutex.Unlock()
-
-	closedTotal := 0
-	ensured := 0
-	for _, t := range targets {
-		c, blank := normalizeBrowserTabsToSingleBlank(t.port)
-		closedTotal += c
-		if blank {
-			ensured++
-		}
-		// newtab-style blanks that survived as "natural blank" should become
-		// real about:blank when it is the sole remaining page.
-		if c >= 0 {
-			_ = ensureSoleBlankIsAboutBlank(t.port)
-		}
-	}
-	result["profiles"] = len(targets)
-	result["closedTabs"] = closedTotal
-	result["ensuredBlank"] = ensured
-	logger.New("Browser").Info("用户触发：所有运行环境标签已收敛为唯一空白页",
-		logger.F("profiles", len(targets)),
-		logger.F("closed_tabs", closedTotal),
-		logger.F("ensured_blank", ensured),
-	)
-	return result
-}
-
-// ensureSoleBlankIsAboutBlank navigates the remaining sole blank/new-tab page
-// to about:blank when needed (one CDP call, no loop).
-func ensureSoleBlankIsAboutBlank(debugPort int) error {
-	targets, err := listCDPTargets(debugPort)
-	if err != nil {
-		return err
-	}
-	var sole *cdpTarget
-	pageCount := 0
-	for i := range targets {
-		t := &targets[i]
-		if !strings.EqualFold(strings.TrimSpace(t.Type), "page") || t.ID == "" {
-			continue
-		}
-		pageCount++
-		if isNaturalBlankPageTarget(*t) {
-			sole = t
-		}
-	}
-	if pageCount != 1 || sole == nil {
-		return nil
-	}
-	u := strings.ToLower(strings.TrimSpace(sole.URL))
-	if u == "about:blank" || u == "about:blank#" {
-		return nil
-	}
-	// Remaining page is chrome://newtab style — replace with about:blank.
-	browserWsURL, err := getBrowserWebSocketURL(debugPort)
-	if err != nil {
-		return err
-	}
-	// Prefer close+create over Page.navigate (simpler, works without attaching to page).
-	browserClient, err := newRabbyCDPClient(browserWsURL)
-	if err != nil {
-		return err
-	}
-	defer browserClient.close()
-	_, _ = browserClient.call("Target.closeTarget", map[string]any{"targetId": sole.ID}, startupPageCloseTargetTimeout)
-	_, err = browserClient.call("Target.createTarget", map[string]any{"url": "about:blank"}, 1500*time.Millisecond)
-	return err
 }
 
 func listCDPTargets(debugPort int) ([]cdpTarget, error) {

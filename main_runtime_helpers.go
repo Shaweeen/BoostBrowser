@@ -63,9 +63,8 @@ func (a *App) SaveNativeMainWindowBounds(bounds MainWindowBounds) bool {
 // mode. Single-instance handling keeps only one panel alive.
 func (a *App) OpenWindowSyncPanel() error {
 	a.App.PrepareWindowSyncRuntimeSnapshot()
-	// User is about to use sync: one-shot collapse every running environment to
-	// a single about:blank (closes MetaMask onboarding etc.). Not a watcher.
-	_ = a.App.NormalizeAllRunningEnvironmentTabsToBlank()
+	// Final tab check: only blank remains, then full user control (once).
+	_ = a.App.FinalizeEnvironmentTabsForUserHandoff()
 	exePath, err := os.Executable()
 	if err != nil {
 		return err

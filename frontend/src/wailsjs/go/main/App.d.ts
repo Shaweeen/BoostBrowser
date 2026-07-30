@@ -216,7 +216,7 @@ export function OpenCorePath(arg1:string):Promise<void>;
 
 export function OpenUserDataDir(arg1:string):Promise<void>;
 
-export function NormalizeAllRunningEnvironmentTabsToBlank():Promise<Record<string, any>>;
+export function FinalizeEnvironmentTabsForUserHandoff():Promise<Record<string, any>>;
 
 export function OpenWindowSyncPanel():Promise<void>;
 

@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestPatchChromePreferencesFileDisablesSessionRestore(t *testing.T) {
@@ -37,11 +36,16 @@ func TestPatchChromePreferencesFileDisablesSessionRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := out["session"].(map[string]any)
-	if got := session["restore_on_startup"]; got != float64(5) {
-		t.Fatalf("restore_on_startup=%v, want 5", got)
+	if got := session["restore_on_startup"]; got != float64(4) {
+		t.Fatalf("restore_on_startup=%v, want 4 (open startup_urls)", got)
 	}
-	if _, exists := session["startup_urls"]; exists {
-		t.Fatalf("startup_urls must be removed so Chrome remains the only initial-page owner: %#v", session["startup_urls"])
+	urls, ok := session["startup_urls"].([]any)
+	if !ok || len(urls) != 1 || urls[0] != "about:blank" {
+		t.Fatalf("startup_urls must be exactly [about:blank], got %#v", session["startup_urls"])
+	}
+	browser := out["browser"].(map[string]any)
+	if browser["homepage"] != "about:blank" || browser["homepage_is_newtabpage"] != false {
+		t.Fatalf("homepage must be about:blank and not NTP: %#v", browser)
 	}
 	profile := out["profile"].(map[string]any)
 	if profile["exited_cleanly"] != true || profile["exit_type"] != "Normal" {
@@ -201,32 +205,17 @@ func TestIsExtensionStartupURLDoesNotMatchBlank(t *testing.T) {
 	}
 }
 
-func TestNormalizeBrowserTabsToSingleBlankClosesExtensionKeepsOneBlank(t *testing.T) {
-	// Unit-level policy check via classifiers used by normalizeBrowserTabsToSingleBlank.
-	if !isExtensionStartupURL("chrome-extension://x/home.html#/onboarding/welcome") {
-		t.Fatal("onboarding must be closable")
+func TestSessionRestoreIsAboutBlank(t *testing.T) {
+	if sessionRestoreIsAboutBlank(map[string]any{
+		"restore_on_startup": float64(5),
+	}) {
+		t.Fatal("NTP mode must not count as about:blank foundation")
 	}
-	if isNaturalBlankPageTarget(cdpTarget{Type: "page", URL: "about:blank"}) != true {
-		t.Fatal("about:blank is the sole kept shell")
-	}
-	if isNaturalBlankPageTarget(cdpTarget{Type: "page", URL: "https://example.com"}) {
-		t.Fatal("https pages must not count as blank shell")
+	if !sessionRestoreIsAboutBlank(map[string]any{
+		"restore_on_startup": float64(4),
+		"startup_urls":       []any{"about:blank"},
+	}) {
+		t.Fatal("restore=4 + about:blank must be recognized")
 	}
 }
 
-func TestStartupExtensionAutoTabCloseScheduleIsDiscreteNotContinuous(t *testing.T) {
-	if len(startupExtensionAutoTabCloseSchedule) < 2 {
-		t.Fatal("need discrete follow-up passes for delayed wallet onboarding")
-	}
-	// Total span stays short (seconds, not session-long).
-	last := startupExtensionAutoTabCloseSchedule[len(startupExtensionAutoTabCloseSchedule)-1]
-	if last > 5*time.Second {
-		t.Fatalf("schedule too long for a non-watcher design: %v", last)
-	}
-	// Delays are absolute from ready and strictly increasing after the first.
-	for i := 1; i < len(startupExtensionAutoTabCloseSchedule); i++ {
-		if startupExtensionAutoTabCloseSchedule[i] <= startupExtensionAutoTabCloseSchedule[i-1] {
-			t.Fatalf("schedule must be strictly increasing: %v", startupExtensionAutoTabCloseSchedule)
-		}
-	}
-}
