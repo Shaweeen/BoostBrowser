@@ -322,8 +322,10 @@ func TestConstrainSyncPopupRectShrinksOversizedPopupToTile(t *testing.T) {
 	owner := winRect{Left: 100, Top: 50, Right: 400, Bottom: 350}
 	popup := winRect{Left: 20, Top: 10, Right: 700, Bottom: 800}
 	x, y, width, height, changed := constrainSyncPopupRect(popup, owner, 2)
-	if !changed || x != 102 || y != 52 || width != 296 || height != 296 {
-		t.Fatalf("oversized popup clamp mismatch: x=%d y=%d width=%d height=%d changed=%v", x, y, width, height, changed)
+	// Natural 680x790 into 296x296 cell uses uniform scale min(296/680, 296/790)
+	// → ~254x296, not a square independent clamp.
+	if !changed || x != 102 || y != 52 || width != 254 || height != 296 {
+		t.Fatalf("oversized popup proportional shrink mismatch: x=%d y=%d width=%d height=%d changed=%v", x, y, width, height, changed)
 	}
 }
 
