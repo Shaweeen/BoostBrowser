@@ -561,9 +561,8 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				logger.F("max_attempts", maxStartAttempts),
 				logger.F("args", strings.Join(args, " ")),
 			)
-			// 每个新浏览器进程只在这里清理一次。此时窗口仍由 --start-minimized
-			// 隐藏，任何显式网页/应用 URL 尚未创建；清理完成后再进入注入、导航
-			// 和用户交付阶段，因此后续钱包扩展页面不属于清理生命周期。
+			// 快速单次收敛启动页（v1.7.48 模型）：不阻塞多秒。延迟出现的钱包
+			// 启动页由 finalize 内后台短重试处理，避免多开时串行等待。
 			finalizeBrowserStartupTabs(stableDebugPort, profileId)
 
 			// 任务栏 badge 数字直接来自实例名字里的数字段：

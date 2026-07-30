@@ -188,6 +188,34 @@ func TestPlanStartupPageCleanupKeepsOneNaturalBlank(t *testing.T) {
 	}
 }
 
+func TestCloseUnwantedStartupPagesOnceIsSinglePass(t *testing.T) {
+	fetches := 0
+	closed := map[string]bool{}
+	ext, blanks := closeUnwantedStartupPagesOnce(
+		func() ([]cdpTarget, error) {
+			fetches++
+			return []cdpTarget{
+				{ID: "blank-1", Type: "page", URL: "about:blank"},
+				{ID: "blank-2", Type: "page", URL: "about:blank"},
+				{ID: "metamask", Type: "page", URL: "chrome-extension://jjinamgbgbggacldmehfllejmllfecgim/home.html#/onboarding/welcome"},
+			}, nil
+		},
+		func(targetID string) error {
+			closed[targetID] = true
+			return nil
+		},
+	)
+	if fetches != 1 {
+		t.Fatalf("fast path must use a single snapshot: fetches=%d", fetches)
+	}
+	if ext != 1 || blanks != 1 {
+		t.Fatalf("unexpected close counts: extension=%d blanks=%d", ext, blanks)
+	}
+	if !closed["metamask"] || !closed["blank-2"] || closed["blank-1"] {
+		t.Fatalf("unexpected close set: %#v", closed)
+	}
+}
+
 func TestCloseUnwantedStartupPagesDuringLaunchClosesDelayedTargetsAndReleases(t *testing.T) {
 	calls := 0
 	fetch := func() ([]cdpTarget, error) {

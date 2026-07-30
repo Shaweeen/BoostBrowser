@@ -148,53 +148,69 @@ type startupPageCloseAction struct {
 }
 
 const (
-	// Observation stays bounded so multi-window batch starts remain responsive,
-	// while quiet-pass early exit releases machines that never open extension UI.
-	// Kept short: each environment blocks start until this window ends when wallet
-	// onboarding keeps reopening; multi-open multiplies that cost.
-	startupPageCleanupObservationWindow = 1800 * time.Millisecond
+	// Background-only recheck for wallet pages that open after debug-ready.
+	// Must not run on the start critical path (see finalizeBrowserStartupTabs).
+	startupPageCleanupObservationWindow = 1200 * time.Millisecond
 	startupPageCleanupPollInterval      = 100 * time.Millisecond
-	// Quiet passes apply whenever no automatic extension page is visible, not
-	// only after the first close. Delayed MetaMask tabs still reset the counter.
-	startupPageCleanupQuietPasses = 4
+	startupPageCleanupQuietPasses       = 2
+	startupPageCloseTargetTimeout       = 800 * time.Millisecond
 )
 
 func finalizeBrowserStartupTabs(debugPort int, profileId string) {
 	if debugPort <= 0 {
 		return
 	}
-	// Run inside this browser process's startup transaction, before
-	// BrowserStudio navigates an explicit URL and before the minimized window is
-	// handed to the user. Wallet extensions can create onboarding pages after
-	// the debug endpoint first becomes ready, especially during a large batch
-	// launch, so observe only this short bounded startup window. Keep the core's
-	// first natural blank and extension workers, and close only automatic
-	// extension pages plus extra natural blanks. No DOM, form or page content is
-	// read, and no cleanup owner survives this function.
+	// Fast path restored to the v1.7.48 model: one CDP snapshot, close automatic
+	// extension startup pages + extra blanks, ensure a single natural blank, then
+	// return so multi-open is not blocked for seconds. Delayed wallet onboarding
+	// tabs are handled by a short non-blocking background recheck only.
+	closedExtensions, closedBlanks, blankEnsured := runStartupTabCleanupOnce(debugPort)
+	if closedExtensions > 0 || closedBlanks > 0 || blankEnsured {
+		logger.New("Browser").Info("启动页面已收敛为唯一空白页",
+			logger.F("profile_id", profileId),
+			logger.F("closed_extension_pages", closedExtensions),
+			logger.F("closed_extra_blank_pages", closedBlanks),
+			logger.F("blank_ensured", blankEnsured),
+		)
+	}
+	go func() {
+		defer func() { _ = recover() }()
+		// Wallet extensions may open onboarding after first debug-ready; recheck
+		// briefly without holding the environment start transaction.
+		ext, blanks := runStartupTabCleanupDelayed(debugPort)
+		if ext > 0 || blanks > 0 {
+			logger.New("Browser").Info("延迟扩展启动页已关闭",
+				logger.F("profile_id", profileId),
+				logger.F("closed_extension_pages", ext),
+				logger.F("closed_extra_blank_pages", blanks),
+			)
+		}
+	}()
+}
+
+func runStartupTabCleanupOnce(debugPort int) (closedExtensions, closedBlanks int, blankEnsured bool) {
 	browserWsURL, err := getBrowserWebSocketURL(debugPort)
 	if err != nil {
-		return
+		return 0, 0, false
 	}
 	browserClient, err := newRabbyCDPClient(browserWsURL)
 	if err != nil {
-		return
+		return 0, 0, false
 	}
 	defer browserClient.close()
-	maxPasses := int(startupPageCleanupObservationWindow/startupPageCleanupPollInterval) + 1
-	closedExtensions, closedBlanks := closeUnwantedStartupPagesDuringLaunch(
+
+	closeTarget := func(targetID string) error {
+		_, closeErr := browserClient.call("Target.closeTarget", map[string]any{"targetId": targetID}, startupPageCloseTargetTimeout)
+		return closeErr
+	}
+	closedExtensions, closedBlanks = closeUnwantedStartupPagesOnce(
 		func() ([]cdpTarget, error) { return listCDPTargets(debugPort) },
-		func(targetID string) error {
-			_, closeErr := browserClient.call("Target.closeTarget", map[string]any{"targetId": targetID}, 1500*time.Millisecond)
-			return closeErr
-		},
-		time.Sleep,
-		maxPasses,
-		startupPageCleanupQuietPasses,
+		closeTarget,
 	)
-	blankEnsured := ensureSingleNaturalBlankStartupPage(
+	blankEnsured = ensureSingleNaturalBlankStartupPage(
 		func() ([]cdpTarget, error) { return listCDPTargets(debugPort) },
 		func() (string, error) {
-			result, createErr := browserClient.call("Target.createTarget", map[string]any{"url": "about:blank"}, 2*time.Second)
+			result, createErr := browserClient.call("Target.createTarget", map[string]any{"url": "about:blank"}, 1500*time.Millisecond)
 			if createErr != nil {
 				return "", createErr
 			}
@@ -204,26 +220,60 @@ func finalizeBrowserStartupTabs(debugPort int, profileId string) {
 			targetID, _ := result["targetId"].(string)
 			return strings.TrimSpace(targetID), nil
 		},
+		closeTarget,
+	)
+	return closedExtensions, closedBlanks, blankEnsured
+}
+
+func runStartupTabCleanupDelayed(debugPort int) (int, int) {
+	browserWsURL, err := getBrowserWebSocketURL(debugPort)
+	if err != nil {
+		return 0, 0
+	}
+	browserClient, err := newRabbyCDPClient(browserWsURL)
+	if err != nil {
+		return 0, 0
+	}
+	defer browserClient.close()
+	maxPasses := int(startupPageCleanupObservationWindow/startupPageCleanupPollInterval) + 1
+	return closeUnwantedStartupPagesDuringLaunch(
+		func() ([]cdpTarget, error) { return listCDPTargets(debugPort) },
 		func(targetID string) error {
-			_, closeErr := browserClient.call("Target.closeTarget", map[string]any{"targetId": targetID}, 1500*time.Millisecond)
+			_, closeErr := browserClient.call("Target.closeTarget", map[string]any{"targetId": targetID}, startupPageCloseTargetTimeout)
 			return closeErr
 		},
+		time.Sleep,
+		maxPasses,
+		startupPageCleanupQuietPasses,
 	)
-	if closedExtensions > 0 || closedBlanks > 0 || blankEnsured {
-		logger.New("Browser").Info("启动页面已收敛为唯一空白页",
-			logger.F("profile_id", profileId),
-			logger.F("closed_extension_pages", closedExtensions),
-			logger.F("closed_extra_blank_pages", closedBlanks),
-			logger.F("blank_ensured", blankEnsured),
-		)
+}
+
+// closeUnwantedStartupPagesOnce is the fast v1.7.48-style single snapshot pass.
+func closeUnwantedStartupPagesOnce(
+	fetch func() ([]cdpTarget, error),
+	closeTarget func(string) error,
+) (int, int) {
+	if fetch == nil || closeTarget == nil {
+		return 0, 0
 	}
-	// Browser windows are launched at their real onscreen position now.  Do not
-	// run the legacy restore pass here: it walks the whole Chromium process tree
-	// and calls ShowWindow/SetForegroundWindow for every titled top-level HWND.
-	// Recent Chrome/Cloak builds create renderer, IME and extension-host windows
-	// in child processes; surfacing one of those produces a large, undecorated
-	// white window over the page.  The restore pass was only needed when startup
-	// deliberately used an offscreen --window-position, which is no longer done.
+	targets, err := fetch()
+	if err != nil {
+		return 0, 0
+	}
+	closedExtensions := 0
+	closedBlanks := 0
+	for _, action := range planStartupPageCleanup(targets) {
+		if closeTarget(action.targetID) != nil {
+			continue
+		}
+		switch action.kind {
+		case startupPageCloseExtension:
+			closedExtensions++
+		case startupPageCloseExtraBlank:
+			closedBlanks++
+		}
+	}
+	return closedExtensions, closedBlanks
 }
 
 func closeUnwantedStartupPagesDuringLaunch(
