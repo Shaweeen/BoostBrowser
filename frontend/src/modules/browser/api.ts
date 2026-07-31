@@ -582,12 +582,38 @@ export async function testProxyConfigRealConnectivity(proxyConfig: string): Prom
   return { proxyId: '', ok: false, latencyMs: 0, error: 'Wails 绑定不可用，请重新打包客户端' }
 }
 
+export type ProxyFullCheckResult = ProxyConnectivityTestResult & {
+  protocol?: string
+  message?: string
+  exitIP?: string
+  country?: string
+  city?: string
+  timezoneHint?: string
+  isResidential?: boolean
+  dnsViaProxy?: boolean
+  resolvedConfig?: string
+}
+
 export async function browserProxyTestSpeed(proxyId: string): Promise<ProxyConnectivityTestResult> {
   const bindings: any = await getBindings()
   if (bindings?.BrowserProxyTestSpeed) {
     return (await bindings.BrowserProxyTestSpeed(proxyId)) || { proxyId, ok: false, latencyMs: 0, error: '调用失败' }
   }
   return { proxyId, ok: false, latencyMs: 0, error: 'Wails 绑定不可用，请重新打包客户端' }
+}
+
+/** One-click check: latency + protocol + exit IP/geo (AdsPower/MoreLogin-style summary). */
+export async function browserProxyFullCheck(proxyId: string): Promise<ProxyFullCheckResult> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserProxyFullCheck) {
+    return (await bindings.BrowserProxyFullCheck(proxyId)) || { proxyId, ok: false, latencyMs: 0, error: '调用失败' }
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.BrowserProxyFullCheck) {
+    return (await goApp.BrowserProxyFullCheck(proxyId)) || { proxyId, ok: false, latencyMs: 0, error: '调用失败' }
+  }
+  // Fallback: speed only when binding not regenerated yet.
+  return browserProxyTestSpeed(proxyId)
 }
 
 export async function browserProxyBatchTestSpeed(proxyIds: string[], concurrency: number = 8): Promise<ProxyConnectivityTestResult[]> {

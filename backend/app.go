@@ -995,13 +995,24 @@ func (a *App) ValidateProxyConfig(proxyConfig string, proxyId string) ProxyValid
 	}
 }
 
-// ProxyTestResult 代理测试结果
+// ProxyTestResult 代理测试结果（对齐多账号浏览器「一键检测」可读字段，非照搬）
 type ProxyTestResult struct {
 	ProxyId        string `json:"proxyId"`
 	Ok             bool   `json:"ok"`
 	LatencyMs      int64  `json:"latencyMs"`
 	Error          string `json:"error"`
 	ResolvedConfig string `json:"resolvedConfig"`
+	// Protocol is the working scheme after detect (socks5/http/https).
+	Protocol string `json:"protocol"`
+	// Human-readable summary for UI toasts (zh).
+	Message string `json:"message"`
+	// Exit meta filled by BrowserProxyFullCheck (optional on speed-only calls).
+	ExitIP         string `json:"exitIP,omitempty"`
+	Country        string `json:"country,omitempty"`
+	City           string `json:"city,omitempty"`
+	TimezoneHint   string `json:"timezoneHint,omitempty"`
+	IsResidential  bool   `json:"isResidential,omitempty"`
+	DNSViaProxy    bool   `json:"dnsViaProxy"`
 }
 
 // ProxyIPHealthResult 代理出口 IP 健康信息（透传第三方接口结果）
@@ -1090,13 +1101,144 @@ func (a *App) persistDetectedStandardProxy(proxyID, currentConfig, resolvedConfi
 }
 
 func proxyTestResultFromInternal(r proxy.TestResult) ProxyTestResult {
-	return ProxyTestResult{
+	out := ProxyTestResult{
 		ProxyId:        r.ProxyId,
 		Ok:             r.Ok,
 		LatencyMs:      r.LatencyMs,
 		Error:          r.Error,
 		ResolvedConfig: r.ResolvedConfig,
+		// External standard proxies always go through local relay → DNS via proxy.
+		DNSViaProxy: true,
 	}
+	cfg := strings.TrimSpace(r.ResolvedConfig)
+	if cfg == "" {
+		cfg = ""
+	}
+	if scheme := proxy.PreferredSchemeFromProxySource(cfg); scheme != "" {
+		out.Protocol = scheme
+	} else if idx := strings.Index(cfg, "://"); idx > 0 {
+		out.Protocol = strings.ToLower(cfg[:idx])
+	}
+	if r.Ok {
+		if out.LatencyMs > 0 {
+			out.Message = fmt.Sprintf("连通正常 · %s · %dms", preferProtocolLabel(out.Protocol), out.LatencyMs)
+		} else {
+			out.Message = fmt.Sprintf("连通正常 · %s", preferProtocolLabel(out.Protocol))
+		}
+	} else {
+		out.Message = humanizeProxyError(r.Error)
+		if out.Message == "" {
+			out.Message = "代理不可用"
+		}
+	}
+	return out
+}
+
+func preferProtocolLabel(protocol string) string {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "socks5":
+		return "SOCKS5"
+	case "https":
+		return "HTTPS"
+	case "http":
+		return "HTTP"
+	case "":
+		return "直连/未知"
+	default:
+		return strings.ToUpper(protocol)
+	}
+}
+
+func humanizeProxyError(errText string) string {
+	errText = strings.TrimSpace(errText)
+	if errText == "" {
+		return ""
+	}
+	lower := strings.ToLower(errText)
+	switch {
+	case strings.Contains(lower, "authentication") || strings.Contains(lower, "407") || strings.Contains(lower, "auth"):
+		return "代理认证失败，请检查账号密码"
+	case strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline"):
+		return "代理连接超时，节点可能过载或被墙"
+	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "connect:"):
+		return "无法连接代理端口，请检查地址与端口"
+	case strings.Contains(lower, "protocol") || strings.Contains(lower, "socks"):
+		return "协议不匹配，已尝试 HTTP/SOCKS 自动识别仍失败"
+	case strings.Contains(lower, "无法通过代理访问互联网") || strings.Contains(lower, "internet"):
+		return "端口可达但无法经代理上网（协议/认证/出口异常）"
+	default:
+		return errText
+	}
+}
+
+// BrowserProxyFullCheck is a one-click check (AdsPower/MoreLogin style summary):
+// real latency + working protocol + exit IP/geo when reachable. Does not change
+// the necessary start-time connectivity probe path.
+func (a *App) BrowserProxyFullCheck(proxyId string) ProxyTestResult {
+	result := a.BrowserProxyTestSpeed(proxyId)
+	if !result.Ok {
+		return result
+	}
+	// Enrich with exit IP when speed already proves the tunnel works.
+	health := a.BrowserProxyCheckIPHealth(proxyId)
+	if health.Ok {
+		result.ExitIP = health.IP
+		result.Country = health.Country
+		result.City = health.City
+		result.IsResidential = health.IsResidential
+		result.TimezoneHint = proxy.TimezoneHintFromCountry(health.Country)
+		geo := strings.TrimSpace(strings.Join([]string{health.Country, health.City}, " · "))
+		if geo == " · " {
+			geo = ""
+		}
+		parts := []string{result.Message}
+		if health.IP != "" {
+			parts = append(parts, "出口 "+health.IP)
+		}
+		if geo != "" && geo != "·" {
+			parts = append(parts, geo)
+		}
+		if result.TimezoneHint != "" {
+			parts = append(parts, "建议时区 "+result.TimezoneHint)
+		}
+		if health.IsResidential {
+			parts = append(parts, "住宅属性")
+		}
+		result.Message = strings.Join(parts, " · ")
+	}
+	return result
+}
+
+// SuggestTimezoneFromProxy returns an IANA timezone hint from the last IP
+// health data of a proxy (for fingerprint alignment with exit geo).
+func (a *App) SuggestTimezoneFromProxy(proxyId string) string {
+	proxyId = strings.TrimSpace(proxyId)
+	if proxyId == "" || a.browserMgr == nil || a.browserMgr.ProxyDAO == nil {
+		return ""
+	}
+	// Prefer live health fetch cache via DAO persisted JSON.
+	list := a.getLatestProxies()
+	for _, item := range list {
+		if !strings.EqualFold(item.ProxyId, proxyId) {
+			continue
+		}
+		if strings.TrimSpace(item.LastIPHealthJSON) == "" {
+			break
+		}
+		var health ProxyIPHealthResult
+		if json.Unmarshal([]byte(item.LastIPHealthJSON), &health) == nil && health.Ok {
+			if tz := proxy.TimezoneHintFromCountry(health.Country); tz != "" {
+				return tz
+			}
+		}
+		break
+	}
+	// Fallback: one health check (network).
+	health := a.BrowserProxyCheckIPHealth(proxyId)
+	if health.Ok {
+		return proxy.TimezoneHintFromCountry(health.Country)
+	}
+	return ""
 }
 
 // BrowserProxyTestSpeed 手动触发单个代理测速并持久化结果

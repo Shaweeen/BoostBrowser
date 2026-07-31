@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Card, ConfirmModal, FormItem, Input, Modal, Select, Switch, Table, Textarea, toast } from '../../../shared/components'
 import type { SortOrder, TableColumn } from '../../../shared/components/Table'
 import type { BrowserProxy, ProxyIPHealthResult } from '../types'
-import { fetchBrowserProxies, fetchBrowserProxyGroups, saveBrowserProxies, upsertBrowserProxy, deleteBrowserProxies, browserProxyTestSpeed, browserProxyBatchTestSpeed, browserProxyCheckIPHealth, browserProxyBatchCheckIPHealth, fetchClashImportFromURL, testProxyConfigRealConnectivity } from '../api'
+import { fetchBrowserProxies, fetchBrowserProxyGroups, saveBrowserProxies, upsertBrowserProxy, deleteBrowserProxies, browserProxyTestSpeed, browserProxyBatchTestSpeed, browserProxyFullCheck, browserProxyCheckIPHealth, browserProxyBatchCheckIPHealth, fetchClashImportFromURL, testProxyConfigRealConnectivity } from '../api'
 import { EventsOn } from '../../../wailsjs/runtime/runtime'
 import { SmartAssignProxyModal } from '../components/SmartAssignProxyModal'
 import yaml from 'js-yaml'
@@ -1465,10 +1465,37 @@ export function ProxyPoolPage() {
       return
     }
     setLatencyMap(prev => ({ ...prev, [record.proxyId]: -1 }))
-    const result = await browserProxyTestSpeed(record.proxyId)
+    // Full check: latency + working protocol + exit geo (one-click, like peer products).
+    const result = await browserProxyFullCheck(record.proxyId)
     applyResolvedProxyConfigs([result])
     const val = toLatencyValue(result.ok, result.latencyMs, result.error)
     setLatencyMap(prev => ({ ...prev, [record.proxyId]: val }))
+    if (result.ok) {
+      if (result.exitIP) {
+        setIPHealthMap(prev => ({
+          ...prev,
+          [record.proxyId]: {
+            proxyId: record.proxyId,
+            ok: true,
+            source: 'full-check',
+            error: '',
+            ip: result.exitIP || '',
+            fraudScore: 0,
+            isResidential: !!result.isResidential,
+            isBroadcast: false,
+            country: result.country || '',
+            region: '',
+            city: result.city || '',
+            asOrganization: '',
+            rawData: {},
+            updatedAt: new Date().toISOString(),
+          },
+        }))
+      }
+      toast.success(result.message || `${record.proxyName} 检测通过`)
+    } else {
+      toast.error(result.message || result.error || `${record.proxyName} 不可用`)
+    }
   }
 
   const handleTestAll = async () => {

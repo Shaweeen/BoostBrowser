@@ -29,7 +29,11 @@ type TestResult struct {
 func proxyEndpoint(src string) (string, error) {
 	src = strings.TrimSpace(src)
 	if LooksLikeStandardProxyConfig(src) {
-		normalized, err := NormalizeStandardProxyConfig(src, "http")
+		scheme := PreferredSchemeFromProxySource(src)
+		if scheme == "" {
+			scheme = "http"
+		}
+		normalized, err := NormalizeStandardProxyConfig(src, scheme)
 		if err != nil {
 			return "", err
 		}
@@ -38,7 +42,7 @@ func proxyEndpoint(src string) (string, error) {
 	l := strings.ToLower(src)
 
 	// 标准 URL 格式: socks5://host:port, http://host:port
-	if strings.HasPrefix(l, "socks5://") || strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://") {
+	if strings.HasPrefix(l, "socks5://") || strings.HasPrefix(l, "socks5h://") || strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://") || strings.HasPrefix(l, "socks://") {
 		u, err := url.Parse(src)
 		if err != nil || u.Hostname() == "" || u.Port() == "" {
 			return "", fmt.Errorf("标准代理 URL 无效")
