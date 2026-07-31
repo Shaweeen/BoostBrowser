@@ -116,8 +116,41 @@ if ($Head -ne $TagCommit) {
     }
 }
 
-& git ls-remote --exit-code origin "refs/tags/$Tag" | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Release tag $Tag is not available on origin" }
+# Verify the release tag is on origin. Windows schannel occasionally fails the
+# TLS handshake mid-publish even right after a successful fetch — retry and
+# fall back to the GitHub API (same credentials as `gh release create`).
+function Assert-OriginReleaseTag([string]$TagName) {
+    $ref = "refs/tags/$TagName"
+    $maxAttempts = 4
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        $savedPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'SilentlyContinue'
+            & git ls-remote --exit-code origin $ref 1>$null 2>$null
+            $code = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $savedPreference
+        }
+        if ($code -eq 0) { return }
+        if ($attempt -lt $maxAttempts) {
+            Start-Sleep -Seconds (2 * $attempt)
+        }
+    }
+
+    $apiProbe = Invoke-GhProbe -Arguments @(
+        'api',
+        "repos/$Repository/git/ref/tags/$TagName",
+        '--jq',
+        '.object.sha'
+    )
+    if ($apiProbe.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($apiProbe.Output)) {
+        Write-Host "Origin tag $TagName confirmed via GitHub API (git ls-remote TLS flaky)." -ForegroundColor Yellow
+        return
+    }
+    throw "Release tag $TagName is not available on origin (git ls-remote and gh api both failed)"
+}
+
+Assert-OriginReleaseTag $Tag
 
 # A clone made with --branch <annotated-tag> --depth 1 can contain the release
 # commit without the tag's parent history (and some Git versions leave only a
