@@ -326,7 +326,10 @@ func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionIm
 		ExtensionVersion: extensionVersion,
 		PreviousVersion:  previousVersion,
 		UpdatedProfiles:  updated,
-		Message:          fmt.Sprintf("全局分配已执行：新增 %d 个环境，跳过 %d 个已有扩展的环境；新建环境需再次点击分配", len(updated), len(targetIDs)-len(updated)),
+		Message: fmt.Sprintf(
+			"全局分配已执行：新增 %d 个环境，跳过 %d 个已有扩展的环境。请打开一次新分配的环境完成适配；适配后将不再每次启动注入扩展",
+			len(updated), len(targetIDs)-len(updated),
+		),
 	}, nil
 }
 

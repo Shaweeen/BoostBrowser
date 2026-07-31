@@ -16,9 +16,17 @@ import (
 
 // Per-profile marker written after the first successful post-assignment launch
 // has verified that assigned --load-extension packages correspond to profile
-// extension data. Subsequent starts skip extension package repair, startup-tab
-// CDP sweeps, bookmark re-merge and search-engine re-seed. Browser launch,
-// window size/position and multi-environment popup confinement stay active.
+// extension data (Preferences / Local Extension Settings).
+//
+// Lifecycle (why Chrome-Manager does not hit this pain):
+//  1. User assigns extension → LaunchArgs get --load-extension=… and marker cleared.
+//  2. User opens the environment ONCE → Chrome activates packages and writes
+//     vault/settings under the profile (adapt pass).
+//  3. Marker is written → later starts SKIP --load-extension injection so Chrome
+//     reloads from the profile (protects wallet accounts / extension storage).
+//  4. Re-assign / remove clears the marker → one more adapt pass is required.
+//
+// Prep skips (scan/seed) also apply when ready; tab sole-blank handoff stays.
 const extensionLaunchReadyMarkerName = ".boost_extension_launch_ready"
 
 type extensionLaunchReadyMarker struct {
@@ -99,6 +107,41 @@ func isExtensionLaunchPrepReady(userDataDir, assignmentFingerprint string) bool 
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(marker.AssignmentFingerprint), assignmentFingerprint)
+}
+
+// shouldSkipLoadExtensionInjection is true when this environment already completed
+// the one-time adapt pass for the current assignment fingerprint AND profile
+// still holds Chrome-written extension data. LaunchArgs may still list packages
+// (assignment record); the CLI flag is stripped only for this process start.
+func shouldSkipLoadExtensionInjection(userDataDir, assignmentFingerprint string, launchArgs []string) bool {
+	if !isExtensionLaunchPrepReady(userDataDir, assignmentFingerprint) {
+		return false
+	}
+	// Marker alone is not enough: if the user wiped profile data, re-inject.
+	if !verifyAssignedExtensionsAgainstProfileData(userDataDir, launchArgs) {
+		return false
+	}
+	// Require Preferences/LES evidence so we never strip inject based only on a
+	// stable package key sitting on disk.
+	return extensionProfileDataLooksAdapted(userDataDir, launchArgs)
+}
+
+// stripLoadExtensionArgs removes all --load-extension flags from a launch argv.
+// Used after the adapt pass so Chromium reloads extensions from the profile
+// instead of re-activating packages from the command line every open.
+func stripLoadExtensionArgs(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		if strings.HasPrefix(strings.ToLower(trimmed), "--load-extension=") {
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out
 }
 
 // Lightweight one-time start prep marker (session restore sanitization etc.).
@@ -423,8 +466,10 @@ func (a *App) clearExtensionLaunchReadyForProfilesLocked(profileIDs []string) {
 
 // maybeMarkExtensionLaunchReady runs after a first post-assignment start when
 // prep work still ran. It non-destructively completes missing scaffolding,
-// verifies packages ↔ profile data, then marks ready so later starts skip prep.
-// Existing user vaults, cookies and social session state are never overwritten.
+// waits briefly for Chrome to persist Preferences/LES, verifies packages ↔
+// profile data, then marks ready so later starts skip --load-extension inject
+// and prep. Existing user vaults, cookies and social session state are never
+// overwritten.
 func (a *App) maybeMarkExtensionLaunchReady(profileID, userDataDir, assignmentFingerprint string, launchArgs []string, extensionIDs []string) {
 	if strings.TrimSpace(assignmentFingerprint) == "" || strings.TrimSpace(userDataDir) == "" {
 		return
@@ -437,8 +482,20 @@ func (a *App) maybeMarkExtensionLaunchReady(profileID, userDataDir, assignmentFi
 			logger.F("empty_settings_dirs_created", scaffolds),
 		)
 	}
-	if !verifyAssignedExtensionsAgainstProfileData(userDataDir, launchArgs) {
-		logger.New("Extension").Info("扩展数据尚未与分配列表对齐，保持启动前校验（不覆盖已有用户数据）",
+	// Give Chrome time to flush extension registration + vault paths after the
+	// adapt start (CLI --load-extension first activation). Do not mark ready
+	// until Preferences/LES show real profile state for assigned web-store IDs.
+	aligned := false
+	for attempt := 0; attempt < 16; attempt++ {
+		if verifyAssignedExtensionsAgainstProfileData(userDataDir, launchArgs) &&
+			extensionProfileDataLooksAdapted(userDataDir, launchArgs) {
+			aligned = true
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !aligned {
+		logger.New("Extension").Info("扩展数据尚未与分配列表对齐，保持下次启动仍注入 --load-extension（不覆盖已有用户数据）",
 			logger.F("profile_id", profileID),
 		)
 		return
@@ -450,8 +507,35 @@ func (a *App) maybeMarkExtensionLaunchReady(profileID, userDataDir, assignmentFi
 		)
 		return
 	}
-	logger.New("Extension").Info("扩展分配已与环境数据对齐，后续启动跳过扩展扫描/修复；已有钱包与账号状态保留",
+	logger.New("Extension").Info("扩展已完成首次适配：后续启动将跳过 --load-extension 注入与扫描，保留钱包/账号状态",
 		logger.F("profile_id", profileID),
 		logger.F("extension_count", len(extensionIDs)),
 	)
+}
+
+// extensionProfileDataLooksAdapted reports that Chrome (or a prior adapt) left
+// durable per-extension state under the profile for assigned web-store IDs.
+func extensionProfileDataLooksAdapted(userDataDir string, launchArgs []string) bool {
+	dirs := activeLoadExtensionDirs(launchArgs)
+	if len(dirs) == 0 {
+		return true
+	}
+	prefIDs := preferenceExtensionIDs(userDataDir)
+	need := 0
+	have := 0
+	for _, original := range dirs {
+		id := strings.ToLower(filepath.Base(strings.TrimSpace(original)))
+		if !isWebStoreExtensionID(id) {
+			continue
+		}
+		need++
+		if profileHasExtensionData(userDataDir, id, prefIDs) {
+			have++
+		}
+	}
+	if need == 0 {
+		// Custom folder names: package + marker verification is enough.
+		return true
+	}
+	return have == need
 }

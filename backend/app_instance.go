@@ -242,8 +242,21 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	// only launch the browser (+ window/popup policy). Re-assignment clears it.
 	assignmentFP, assignmentExtIDs := assignmentFingerprintFromLaunchArgs(sanitizedProfileLaunchArgs)
 	extensionPrepReady := isExtensionLaunchPrepReady(userDataDir, assignmentFP)
+	skipLoadExtensionInject := shouldSkipLoadExtensionInjection(userDataDir, assignmentFP, sanitizedProfileLaunchArgs)
 	if extensionPrepReady {
-		log.Info("扩展启动就绪标记有效，跳过启动前扫描/修复（仅起浏览器 + 单次标签收敛）",
+		if skipLoadExtensionInject {
+			log.Info("扩展已完成首次适配：跳过启动前扫描，并禁止再次 --load-extension 注入（保护钱包/账号）",
+				logger.F("profile_id", profileId),
+				logger.F("extension_count", len(assignmentExtIDs)),
+			)
+		} else {
+			log.Info("扩展就绪标记存在但环境数据不完整，本轮仍注入 --load-extension 以重新适配",
+				logger.F("profile_id", profileId),
+				logger.F("extension_count", len(assignmentExtIDs)),
+			)
+		}
+	} else if assignmentFP != "" {
+		log.Info("扩展尚未完成首次适配：本轮将注入 --load-extension，请在环境内确认扩展后关闭；之后启动不再重复注入",
 			logger.F("profile_id", profileId),
 			logger.F("extension_count", len(assignmentExtIDs)),
 		)
@@ -496,6 +509,20 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
+	// After one successful adapt pass, do not re-inject --load-extension on every
+	// open (that re-activates packages, can reopen onboarding tabs, and has been
+	// observed to disturb wallet vault identity). LaunchArgs keep the assignment
+	// record; Chromium reloads from profile Preferences/path.
+	if skipLoadExtensionInject {
+		beforeStrip := len(activeLoadExtensionDirs(args))
+		args = stripLoadExtensionArgs(args)
+		if beforeStrip > 0 {
+			log.Info("已从本次启动参数剥离 --load-extension",
+				logger.F("profile_id", profileId),
+				logger.F("stripped_packages", beforeStrip),
+			)
+		}
+	}
 	// Extension package repair runs off the critical path after first start
 	// (async). Avoid blocking multi-open on CRX/key network work.
 	// Final authoritative placement pass: fingerprint/profile/API arguments are
@@ -648,17 +675,16 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				}
 			}()
 
-			// First post-assignment open: after browser is up, verify extension
-			// package list ↔ profile data, then skip prep helpers on later starts.
-			if !extensionPrepReady && assignmentFP != "" {
+			// First post-assignment open (adapt pass): with --load-extension still
+			// injected, wait for Chrome to write profile extension state, then mark
+			// ready so later starts skip CLI re-injection.
+			if !skipLoadExtensionInject && assignmentFP != "" {
 				launchArgsSnapshot := append([]string{}, sanitizedProfileLaunchArgs...)
 				go func() {
 					defer func() { _ = recover() }()
-					// Off critical path: package key repair + non-destructive
-					// scaffold, then mark ready when profile data exists.
-					// Short waits only — no long tab polling.
 					a.completeAssignedExtensionProfileData(userDataDir, launchArgsSnapshot)
-					time.Sleep(1 * time.Second)
+					// Initial settle so Preferences/LES begin to appear.
+					time.Sleep(1500 * time.Millisecond)
 					a.maybeMarkExtensionLaunchReady(profileId, userDataDir, assignmentFP, launchArgsSnapshot, assignmentExtIDs)
 				}()
 			}

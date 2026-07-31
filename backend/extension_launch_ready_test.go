@@ -120,6 +120,64 @@ func TestEmptyAssignmentUsesStartPrepMarker(t *testing.T) {
 	}
 }
 
+func TestStripLoadExtensionArgs(t *testing.T) {
+	got := stripLoadExtensionArgs([]string{
+		"--user-data-dir=/tmp/x",
+		"--load-extension=/a,/b",
+		"--no-first-run",
+		"--load-extension=/c",
+	})
+	if len(got) != 2 || got[0] != "--user-data-dir=/tmp/x" || got[1] != "--no-first-run" {
+		t.Fatalf("strip failed: %#v", got)
+	}
+}
+
+func TestShouldSkipLoadExtensionInjectionRequiresAdaptedProfileData(t *testing.T) {
+	root := t.TempDir()
+	extID := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	extDir := filepath.Join(root, "pkg", extID)
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"t","version":"1","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	userData := filepath.Join(root, "user")
+	if err := os.MkdirAll(userData, 0755); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--load-extension=" + extDir}
+	fp, ids := assignmentFingerprintFromLaunchArgs(args)
+	if shouldSkipLoadExtensionInjection(userData, fp, args) {
+		t.Fatal("without marker must not skip inject")
+	}
+	if err := writeExtensionLaunchReadyMarker(userData, "p1", fp, ids); err != nil {
+		t.Fatal(err)
+	}
+	// Marker + package alone must not skip inject (no Preferences/LES).
+	if shouldSkipLoadExtensionInjection(userData, fp, args) {
+		t.Fatal("marker without adapted profile data must not skip inject")
+	}
+	prefDir := filepath.Join(userData, "Default")
+	if err := os.MkdirAll(prefDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	prefs := map[string]any{
+		"extensions": map[string]any{
+			"settings": map[string]any{
+				extID: map[string]any{"state": 1, "path": extDir},
+			},
+		},
+	}
+	raw, _ := json.Marshal(prefs)
+	if err := os.WriteFile(filepath.Join(prefDir, "Preferences"), raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !shouldSkipLoadExtensionInjection(userData, fp, args) {
+		t.Fatal("marker + Preferences extension entry must skip inject")
+	}
+}
+
 func TestCompleteAssignedDoesNotRewritePreferences(t *testing.T) {
 	root := t.TempDir()
 	extID := "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh"
