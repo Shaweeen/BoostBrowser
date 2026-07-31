@@ -150,6 +150,22 @@ export async function updateBrowserProfile(profileId: string, input: BrowserProf
   return mockProfiles[index]
 }
 
+/** Pause/resume remote proxy for one environment without unbinding pool proxy. */
+export async function setBrowserProfileProxyPaused(profileId: string, paused: boolean): Promise<BrowserProfile | null> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserProfileSetProxyPaused) {
+    return (await bindings.BrowserProfileSetProxyPaused(profileId, paused)) || null
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.BrowserProfileSetProxyPaused) {
+    return (await goApp.BrowserProfileSetProxyPaused(profileId, paused)) || null
+  }
+  const index = mockProfiles.findIndex(item => item.profileId === profileId)
+  if (index === -1) return null
+  mockProfiles[index] = { ...mockProfiles[index], proxyPaused: paused, updatedAt: new Date().toISOString() }
+  return mockProfiles[index]
+}
+
 export async function deleteBrowserProfile(profileId: string): Promise<boolean> {
   const bindings: any = await getBindings()
   if (bindings?.BrowserProfileDeleteWithCache) {

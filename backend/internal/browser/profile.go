@@ -420,6 +420,35 @@ func (m *Manager) RandomizeFingerprint(profileId string) (*Profile, error) {
 	return &next, nil
 }
 
+// SetProxyPaused toggles temporary remote-proxy pause without clearing ProxyId.
+// When paused, environment start uses direct:// (local ISP) for form fill / special ops.
+func (m *Manager) SetProxyPaused(profileId string, paused bool) (*Profile, error) {
+	log := logger.New("Browser")
+	m.InitData()
+	m.Mutex.Lock()
+	defer m.Mutex.Unlock()
+	profile, exists := m.Profiles[profileId]
+	if !exists {
+		return nil, fmt.Errorf("profile not found")
+	}
+	if profile.ProxyPaused == paused {
+		cp := *profile
+		return &cp, nil
+	}
+	next := *profile
+	next.ProxyPaused = paused
+	next.UpdatedAt = time.Now().Format(time.RFC3339)
+	if err := m.commitProfileLocked(&next); err != nil {
+		return nil, err
+	}
+	log.Info("环境代理暂停状态已更新",
+		logger.F("profile_id", profileId),
+		logger.F("proxy_paused", paused),
+		logger.F("proxy_id", next.ProxyId),
+	)
+	return &next, nil
+}
+
 // Update 更新配置
 func (m *Manager) Update(profileId string, input ProfileInput) (*Profile, error) {
 	log := logger.New("Browser")
@@ -700,6 +729,7 @@ func (m *Manager) Copy(profileId string, newName string) (*Profile, error) {
 		FingerprintArgs:    fpArgs,
 		ProxyId:            src.ProxyId,
 		ProxyConfig:        src.ProxyConfig,
+		ProxyPaused:        false, // clone starts with proxy enabled
 		ProxyBindSourceID:  src.ProxyBindSourceID,
 		ProxyBindSourceURL: src.ProxyBindSourceURL,
 		ProxyBindName:      src.ProxyBindName,

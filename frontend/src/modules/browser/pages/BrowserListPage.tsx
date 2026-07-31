@@ -36,6 +36,7 @@ import {
   startBrowserInstance,
   stopBrowserInstance,
   validateBrowserCorePath,
+  setBrowserProfileProxyPaused,
   validateProxyConfig,
 } from '../api'
 
@@ -688,11 +689,38 @@ export function BrowserListPage() {
     }
   }, [naturalCompare])
 
+  const handleToggleProxyPaused = async (profileId: string) => {
+    const profile = profiles.find(p => p.profileId === profileId)
+    if (!profile) return
+    const nextPaused = !profile.proxyPaused
+    try {
+      const updated = await setBrowserProfileProxyPaused(profileId, nextPaused)
+      mergeProfileState(updated)
+      if (nextPaused) {
+        toast.success(
+          profile.running
+            ? '已暂停远程代理（下次启动走本机直连；当前运行中窗口需重启生效）'
+            : '已暂停远程代理，下次启动将使用本机直连；代理绑定保留',
+        )
+      } else {
+        toast.success(
+          profile.running
+            ? '已恢复远程代理（下次启动生效；当前窗口需重启）'
+            : '已恢复远程代理，下次启动使用绑定的代理',
+        )
+      }
+      await loadProfiles({ silent: true })
+    } catch (error: any) {
+      toast.error(error?.message || '切换代理暂停状态失败')
+    }
+  }
+
   const handleStart = async (profileId: string) => {
     const profile = profiles.find(p => p.profileId === profileId)
     updatePendingIds(setStartingIds, profileId, true)
     try {
-      if (profile) {
+      // Skipped when proxy is temporarily paused (direct:// local path).
+      if (profile && !profile.proxyPaused) {
         const result = await validateProxyConfig(profile.proxyConfig || '', profile.proxyId || '')
         if (!result.supported) {
           setProxyErrorMsg(result.errorMsg)
@@ -1243,9 +1271,20 @@ export function BrowserListPage() {
     {
       key: 'proxyId',
       title: '代理',
-      render: (value) => {
+      render: (value, record) => {
         const proxy = proxies.find(p => p.proxyId === value)
-        return <span className="text-xs">{proxy ? proxy.proxyName : value || '-'}</span>
+        const name = proxy ? proxy.proxyName : value || '-'
+        if (record.proxyPaused) {
+          return (
+            <span className="text-xs inline-flex flex-col gap-0.5">
+              <span className="text-[var(--color-text-muted)] line-through">{name}</span>
+              <span className="inline-flex w-fit px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300">
+                已暂停 · 直连
+              </span>
+            </span>
+          )
+        }
+        return <span className="text-xs">{name}</span>
       },
     },
     {
@@ -1285,6 +1324,16 @@ export function BrowserListPage() {
               </Button>
             )}
             <Button size="sm" variant="ghost" onClick={() => handleRestart(record.profileId)} title="重启" disabled={isBusy}><RotateCcw className="w-3.5 h-3.5" /></Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => void handleToggleProxyPaused(record.profileId)}
+              title={record.proxyPaused ? '恢复远程代理（下次启动生效）' : '暂停远程代理，启动走本机直连（绑定保留）'}
+              disabled={isBusy || (!record.proxyId && !record.proxyConfig)}
+              className={record.proxyPaused ? 'text-amber-600' : undefined}
+            >
+              {record.proxyPaused ? '开代理' : '关代理'}
+            </Button>
             <Button size="sm" variant="ghost" onClick={() => openKwModal(record)} title="关键字" disabled={isBusy}><Key className="w-3.5 h-3.5" /></Button>
             <Link to={`/browser/edit/${record.profileId}`}><Button size="sm" variant="ghost" title="配置" disabled={isBusy}><Settings className="w-3.5 h-3.5" /></Button></Link>
             <Button size="sm" variant="ghost" onClick={() => handleRandomizeFingerprint(record.profileId)} title="随机指纹种子（每个环境独立隔离）" disabled={isBusy || record.running}><Wand2 className="w-3.5 h-3.5" /></Button>
@@ -1493,7 +1542,26 @@ export function BrowserListPage() {
                       </div>
                       <div className="flex flex-col gap-0.5">
                         <span className="text-xs text-[var(--color-text-muted)] font-medium">代理配置</span>
-                        <span className="text-xs text-[var(--color-text-primary)]">{proxy?.proxyName || record.proxyId || '-'}</span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className={`text-xs text-[var(--color-text-primary)] ${record.proxyPaused ? 'line-through text-[var(--color-text-muted)]' : ''}`}>
+                            {proxy?.proxyName || record.proxyId || '-'}
+                          </span>
+                          {record.proxyPaused && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300">
+                              已暂停 · 直连
+                            </span>
+                          )}
+                          {(record.proxyId || record.proxyConfig) && (
+                            <button
+                              type="button"
+                              className="text-[11px] text-[var(--color-accent)] hover:underline disabled:opacity-50"
+                              disabled={isBusy}
+                              onClick={() => void handleToggleProxyPaused(record.profileId)}
+                            >
+                              {record.proxyPaused ? '恢复代理' : '暂停代理'}
+                            </button>
+                          )}
+                        </div>
                       </div>
                       <div className="flex flex-col gap-0.5">
                         <span className="text-xs text-[var(--color-text-muted)] font-medium">快捷配置码</span>

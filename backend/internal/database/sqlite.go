@@ -160,6 +160,13 @@ var migrations = []migration{
 			`ALTER TABLE browser_profiles ADD COLUMN last_stop_at TEXT NOT NULL DEFAULT ''`,
 		},
 	},
+	{
+		version: 10,
+		desc:    "实例表添加代理临时暂停（保留绑定，启动走直连）",
+		stmts: []string{
+			`ALTER TABLE browser_profiles ADD COLUMN proxy_paused INTEGER NOT NULL DEFAULT 0`,
+		},
+	},
 	// ── 新版本在此追加，格式：
 	// {
 	//     version: 4,

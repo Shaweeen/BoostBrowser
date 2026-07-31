@@ -6,6 +6,8 @@ export interface BrowserProfile {
   fingerprintArgs: string[]
   proxyId: string
   proxyConfig: string
+  /** Temporary pause: keep bound proxy, start with direct:// */
+  proxyPaused?: boolean
   proxyBindSourceId?: string
   proxyBindSourceUrl?: string
   proxyBindName?: string

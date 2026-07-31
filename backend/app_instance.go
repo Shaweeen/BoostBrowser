@@ -297,6 +297,14 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			}
 		}
 	}
+	// Temporary pause: keep pool binding, start without remote IP (local ISP).
+	if profile.ProxyPaused {
+		log.Info("环境代理已暂停，本次启动使用本机直连",
+			logger.F("profile_id", profileId),
+			logger.F("bound_proxy_id", profile.ProxyId),
+		)
+		resolvedProxyConfig = "direct://"
+	}
 	if proxy.LooksLikeStandardProxyConfig(resolvedProxyConfig) {
 		// Prefer declared scheme (socks5/socks5h/http); bare host:port stays http.
 		defaultScheme := proxy.PreferredSchemeFromProxySource(resolvedProxyConfig)
@@ -315,17 +323,20 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	log.Info("代理配置检查",
 		logger.F("profile_id", profileId),
 		logger.F("proxy_id", profile.ProxyId),
+		logger.F("proxy_paused", profile.ProxyPaused),
 		logger.F("config_present", resolvedProxyConfig != ""),
 		logger.F("standard_proxy", proxy.IsStandardProxyURL(resolvedProxyConfig)),
 	)
-	if supported, errorMsg := proxy.ValidateProxyConfig(resolvedProxyConfig, proxies, profile.ProxyId); !supported {
-		startErr := fmt.Errorf("实例启动失败：%s", errorMsg)
-		profile.LastError = startErr.Error()
-		log.Error("代理配置无效", logger.F("profile_id", profileId), logger.F("proxy_id", profile.ProxyId), logger.F("error", errorMsg), logger.F("reason", startErr.Error()))
-		return profile, startErr
+	if !profile.ProxyPaused {
+		if supported, errorMsg := proxy.ValidateProxyConfig(resolvedProxyConfig, proxies, profile.ProxyId); !supported {
+			startErr := fmt.Errorf("实例启动失败：%s", errorMsg)
+			profile.LastError = startErr.Error()
+			log.Error("代理配置无效", logger.F("profile_id", profileId), logger.F("proxy_id", profile.ProxyId), logger.F("error", errorMsg), logger.F("reason", startErr.Error()))
+			return profile, startErr
+		}
 	}
 
-	if proxy.IsSingBoxProtocol(resolvedProxyConfig) {
+	if !profile.ProxyPaused && proxy.IsSingBoxProtocol(resolvedProxyConfig) {
 		// hysteria2 / tuic → sing-box 桥接
 		socksURL, bridgeErr := a.singboxMgr.EnsureBridge(resolvedProxyConfig, proxies, profile.ProxyId)
 		if bridgeErr != nil {
@@ -343,7 +354,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		}
 		effectiveProxy = socksURL
 		log.Info("sing-box 桥接成功", logger.F("socks_url", socksURL))
-	} else if proxy.RequiresBridge(resolvedProxyConfig, proxies, profile.ProxyId) {
+	} else if !profile.ProxyPaused && proxy.RequiresBridge(resolvedProxyConfig, proxies, profile.ProxyId) {
 		// vmess / vless / trojan / ss → xray 桥接
 		socksURL, bridgeKey, bridgeErr := a.xrayMgr.AcquireBridge(resolvedProxyConfig, proxies, profile.ProxyId)
 		if bridgeErr != nil {
@@ -363,7 +374,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		releaseXrayBridge = bridgeKey != ""
 		effectiveProxy = socksURL
 		log.Info("xray 桥接成功", logger.F("socks_url", socksURL))
-	} else if proxy.IsStandardProxyURL(resolvedProxyConfig) && a.standardRelayMgr != nil {
+	} else if !profile.ProxyPaused && proxy.IsStandardProxyURL(resolvedProxyConfig) && a.standardRelayMgr != nil {
 		localProxy, relayKey, relayErr := a.standardRelayMgr.Acquire(profileId, resolvedProxyConfig, proxy.StandardProxyRouteOptions{
 			Mode:            a.config.Browser.ProxyNetworkMode,
 			LocalGatewayURL: a.config.Browser.LocalVPNProxy,

@@ -31,6 +31,7 @@ func NewSQLiteProfileDAO(db *sql.DB) *SQLiteProfileDAO {
 const profileSelectColumns = `
 		profile_id, profile_name, user_data_dir, core_id,
 		fingerprint_args, proxy_id, proxy_config,
+		COALESCE(proxy_paused, 0),
 		COALESCE(proxy_bind_source_id, ''), COALESCE(proxy_bind_source_url, ''),
 		COALESCE(proxy_bind_name, ''), COALESCE(proxy_bind_updated_at, ''),
 		launch_args, COALESCE(last_tabs, '[]'),
@@ -95,14 +96,18 @@ func upsertProfile(exec profileExecer, profile *Profile) error {
 		profile.UpdatedAt = now
 	}
 
+	proxyPaused := 0
+	if profile.ProxyPaused {
+		proxyPaused = 1
+	}
 	_, err := exec.Exec(`
 		INSERT INTO browser_profiles
 		  (profile_id, profile_name, user_data_dir, core_id, fingerprint_args,
-		   proxy_id, proxy_config, proxy_bind_source_id, proxy_bind_source_url, proxy_bind_name, proxy_bind_updated_at,
+		   proxy_id, proxy_config, proxy_paused, proxy_bind_source_id, proxy_bind_source_url, proxy_bind_name, proxy_bind_updated_at,
 		   launch_args, last_tabs, tags, keywords, group_id, created_at, updated_at,
 		   last_window_x, last_window_y, last_window_width, last_window_height,
 		   last_start_at, last_stop_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(profile_id) DO UPDATE SET
 		  profile_name     = excluded.profile_name,
 		  user_data_dir    = excluded.user_data_dir,
@@ -110,6 +115,7 @@ func upsertProfile(exec profileExecer, profile *Profile) error {
 		  fingerprint_args = excluded.fingerprint_args,
 		  proxy_id         = excluded.proxy_id,
 		  proxy_config     = excluded.proxy_config,
+		  proxy_paused     = excluded.proxy_paused,
 		  proxy_bind_source_id = excluded.proxy_bind_source_id,
 		  proxy_bind_source_url = excluded.proxy_bind_source_url,
 		  proxy_bind_name = excluded.proxy_bind_name,
@@ -127,7 +133,7 @@ func upsertProfile(exec profileExecer, profile *Profile) error {
 		  last_start_at      = excluded.last_start_at,
 		  last_stop_at       = excluded.last_stop_at`,
 		profile.ProfileId, profile.ProfileName, profile.UserDataDir, profile.CoreId,
-		string(fingerprintArgs), profile.ProxyId, profile.ProxyConfig,
+		string(fingerprintArgs), profile.ProxyId, profile.ProxyConfig, proxyPaused,
 		profile.ProxyBindSourceID, profile.ProxyBindSourceURL, profile.ProxyBindName, profile.ProxyBindUpdatedAt,
 		string(launchArgs), string(lastTabs), string(tags), string(keywords), profile.GroupId,
 		profile.CreatedAt, profile.UpdatedAt,
@@ -248,9 +254,10 @@ func scanProfile(s scanner) (*Profile, error) {
 		fingerprintArgsJSON, launchArgsJSON, lastTabsJSON, tagsJSON, keywordsJSON string
 		p                                                                         Profile
 	)
+	var proxyPausedInt int
 	err := s.Scan(
 		&p.ProfileId, &p.ProfileName, &p.UserDataDir, &p.CoreId,
-		&fingerprintArgsJSON, &p.ProxyId, &p.ProxyConfig,
+		&fingerprintArgsJSON, &p.ProxyId, &p.ProxyConfig, &proxyPausedInt,
 		&p.ProxyBindSourceID, &p.ProxyBindSourceURL, &p.ProxyBindName, &p.ProxyBindUpdatedAt,
 		&launchArgsJSON, &lastTabsJSON, &tagsJSON, &keywordsJSON, &p.GroupId,
 		&p.CreatedAt, &p.UpdatedAt,
@@ -260,6 +267,7 @@ func scanProfile(s scanner) (*Profile, error) {
 	if err != nil {
 		return nil, err
 	}
+	p.ProxyPaused = proxyPausedInt != 0
 	_ = json.Unmarshal([]byte(fingerprintArgsJSON), &p.FingerprintArgs)
 	_ = json.Unmarshal([]byte(launchArgsJSON), &p.LaunchArgs)
 	_ = json.Unmarshal([]byte(lastTabsJSON), &p.LastTabs)

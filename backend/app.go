@@ -788,6 +788,12 @@ func (a *App) BrowserProfileRandomizeFingerprint(profileId string) (*BrowserProf
 	return a.browserMgr.RandomizeFingerprint(profileId)
 }
 
+// BrowserProfileSetProxyPaused temporarily disables remote proxy for one environment
+// without unbinding the pool proxy. Start uses direct:// while paused.
+func (a *App) BrowserProfileSetProxyPaused(profileId string, paused bool) (*BrowserProfile, error) {
+	return a.browserMgr.SetProxyPaused(profileId, paused)
+}
+
 func (a *App) BrowserProfileUpdate(profileId string, input BrowserProfileInput) (*BrowserProfile, error) {
 	for _, profile := range a.browserMgr.List() {
 		if profile.ProfileId == profileId {

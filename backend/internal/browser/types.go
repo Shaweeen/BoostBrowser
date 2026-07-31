@@ -16,6 +16,10 @@ type Profile struct {
 	FingerprintArgs    []string `json:"fingerprintArgs"`
 	ProxyId            string   `json:"proxyId"`
 	ProxyConfig        string   `json:"proxyConfig"`
+	// ProxyPaused temporarily disables the bound remote proxy without unbinding.
+	// When true, environment start uses direct:// so the user can work on local
+	// network (form fill / verification) then re-enable the same pool proxy.
+	ProxyPaused        bool     `json:"proxyPaused"`
 	ProxyBindSourceID  string   `json:"proxyBindSourceId"`
 	ProxyBindSourceURL string   `json:"proxyBindSourceUrl"`
 	ProxyBindName      string   `json:"proxyBindName"`
