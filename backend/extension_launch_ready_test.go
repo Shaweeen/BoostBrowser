@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -132,40 +133,30 @@ func TestStripLoadExtensionArgs(t *testing.T) {
 	}
 }
 
-func TestShouldSkipLoadExtensionInjectionRequiresAdaptedProfileData(t *testing.T) {
+func TestSelectiveLoadExtensionSkipsAdaptedKeepsNew(t *testing.T) {
 	root := t.TempDir()
-	extID := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-	extDir := filepath.Join(root, "pkg", extID)
-	if err := os.MkdirAll(extDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"t","version":"1","manifest_version":3}`), 0644); err != nil {
-		t.Fatal(err)
+	oldID := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	newID := "ffffffffffffffffffffffffffffffff"
+	oldDir := filepath.Join(root, "pkg", oldID)
+	newDir := filepath.Join(root, "pkg", newID)
+	for _, d := range []string{oldDir, newDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "manifest.json"), []byte(`{"name":"t","version":"1","manifest_version":3}`), 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	userData := filepath.Join(root, "user")
-	if err := os.MkdirAll(userData, 0755); err != nil {
-		t.Fatal(err)
-	}
-	args := []string{"--load-extension=" + extDir}
-	fp, ids := assignmentFingerprintFromLaunchArgs(args)
-	if shouldSkipLoadExtensionInjection(userData, fp, args) {
-		t.Fatal("without marker must not skip inject")
-	}
-	if err := writeExtensionLaunchReadyMarker(userData, "p1", fp, ids); err != nil {
-		t.Fatal(err)
-	}
-	// Marker + package alone must not skip inject (no Preferences/LES).
-	if shouldSkipLoadExtensionInjection(userData, fp, args) {
-		t.Fatal("marker without adapted profile data must not skip inject")
-	}
 	prefDir := filepath.Join(userData, "Default")
 	if err := os.MkdirAll(prefDir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	// Old extension already has Preferences (wallet adapted).
 	prefs := map[string]any{
 		"extensions": map[string]any{
 			"settings": map[string]any{
-				extID: map[string]any{"state": 1, "path": extDir},
+				oldID: map[string]any{"state": 1, "path": oldDir},
 			},
 		},
 	}
@@ -173,8 +164,23 @@ func TestShouldSkipLoadExtensionInjectionRequiresAdaptedProfileData(t *testing.T
 	if err := os.WriteFile(filepath.Join(prefDir, "Preferences"), raw, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if !shouldSkipLoadExtensionInjection(userData, fp, args) {
-		t.Fatal("marker + Preferences extension entry must skip inject")
+	args := []string{"--no-first-run", "--load-extension=" + oldDir + "," + newDir}
+	need := loadExtensionDirsNeedingInject(userData, args)
+	if len(need) != 1 || !strings.Contains(need[0], newID) {
+		t.Fatalf("only new package should need inject: %#v", need)
+	}
+	next, injected, skipped := applySelectiveLoadExtensionArgs(args, userData)
+	if injected != 1 || skipped != 1 {
+		t.Fatalf("inject=%d skipped=%d next=%#v", injected, skipped, next)
+	}
+	if !hasExtensionDirInLaunchArgs(next, newDir) || hasExtensionDirInLaunchArgs(next, oldDir) {
+		t.Fatalf("selective argv wrong: %#v", next)
+	}
+	if !isEnvironmentHotStartSettled(userData, []string{"--load-extension=" + oldDir}) {
+		t.Fatal("old-only with prefs must be hot settled")
+	}
+	if isEnvironmentHotStartSettled(userData, args) {
+		t.Fatal("with new package still needing inject must not be settled")
 	}
 }
 

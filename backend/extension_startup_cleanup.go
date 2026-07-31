@@ -269,26 +269,37 @@ func profilePendingTabHandoff(profileId string) bool {
 	return ok
 }
 
-// finalizeBrowserStartupTabs is phase-1 of tab management for every environment
-// start (including stop → open again). Runs ONLY on this profile's debug port:
-//  1) close extension auto-pages (never touch service workers / storage)
-//  2) collapse to a single about:blank so the user takes over a clean shell
-// Already-running environments are never re-armed here (per-profile handoff).
-// Phase-2 (user click / open sync) only re-collapses profiles still pending;
-// work tabs opened after handoff are never managed again until that env restarts.
-func finalizeBrowserStartupTabs(debugPort int, profileId string) {
+// finalizeBrowserStartupTabs is phase-1 of tab management for this profile's
+// debug port only.
+//
+// hotSettled=true (environment data already has wallet/extension vaults):
+//   - only close automatic extension onboarding pages if any
+//   - do NOT arm handoff and do NOT collapse to sole about:blank
+//     (preserves user session / dapp tabs / wallet work)
+//
+// hotSettled=false (first adapt or incomplete inject):
+//  1) arm per-profile handoff
+//  2) close extension auto-pages
+//  3) collapse to sole about:blank for clean takeover
+func finalizeBrowserStartupTabs(debugPort int, profileId string, hotSettled bool) {
 	if debugPort <= 0 {
 		return
 	}
-	// Only this newly started profile waits for user handoff. Do not re-arm a
-	// global latch that would later collapse every already-open work session.
+	if hotSettled {
+		closedExt := runStartupTabCleanupOnce(debugPort)
+		if closedExt > 0 {
+			logger.New("Browser").Info("热启动：仅关闭扩展自动页，不收拢用户会话标签",
+				logger.F("profile_id", profileId),
+				logger.F("closed_extension_pages", closedExt),
+			)
+		}
+		return
+	}
 	armEnvironmentTabsUserHandoffForProfile(profileId)
 	closedExt := runStartupTabCleanupOnce(debugPort)
-	// Leave exactly one blank page ready for takeover. Extension SW / storage /
-	// dapp providers stay alive (we only close page targets, not backgrounds).
 	closedTabs := collapseEnvironmentTabsToSoleAboutBlank(debugPort)
 	if closedExt > 0 || closedTabs > 0 {
-		logger.New("Browser").Info("启动标签检查：扩展自动页已清理并保留唯一空白页（等待用户接管）",
+		logger.New("Browser").Info("首次适配启动：扩展自动页已清理并保留唯一空白页（等待用户接管）",
 			logger.F("profile_id", profileId),
 			logger.F("closed_extension_pages", closedExt),
 			logger.F("closed_extra_tabs", closedTabs),

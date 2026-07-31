@@ -321,7 +321,7 @@ export function ExtensionManagementPage() {
         ? await importGlobalExtension(item.downloadAddress)
         : await importExtensionToBrowserProfiles(targetIds, item.downloadAddress)
       const baseMsg = result?.message || `已分配到 ${targetIds.length} 个实例`
-      toast.success(`${baseMsg}。请打开一次对应环境完成扩展适配；适配成功后再次启动将不再重复注入扩展，以保护钱包账号数据。`)
+      toast.success(`${baseMsg}。请打开一次环境完成新扩展适配；环境 data 中已有钱包/扩展数据的包不会再注入。之后热启动跳过重复检测与收标签。`)
       if (item.distributionMode === 'global') {
         setAppliedGlobalProfiles(prev => {
           const next = new Map(prev)

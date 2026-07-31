@@ -115,15 +115,14 @@ func resolveBadgeDisplayNumber(profileId, profileName string, profiles map[strin
 }
 
 func (a *App) BrowserInstanceStart(profileId string) (*BrowserProfile, error) {
-	// Only this profile enters the tab-management cycle. Already-running
-	// environments keep their work tabs (no global re-arm).
-	armEnvironmentTabsUserHandoffForProfile(profileId)
+	// Tab handoff is armed only for unsettled (first-adapt) starts inside
+	// browserInstanceStartInternal — hot starts with wallet data must not
+	// re-arm sole-blank wipe every open.
 	return a.browserInstanceStartInternal(profileId, nil, nil, false, false, false)
 }
 
 // BrowserInstanceStartWithParams 通过额外参数启动实例（仅本次启动生效，不落库）
 func (a *App) BrowserInstanceStartWithParams(profileId string, extraLaunchArgs []string, startURLs []string, skipDefaultStartURLs bool) (*BrowserProfile, error) {
-	armEnvironmentTabsUserHandoffForProfile(profileId)
 	return a.browserInstanceStartInternal(profileId, extraLaunchArgs, startURLs, skipDefaultStartURLs, true, false)
 }
 
@@ -237,37 +236,34 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		profile.LastError = startErr.Error()
 		return profile, startErr
 	}
-	// Extension prep is one-shot after assignment: first successful open that
-	// verifies profile data ↔ assigned packages writes a marker. Later starts
-	// only launch the browser (+ window/popup policy). Re-assignment clears it.
+	// Extension inject is selective: packages with durable profile/wallet data
+	// are never re-injected. New assignments only inject the missing packages.
+	// Hot-settled environments skip one-time adapt work (prefs rewrite, sole
+	// blank wipe, prep goroutines) to protect data and speed multi-open.
 	assignmentFP, assignmentExtIDs := assignmentFingerprintFromLaunchArgs(sanitizedProfileLaunchArgs)
-	extensionPrepReady := isExtensionLaunchPrepReady(userDataDir, assignmentFP)
-	skipLoadExtensionInject := shouldSkipLoadExtensionInjection(userDataDir, assignmentFP, sanitizedProfileLaunchArgs)
-	if extensionPrepReady {
-		if skipLoadExtensionInject {
-			log.Info("扩展已完成首次适配：跳过启动前扫描，并禁止再次 --load-extension 注入（保护钱包/账号）",
-				logger.F("profile_id", profileId),
-				logger.F("extension_count", len(assignmentExtIDs)),
-			)
-		} else {
-			log.Info("扩展就绪标记存在但环境数据不完整，本轮仍注入 --load-extension 以重新适配",
-				logger.F("profile_id", profileId),
-				logger.F("extension_count", len(assignmentExtIDs)),
-			)
-		}
-	} else if assignmentFP != "" {
-		log.Info("扩展尚未完成首次适配：本轮将注入 --load-extension，请在环境内确认扩展后关闭；之后启动不再重复注入",
+	needingInject := loadExtensionDirsNeedingInject(userDataDir, sanitizedProfileLaunchArgs)
+	hotSettled := isEnvironmentHotStartSettled(userDataDir, sanitizedProfileLaunchArgs)
+	extensionPrepReady := isExtensionLaunchPrepReady(userDataDir, assignmentFP) || hotSettled
+	if hotSettled {
+		log.Info("环境热启动：已校验扩展/钱包 data，跳过重复注入与一次性适配",
 			logger.F("profile_id", profileId),
-			logger.F("extension_count", len(assignmentExtIDs)),
+			logger.F("assigned", len(assignmentExtIDs)),
+			logger.F("still_need_inject", len(needingInject)),
+		)
+	} else if len(needingInject) > 0 {
+		log.Info("扩展选择性注入：仅首次适配缺少环境 data 的包",
+			logger.F("profile_id", profileId),
+			logger.F("inject", len(needingInject)),
+			logger.F("already_adapted", len(assignmentExtIDs)-len(needingInject)),
 		)
 	}
 
-	// Foundation: pin Chromium session startup to a single about:blank via
-	// Preferences (restore_on_startup=4 + startup_urls). No post-start CDP
-	// rewrite of newtab is needed when prefs already match. patch is a no-op
-	// write when values are already correct.
-	sanitizeChromeStartupPreferences(userDataDir)
-	if !extensionPrepReady && assignmentFP == "" {
+	// Foundation prefs: only when not yet settled (avoid rewriting Preferences
+	// every open while Chrome vaults exist).
+	if !hotSettled {
+		sanitizeChromeStartupPreferences(userDataDir)
+	}
+	if !hotSettled && assignmentFP == "" {
 		markStartPrepDone(userDataDir)
 	}
 	if err := ensureBrowserUserDataDirReadyForFreshLaunch(chromeBinaryPath, userDataDir); err != nil {
@@ -277,7 +273,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 	// Bookmarks / static search seed are not required every start; they slow
 	// multi-open. First-open (no ready marker) still seeds non-cloak search once.
-	if !isCloakSelectedCore && !extensionPrepReady {
+	if !isCloakSelectedCore && !hotSettled && !extensionPrepReady {
 		seedDefaultSearchEngine(userDataDir)
 	}
 
@@ -490,11 +486,9 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		args = filtered
 	}
 
-	if isCloakSelectedCore {
-		// 默认开启 chrome://flags / extension-mime-request-handling = "Always prompt for install"。
-		// 不开这个 flag，cloak 内核里从 chromewebstore.google.com 下载 .crx 不会自动弹
-		// "添加扩展程序？"对话框（用户得手动拖到 chrome://extensions），开了就和普通 Chrome
-		// 一样下载完直接弹安装。
+	if isCloakSelectedCore && !hotSettled {
+		// Only seed cloak labs flags on first-adapt starts; rewriting Local State
+		// every open races Chrome and costs multi-open time.
 		if err := ensureCloakLocalStateFlags(userDataDir); err != nil {
 			logger.New("CloakFlags").Warn("写入 cloak 默认 flags 失败（不阻塞启动）",
 				logger.F("profile_id", profileId),
@@ -502,26 +496,21 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				logger.F("error", err.Error()),
 			)
 		}
-
-		// Do not inject the bundled chromium-web-store helper extension in self-use
-		// builds. User requested a clean browser with no default/search helper
-		// extensions visible in chrome://extensions or toolbar.
 	}
 
 	args = normalizeLoadExtensionArgs(args)
-	// After one successful adapt pass, do not re-inject --load-extension on every
-	// open (that re-activates packages, can reopen onboarding tabs, and has been
-	// observed to disturb wallet vault identity). LaunchArgs keep the assignment
-	// record; Chromium reloads from profile Preferences/path.
-	if skipLoadExtensionInject {
-		beforeStrip := len(activeLoadExtensionDirs(args))
-		args = stripLoadExtensionArgs(args)
-		if beforeStrip > 0 {
-			log.Info("已从本次启动参数剥离 --load-extension",
-				logger.F("profile_id", profileId),
-				logger.F("stripped_packages", beforeStrip),
-			)
-		}
+	// Selective inject: never re-activate packages that already have vault/settings
+	// under this environment's data dir (protects imported wallets). New packages
+	// still get a single adapt inject.
+	var injectedN, skippedN int
+	args, injectedN, skippedN = applySelectiveLoadExtensionArgs(args, userDataDir)
+	if injectedN > 0 || skippedN > 0 {
+		log.Info("扩展启动策略",
+			logger.F("profile_id", profileId),
+			logger.F("inject_now", injectedN),
+			logger.F("skip_reinject", skippedN),
+			logger.F("hot_settled", hotSettled),
+		)
 	}
 	// Extension package repair runs off the critical path after first start
 	// (async). Avoid blocking multi-open on CRX/key network work.
@@ -598,9 +587,10 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				logger.F("max_attempts", maxStartAttempts),
 				logger.F("args", strings.Join(args, " ")),
 			)
-			// 启动就绪时仅单次关闭扩展自动标签：无后台轮询、无实时监听，
-			// 避免误关用户之后主动点开的扩展页或其它标签。
-			finalizeBrowserStartupTabs(stableDebugPort, profileId)
+			// Tab policy: first-adapt cleans extension auto-pages + sole blank.
+			// Hot-settled (wallet/extension data already in env data) only does a
+			// light auto-page close — never wipe user session to about:blank.
+			finalizeBrowserStartupTabs(stableDebugPort, profileId, hotSettled)
 
 			// 任务栏 badge 数字直接来自实例名字里的数字段：
 			//   名字 "1"        → badge 1
@@ -675,18 +665,18 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				}
 			}()
 
-			// First post-assignment open (adapt pass): with --load-extension still
-			// injected, wait for Chrome to write profile extension state, then mark
-			// ready so later starts skip CLI re-injection.
-			if !skipLoadExtensionInject && assignmentFP != "" {
+			// Only when this start injected something: wait for Chrome to write
+			// profile state, then mark ready. Hot-settled / no inject → no work.
+			if injectedN > 0 && assignmentFP != "" {
 				launchArgsSnapshot := append([]string{}, sanitizedProfileLaunchArgs...)
 				go func() {
 					defer func() { _ = recover() }()
 					a.completeAssignedExtensionProfileData(userDataDir, launchArgsSnapshot)
-					// Initial settle so Preferences/LES begin to appear.
 					time.Sleep(1500 * time.Millisecond)
 					a.maybeMarkExtensionLaunchReady(profileId, userDataDir, assignmentFP, launchArgsSnapshot, assignmentExtIDs)
 				}()
+			} else if hotSettled {
+				markStartPrepDone(userDataDir)
 			}
 
 			a.emitBrowserInstanceStarted(profile, false)

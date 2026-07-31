@@ -109,26 +109,15 @@ func isExtensionLaunchPrepReady(userDataDir, assignmentFingerprint string) bool 
 	return strings.EqualFold(strings.TrimSpace(marker.AssignmentFingerprint), assignmentFingerprint)
 }
 
-// shouldSkipLoadExtensionInjection is true when this environment already completed
-// the one-time adapt pass for the current assignment fingerprint AND profile
-// still holds Chrome-written extension data. LaunchArgs may still list packages
-// (assignment record); the CLI flag is stripped only for this process start.
+// shouldSkipLoadExtensionInjection is true when NO assigned package still needs
+// a first-time --load-extension activation (all have durable profile data).
 func shouldSkipLoadExtensionInjection(userDataDir, assignmentFingerprint string, launchArgs []string) bool {
-	if !isExtensionLaunchPrepReady(userDataDir, assignmentFingerprint) {
-		return false
-	}
-	// Marker alone is not enough: if the user wiped profile data, re-inject.
-	if !verifyAssignedExtensionsAgainstProfileData(userDataDir, launchArgs) {
-		return false
-	}
-	// Require Preferences/LES evidence so we never strip inject based only on a
-	// stable package key sitting on disk.
-	return extensionProfileDataLooksAdapted(userDataDir, launchArgs)
+	_ = assignmentFingerprint
+	return len(loadExtensionDirsNeedingInject(userDataDir, launchArgs)) == 0 &&
+		len(activeLoadExtensionDirs(launchArgs)) > 0
 }
 
 // stripLoadExtensionArgs removes all --load-extension flags from a launch argv.
-// Used after the adapt pass so Chromium reloads extensions from the profile
-// instead of re-activating packages from the command line every open.
 func stripLoadExtensionArgs(args []string) []string {
 	if len(args) == 0 {
 		return args
@@ -142,6 +131,107 @@ func stripLoadExtensionArgs(args []string) []string {
 		out = append(out, arg)
 	}
 	return out
+}
+
+// loadExtensionDirsNeedingInject returns only packages that do NOT yet have
+// durable profile state (Preferences/LES). Packages with wallet/account data
+// are never re-injected — including when the user later assigns additional
+// extensions (only the new ones appear in this list).
+func loadExtensionDirsNeedingInject(userDataDir string, launchArgs []string) []string {
+	dirs := activeLoadExtensionDirs(launchArgs)
+	if len(dirs) == 0 {
+		return nil
+	}
+	prefIDs := preferenceExtensionIDs(userDataDir)
+	need := make([]string, 0, len(dirs))
+	// Stable order by id for deterministic CLI.
+	type item struct{ id, path string }
+	list := make([]item, 0, len(dirs))
+	for _, original := range dirs {
+		id := strings.ToLower(filepath.Base(strings.TrimSpace(original)))
+		list = append(list, item{id: id, path: original})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].id != list[j].id {
+			return list[i].id < list[j].id
+		}
+		return list[i].path < list[j].path
+	})
+	for _, it := range list {
+		if it.id != "" && profileHasExtensionData(userDataDir, it.id, prefIDs) {
+			continue
+		}
+		need = append(need, it.path)
+	}
+	return need
+}
+
+// applySelectiveLoadExtensionArgs keeps assignment records in launchArgs for
+// bookkeeping but only CLI-injects packages that still lack profile data.
+// Returns injected count and skipped (already-adapted) count.
+func applySelectiveLoadExtensionArgs(args []string, userDataDir string) (next []string, injected, skipped int) {
+	args = normalizeLoadExtensionArgs(args)
+	all := activeLoadExtensionDirs(args)
+	if len(all) == 0 {
+		return args, 0, 0
+	}
+	need := loadExtensionDirsNeedingInject(userDataDir, args)
+	skipped = len(all) - len(need)
+	base := stripLoadExtensionArgs(args)
+	if len(need) == 0 {
+		return base, 0, skipped
+	}
+	return normalizeLoadExtensionArgs(append(base, "--load-extension="+strings.Join(need, ","))), len(need), skipped
+}
+
+// profileHasAnyDurableExtensionStorage reports real Chrome-written extension
+// storage under the environment data dir (wallet vaults, etc.).
+func profileHasAnyDurableExtensionStorage(userDataDir string) bool {
+	userDataDir = strings.TrimSpace(userDataDir)
+	if userDataDir == "" {
+		return false
+	}
+	for _, root := range []string{
+		filepath.Join(userDataDir, "Default", "Local Extension Settings"),
+		filepath.Join(userDataDir, "Local Extension Settings"),
+		filepath.Join(userDataDir, "Default", "Extensions"),
+		filepath.Join(userDataDir, "Extensions"),
+	} {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			if directoryHasAnyFile(filepath.Join(root, entry.Name())) {
+				return true
+			}
+		}
+	}
+	// Preferences extensions.settings with at least one entry also counts.
+	return len(preferenceExtensionIDs(userDataDir)) > 0
+}
+
+// isEnvironmentHotStartSettled means the environment already holds validated
+// user extension/wallet data and nothing needs first-time inject. Hot start
+// skips: --load-extension reinject, prefs rewrite, sole-blank tab wipe,
+// extension prep goroutines, and other one-time adapt work.
+func isEnvironmentHotStartSettled(userDataDir string, launchArgs []string) bool {
+	if len(loadExtensionDirsNeedingInject(userDataDir, launchArgs)) > 0 {
+		// New or incomplete packages still need one adapt pass (only those).
+		return false
+	}
+	if profileHasAnyDurableExtensionStorage(userDataDir) {
+		return true
+	}
+	// No extensions: settled after first start-prep (blank prefs foundation).
+	if len(activeLoadExtensionDirs(launchArgs)) == 0 {
+		return isStartPrepDone(userDataDir)
+	}
+	// Assignment listed but no durable data yet — not settled.
+	return false
 }
 
 // Lightweight one-time start prep marker (session restore sanitization etc.).

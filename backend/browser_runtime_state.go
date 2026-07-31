@@ -217,8 +217,17 @@ func (a *App) waitBrowserDebugReadyAsync(profileId string, debugPort int, timeou
 		logger.F("profile_id", profileId),
 		logger.F("debug_port", debugPort),
 	)
-	// Delayed-ready: same single-shot tab close only — no long poll / watcher.
-	finalizeBrowserStartupTabs(debugPort, profileId)
+	// Delayed-ready: honor hot-settled so we never wipe wallets/session tabs.
+	hotSettled := false
+	if a != nil && a.browserMgr != nil {
+		a.browserMgr.Mutex.Lock()
+		if p := a.browserMgr.Profiles[profileId]; p != nil {
+			ud := a.browserMgr.ResolveUserDataDir(p)
+			hotSettled = isEnvironmentHotStartSettled(ud, p.LaunchArgs)
+		}
+		a.browserMgr.Mutex.Unlock()
+	}
+	finalizeBrowserStartupTabs(debugPort, profileId, hotSettled)
 	// 延迟就绪后也注入反检测脚本 + 启动 Turnstile 自动点击
 	// CloakBrowser 内核完全跳过：内核层已处理身份/反检测，
 	// wrapper 再走 CDP 注入会触发 nodriver / Browser Tampering 检测。
