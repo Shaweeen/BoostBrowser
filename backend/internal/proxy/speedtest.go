@@ -81,7 +81,14 @@ func SpeedTest(
 		return TestResult{ProxyId: proxyId, Ok: true, LatencyMs: 0, ResolvedConfig: src}
 	}
 	if LooksLikeStandardProxyConfig(src) {
-		normalized, err := NormalizeStandardProxyConfig(src, "http")
+		// Keep an explicit socks5:// label; only bare host:port lines default to
+		// http, and detection still prefers the labelled scheme when it works.
+		defaultScheme := "http"
+		lowerSrc := strings.ToLower(strings.TrimSpace(src))
+		if strings.HasPrefix(lowerSrc, "socks5://") || strings.HasPrefix(lowerSrc, "socks://") || strings.HasPrefix(lowerSrc, "socket://") {
+			defaultScheme = "socks5"
+		}
+		normalized, err := NormalizeStandardProxyConfig(src, defaultScheme)
 		if err != nil {
 			return TestResult{ProxyId: proxyId, Ok: false, Error: fmt.Sprintf("代理格式无效: %v", err)}
 		}
@@ -403,7 +410,14 @@ func proxyConfigToMapping(src string) (map[string]any, error) {
 }
 
 func parseStandardProxy(src string, proxyType string) (map[string]any, error) {
-	u, err := url.Parse(src)
+	// Prefer NormalizeStandardProxyConfig so user:pass with special chars parse.
+	normalized := src
+	if LooksLikeStandardProxyConfig(src) {
+		if n, err := NormalizeStandardProxyConfig(src, proxyType); err == nil {
+			normalized = n
+		}
+	}
+	u, err := url.Parse(normalized)
 	if err != nil || u.Hostname() == "" || u.Port() == "" {
 		return nil, fmt.Errorf("无法解析地址: %s", src)
 	}
@@ -412,11 +426,20 @@ func parseStandardProxy(src string, proxyType string) (map[string]any, error) {
 		return nil, fmt.Errorf("无法解析端口: %s", src)
 	}
 
+	// mihomo uses type "socks5" for SOCKS5; keep http/https as http with optional tls.
+	mihomoType := proxyType
+	if proxyType == "https" {
+		mihomoType = "http"
+	}
 	mapping := map[string]any{
 		"name":   "speedtest-proxy",
-		"type":   proxyType,
+		"type":   mihomoType,
 		"server": u.Hostname(),
 		"port":   port,
+	}
+	if proxyType == "https" {
+		mapping["tls"] = true
+		mapping["skip-cert-verify"] = true
 	}
 	if u.User != nil && u.User.Username() != "" {
 		password, _ := u.User.Password()
@@ -476,45 +499,122 @@ func detectWorkingStandardProxy(src string, testURLs []string, timeout time.Dura
 }
 
 func detectWorkingStandardProxyWithDialer(src string, testURLs []string, timeout time.Duration, upstreamDialer C.Dialer) (string, TestResult, bool) {
-	candidates := append([]string{src}, alternateStandardProxyConfigs(src)...)
+	src = strings.TrimSpace(src)
+	if src == "" {
+		return "", TestResult{Error: "代理配置为空"}, false
+	}
+	// Prefer the user/provider-declared scheme. Concurrent "first success wins"
+	// previously rewrote working socks5:// entries to slower http:// because
+	// both completed and HTTP finished first, then got persisted as "auto fix".
+	if result := probeStandardProxyCandidate(src, testURLs, timeout, upstreamDialer); result.Ok {
+		return src, result, true
+	} else if result.Error != "" {
+		// keep falling through to alternates
+	}
+
+	alternates := alternateStandardProxyConfigs(src)
+	if len(alternates) == 0 {
+		fail := probeStandardProxyCandidate(src, testURLs, timeout, upstreamDialer)
+		return "", fail, false
+	}
+
 	type detectionResult struct {
 		candidate string
 		result    TestResult
 	}
-	results := make(chan detectionResult, len(candidates))
-	for _, candidate := range candidates {
+	results := make(chan detectionResult, len(alternates))
+	for _, candidate := range alternates {
 		candidate := candidate
 		go func() {
-			mapping, err := proxyConfigToMapping(candidate)
-			if err != nil {
-				results <- detectionResult{candidate: candidate, result: TestResult{Error: err.Error()}}
-				return
+			results <- detectionResult{
+				candidate: candidate,
+				result:    probeStandardProxyCandidate(candidate, testURLs, timeout, upstreamDialer),
 			}
-			options := make([]adapter.ProxyOption, 0, 1)
-			if upstreamDialer != nil {
-				options = append(options, adapter.WithDialerForAPI(upstreamDialer))
-			}
-			px, err := adapter.ParseProxy(mapping, options...)
-			if err != nil {
-				results <- detectionResult{candidate: candidate, result: TestResult{Error: err.Error()}}
-				return
-			}
-			result := robustHTTPProxyTest("detect", px, testURLs, timeout)
-			results <- detectionResult{candidate: candidate, result: result}
 		}()
 	}
 
 	lastResult := TestResult{Error: "代理协议探测失败"}
-	for range candidates {
-		result := <-results
-		if result.result.Ok {
-			return result.candidate, result.result, true
+	var bestOK *detectionResult
+	for range alternates {
+		item := <-results
+		if !item.result.Ok {
+			if item.result.Error != "" {
+				lastResult = item.result
+			}
+			continue
 		}
-		if result.result.Error != "" {
-			lastResult = result.result
+		// Prefer SOCKS5 among successful alternates when original was socks-like
+		// or when latency is better/equal — residential nodes often are socks5.
+		if bestOK == nil {
+			copyItem := item
+			bestOK = &copyItem
+			continue
+		}
+		if preferStandardProxyCandidate(item.candidate, item.result, bestOK.candidate, bestOK.result) {
+			copyItem := item
+			bestOK = &copyItem
 		}
 	}
+	if bestOK != nil {
+		return bestOK.candidate, bestOK.result, true
+	}
 	return "", lastResult, false
+}
+
+func probeStandardProxyCandidate(candidate string, testURLs []string, timeout time.Duration, upstreamDialer C.Dialer) TestResult {
+	mapping, err := proxyConfigToMapping(candidate)
+	if err != nil {
+		return TestResult{Error: err.Error()}
+	}
+	options := make([]adapter.ProxyOption, 0, 1)
+	if upstreamDialer != nil {
+		options = append(options, adapter.WithDialerForAPI(upstreamDialer))
+	}
+	px, err := adapter.ParseProxy(mapping, options...)
+	if err != nil {
+		return TestResult{Error: err.Error()}
+	}
+	return robustHTTPProxyTest("detect", px, testURLs, timeout)
+}
+
+// preferStandardProxyCandidate chooses the better of two successful probes.
+// Lower latency wins; ties prefer socks5 (common residential provider protocol).
+func preferStandardProxyCandidate(a string, ar TestResult, b string, br TestResult) bool {
+	if ar.LatencyMs > 0 && br.LatencyMs > 0 {
+		// Within 80ms, prefer socks5 when one side is socks5 — avoids sticky HTTP
+		// mis-detect on dual-protocol ports.
+		if absLatency(ar.LatencyMs-br.LatencyMs) <= 80 {
+			if schemeOfProxyURL(a) == "socks5" && schemeOfProxyURL(b) != "socks5" {
+				return true
+			}
+			if schemeOfProxyURL(b) == "socks5" && schemeOfProxyURL(a) != "socks5" {
+				return false
+			}
+		}
+		return ar.LatencyMs < br.LatencyMs
+	}
+	if ar.LatencyMs > 0 && br.LatencyMs <= 0 {
+		return true
+	}
+	if schemeOfProxyURL(a) == "socks5" && schemeOfProxyURL(b) != "socks5" {
+		return true
+	}
+	return false
+}
+
+func absLatency(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func schemeOfProxyURL(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if idx := strings.Index(raw, "://"); idx > 0 {
+		return normalizeStandardProxyScheme(raw[:idx])
+	}
+	return ""
 }
 
 func alternateStandardProxyConfigs(src string) []string {
@@ -531,16 +631,36 @@ func alternateStandardProxyConfigs(src string) []string {
 	case strings.HasPrefix(lower, "socks://"):
 		current = "socks5"
 		trimmed = "socks5://" + trimmed[len("socks://"):]
+	case strings.HasPrefix(lower, "socket://"):
+		current = "socks5"
+		trimmed = "socks5://" + trimmed[len("socket://"):]
 	default:
-		return nil
+		// Bare host:port lines: try socks5 then http (residential lists are often socks5).
+		out := make([]string, 0, 2)
+		if socks, err := NormalizeStandardProxyConfig(trimmed, "socks5"); err == nil {
+			out = append(out, socks)
+		}
+		if httpURL, err := NormalizeStandardProxyConfig(trimmed, "http"); err == nil {
+			if len(out) == 0 || !strings.EqualFold(out[0], httpURL) {
+				out = append(out, httpURL)
+			}
+		}
+		return out
 	}
 
-	schemes := []string{"http", "https", "socks5"}
-	out := make([]string, 0, len(schemes)-1)
+	// Try the other common schemes after the declared one already failed.
+	// Order: socks5 before http when falling back from https, etc.
+	var schemes []string
+	switch current {
+	case "socks5":
+		schemes = []string{"http", "https"}
+	case "http":
+		schemes = []string{"socks5", "https"}
+	default:
+		schemes = []string{"socks5", "http"}
+	}
+	out := make([]string, 0, len(schemes))
 	for _, scheme := range schemes {
-		if scheme == current {
-			continue
-		}
 		out = append(out, replaceProxyScheme(trimmed, scheme))
 	}
 	return out

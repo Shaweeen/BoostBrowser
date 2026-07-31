@@ -8,7 +8,7 @@ const ALL_GROUPS = '__all__'
 const NO_GROUP = '__none__'
 
 // 代理范围
-type ProxyScope = 'all' | 'filtered' | 'selected'
+type ProxyScope = 'all' | 'filtered' | 'selected' | 'unassigned'
 // 实例范围
 type ProfileScope = 'all' | 'group' | 'unassigned'
 
@@ -30,6 +30,34 @@ interface AssignmentRow {
   proxy: BrowserProxy
 }
 
+function parseProxyEndpoint(proxyConfig?: string): { protocol: string; hostPort: string } {
+  const raw = (proxyConfig || '').trim()
+  if (!raw) return { protocol: '-', hostPort: '-' }
+  try {
+    const withScheme = raw.includes('://') ? raw : `http://${raw}`
+    const u = new URL(withScheme)
+    const protocol = (u.protocol.replace(':', '') || 'http').toUpperCase()
+    const hostPort = u.port ? `${u.hostname}:${u.port}` : u.hostname || raw
+    return { protocol, hostPort }
+  } catch {
+    return { protocol: '-', hostPort: raw.slice(0, 48) }
+  }
+}
+
+function formatProxyOptionLabel(proxy: BrowserProxy, assignedCount: number): string {
+  const { protocol, hostPort } = parseProxyEndpoint(proxy.proxyConfig)
+  const name = proxy.proxyName || proxy.proxyId
+  const status = assignedCount > 0 ? `已绑${assignedCount}` : '未分配'
+  const group = proxy.groupName ? ` · ${proxy.groupName}` : ''
+  const latency =
+    typeof proxy.lastLatencyMs === 'number' && proxy.lastLatencyMs >= 0 && proxy.lastTestOk
+      ? ` · ${proxy.lastLatencyMs}ms`
+      : proxy.lastTestOk === false && proxy.lastTestedAt
+        ? ' · 不通'
+        : ''
+  return `${name} · ${protocol} ${hostPort}${latency} · ${status}${group}`
+}
+
 export function SmartAssignProxyModal({
   open,
   allProxies,
@@ -39,10 +67,10 @@ export function SmartAssignProxyModal({
   onDone,
 }: SmartAssignProxyModalProps) {
   const [perProxyCount, setPerProxyCount] = useState('1')
-  const [proxyScope, setProxyScope] = useState<ProxyScope>('all')
-  const [profileScope, setProfileScope] = useState<ProfileScope>('all')
+  const [proxyScope, setProxyScope] = useState<ProxyScope>('unassigned')
+  const [profileScope, setProfileScope] = useState<ProfileScope>('unassigned')
   const [groupId, setGroupId] = useState<string>(ALL_GROUPS)
-  const [skipAlreadyAssigned, setSkipAlreadyAssigned] = useState(false)
+  const [skipAlreadyAssigned, setSkipAlreadyAssigned] = useState(true)
   const [includeBuiltin, setIncludeBuiltin] = useState(false)
 
   const [profiles, setProfiles] = useState<BrowserProfile[]>([])
@@ -51,11 +79,13 @@ export function SmartAssignProxyModal({
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
 
-  // 打开时拉数据
+  // 打开时拉数据；默认优先「未分配 IP / 未绑定实例」
   useEffect(() => {
     if (!open) return
     setProgress(null)
-    setProxyScope(selectedProxyIds.size > 0 ? 'selected' : 'all')
+    setProxyScope(selectedProxyIds.size > 0 ? 'selected' : 'unassigned')
+    setProfileScope('unassigned')
+    setSkipAlreadyAssigned(true)
     void (async () => {
       setLoading(true)
       try {
@@ -68,19 +98,40 @@ export function SmartAssignProxyModal({
     })()
   }, [open, selectedProxyIds])
 
+  // 每个代理当前绑定了多少环境
+  const proxyBindCount = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const p of profiles) {
+      const id = (p.proxyId || '').trim()
+      if (!id || id === '__direct__') continue
+      m.set(id, (m.get(id) || 0) + 1)
+    }
+    return m
+  }, [profiles])
+
+  const realProxies = useMemo(
+    () => allProxies.filter(p => p.proxyId !== '__direct__' && p.proxyId !== '__local__'),
+    [allProxies],
+  )
+
+  const unassignedProxies = useMemo(
+    () => realProxies.filter(p => (proxyBindCount.get(p.proxyId) || 0) === 0),
+    [realProxies, proxyBindCount],
+  )
+
   // 候选代理（按当前选择的范围决定，并按是否包含内置代理过滤）
   const candidateProxies = useMemo<BrowserProxy[]>(() => {
     let pool: BrowserProxy[] = []
     if (proxyScope === 'all') pool = allProxies
     else if (proxyScope === 'filtered') pool = filteredProxies
+    else if (proxyScope === 'unassigned') pool = unassignedProxies
     else pool = allProxies.filter(p => selectedProxyIds.has(p.proxyId))
 
     if (!includeBuiltin) {
       pool = pool.filter(p => p.proxyId !== '__direct__' && p.proxyId !== '__local__')
     }
-    // 保持调用方传入的顺序（代理池表格当前展示顺序），更符合"顺序分配"语义
     return pool
-  }, [proxyScope, allProxies, filteredProxies, selectedProxyIds, includeBuiltin])
+  }, [proxyScope, allProxies, filteredProxies, selectedProxyIds, includeBuiltin, unassignedProxies])
 
   // 候选实例（按分组等条件筛选；按 profileName 字典序稳定排序）
   const candidateProfiles = useMemo<BrowserProfile[]>(() => {
@@ -98,9 +149,14 @@ export function SmartAssignProxyModal({
       pool = pool.filter(p => !p.proxyId || p.proxyId === '__direct__')
     }
     return [...pool].sort((a, b) =>
-      (a.profileName || a.profileId).localeCompare(b.profileName || b.profileId, 'zh-Hans-CN', { numeric: true })
+      (a.profileName || a.profileId).localeCompare(b.profileName || b.profileId, 'zh-Hans-CN', { numeric: true }),
     )
   }, [profiles, profileScope, groupId, skipAlreadyAssigned])
+
+  const unassignedProfiles = useMemo(
+    () => profiles.filter(p => !p.proxyId || p.proxyId === '__direct__'),
+    [profiles],
+  )
 
   // 分配预览
   const assignments = useMemo<AssignmentRow[]>(() => {
@@ -108,13 +164,11 @@ export function SmartAssignProxyModal({
     const proxies = candidateProxies
     if (proxies.length === 0) return []
     return candidateProfiles.map((profile, idx) => {
-      // 顺序填满每个代理 N 个实例后再下一个；超出代理池长度则循环回来
       const proxyIdx = Math.floor(idx / n) % proxies.length
       return { profile, proxy: proxies[proxyIdx] }
     })
   }, [candidateProfiles, candidateProxies, perProxyCount])
 
-  // 每个代理被分到几个实例（统计）
   const distribution = useMemo<Map<string, number>>(() => {
     const m = new Map<string, number>()
     for (const row of assignments) {
@@ -123,12 +177,37 @@ export function SmartAssignProxyModal({
     return m
   }, [assignments])
 
+  const proxyScopeOptions = useMemo(
+    () => [
+      {
+        value: 'unassigned',
+        label: `未分配 IP（${unassignedProxies.length}）— 尚未绑定任何环境`,
+      },
+      { value: 'all', label: `全部代理（${allProxies.length}）` },
+      { value: 'filtered', label: `当前筛选后的代理（${filteredProxies.length}）` },
+      { value: 'selected', label: `已勾选的代理（${selectedProxyIds.size}）` },
+    ],
+    [unassignedProxies.length, allProxies.length, filteredProxies.length, selectedProxyIds.size],
+  )
+
+  const profileScopeOptions = useMemo(
+    () => [
+      {
+        value: 'unassigned',
+        label: `未绑定代理的环境（${unassignedProfiles.length}）`,
+      },
+      { value: 'all', label: `全部实例（${profiles.length}）` },
+      { value: 'group', label: '按分组筛选' },
+    ],
+    [unassignedProfiles.length, profiles.length],
+  )
+
   const reset = () => {
     setPerProxyCount('1')
-    setProxyScope('all')
-    setProfileScope('all')
+    setProxyScope('unassigned')
+    setProfileScope('unassigned')
     setGroupId(ALL_GROUPS)
-    setSkipAlreadyAssigned(false)
+    setSkipAlreadyAssigned(true)
     setIncludeBuiltin(false)
     setProgress(null)
   }
@@ -199,7 +278,7 @@ export function SmartAssignProxyModal({
       open={open}
       onClose={handleClose}
       title="智能分配代理"
-      width="720px"
+      width="780px"
       footer={
         <>
           <Button variant="secondary" onClick={handleClose} disabled={running}>
@@ -219,7 +298,8 @@ export function SmartAssignProxyModal({
     >
       <div className="space-y-4">
         <p className="text-xs text-[var(--color-text-muted)] bg-[var(--color-bg-secondary)] px-3 py-2 rounded">
-          顺序为每个代理分配指定数量的实例。当实例数大于「代理数 × 每代理实例数」时，会从头循环复用代理。
+          默认优先使用「未分配 IP」绑定「尚未设置代理」的环境，避免重复占用。顺序为每个代理分配 N
+          个实例；超出时循环复用。
         </p>
 
         <div className="grid grid-cols-2 gap-4">
@@ -234,16 +314,12 @@ export function SmartAssignProxyModal({
             />
           </FormItem>
 
-          <FormItem label="代理范围">
+          <FormItem label="代理范围（下拉含协议/地址/绑定状态）">
             <Select
               value={proxyScope}
               onChange={e => setProxyScope(e.target.value as ProxyScope)}
               disabled={running}
-              options={[
-                { value: 'all', label: `全部代理（${allProxies.length}）` },
-                { value: 'filtered', label: `当前筛选后的代理（${filteredProxies.length}）` },
-                { value: 'selected', label: `已勾选的代理（${selectedProxyIds.size}）` },
-              ]}
+              options={proxyScopeOptions}
             />
           </FormItem>
 
@@ -252,11 +328,7 @@ export function SmartAssignProxyModal({
               value={profileScope}
               onChange={e => setProfileScope(e.target.value as ProfileScope)}
               disabled={running}
-              options={[
-                { value: 'all', label: `全部实例（${profiles.length}）` },
-                { value: 'group', label: '按分组筛选' },
-                { value: 'unassigned', label: '只分配尚未设置代理的实例' },
-              ]}
+              options={profileScopeOptions}
             />
           </FormItem>
 
@@ -283,7 +355,82 @@ export function SmartAssignProxyModal({
           </label>
         </div>
 
-        {/* 概要 */}
+        {/* 未分配 IP 列表 */}
+        <div className="border border-[var(--color-border)] rounded overflow-hidden">
+          <div className="px-3 py-2 bg-[var(--color-bg-secondary)] text-xs text-[var(--color-text-muted)] flex items-center justify-between">
+            <span>未分配 IP 列表（{unassignedProxies.length}）</span>
+            <button
+              type="button"
+              className="text-[var(--color-primary)] hover:underline disabled:opacity-50"
+              disabled={running || unassignedProxies.length === 0}
+              onClick={() => setProxyScope('unassigned')}
+            >
+              使用未分配 IP 作为代理范围
+            </button>
+          </div>
+          {unassignedProxies.length === 0 ? (
+            <div className="px-3 py-3 text-xs text-[var(--color-text-muted)]">
+              当前没有未绑定环境的代理；可先导入 SOCKS5 节点，或改用「全部代理」。
+            </div>
+          ) : (
+            <div className="max-h-[160px] overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-[var(--color-bg-secondary)]/60 sticky top-0">
+                  <tr>
+                    <th className="px-3 py-1.5 text-left font-medium text-[var(--color-text-muted)]">名称</th>
+                    <th className="px-3 py-1.5 text-left font-medium text-[var(--color-text-muted)]">协议</th>
+                    <th className="px-3 py-1.5 text-left font-medium text-[var(--color-text-muted)]">地址</th>
+                    <th className="px-3 py-1.5 text-right font-medium text-[var(--color-text-muted)]">延迟</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {unassignedProxies.slice(0, 40).map(proxy => {
+                    const { protocol, hostPort } = parseProxyEndpoint(proxy.proxyConfig)
+                    const latency =
+                      typeof proxy.lastLatencyMs === 'number' && proxy.lastLatencyMs >= 0 && proxy.lastTestOk
+                        ? `${proxy.lastLatencyMs}ms`
+                        : proxy.lastTestOk === false && proxy.lastTestedAt
+                          ? '不通'
+                          : '-'
+                    return (
+                      <tr key={proxy.proxyId} className="border-t border-[var(--color-border)]/40">
+                        <td className="px-3 py-1.5 truncate max-w-[160px]">{proxy.proxyName || proxy.proxyId}</td>
+                        <td className="px-3 py-1.5">{protocol}</td>
+                        <td className="px-3 py-1.5 font-mono truncate max-w-[220px]">{hostPort}</td>
+                        <td className="px-3 py-1.5 text-right">{latency}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+              {unassignedProxies.length > 40 && (
+                <div className="px-3 py-1.5 text-[10px] text-[var(--color-text-muted)] border-t border-[var(--color-border)]/40">
+                  仅显示前 40 条，共 {unassignedProxies.length} 条未分配
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* 当前参与分配的代理（下拉信息同款明细） */}
+        {candidateProxies.length > 0 && (
+          <div className="border border-[var(--color-border)] rounded overflow-hidden">
+            <div className="px-3 py-2 bg-[var(--color-bg-secondary)] text-xs text-[var(--color-text-muted)]">
+              本次将使用的代理（{candidateProxies.length}）
+            </div>
+            <div className="max-h-[120px] overflow-y-auto px-3 py-2 space-y-1">
+              {candidateProxies.slice(0, 20).map(proxy => (
+                <div key={proxy.proxyId} className="text-[11px] text-[var(--color-text-secondary)] truncate">
+                  {formatProxyOptionLabel(proxy, proxyBindCount.get(proxy.proxyId) || 0)}
+                </div>
+              ))}
+              {candidateProxies.length > 20 && (
+                <div className="text-[10px] text-[var(--color-text-muted)]">… 另有 {candidateProxies.length - 20} 条</div>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-3 gap-3 text-sm">
           <SummaryCell label="参与代理" value={candidateProxies.length} />
           <SummaryCell label="参与实例" value={candidateProfiles.length} />
@@ -294,19 +441,17 @@ export function SmartAssignProxyModal({
           />
         </div>
 
-        {/* 校验提示 */}
         {!loading && candidateProxies.length === 0 && (
           <div className="text-xs text-red-500 bg-red-500/10 border border-red-500/30 rounded px-3 py-2">
-            当前条件下没有可用代理。请调整代理范围或导入代理。
+            当前条件下没有可用代理。请切换代理范围（例如「全部代理」）或先导入 SOCKS5 节点。
           </div>
         )}
         {!loading && candidateProxies.length > 0 && candidateProfiles.length === 0 && (
           <div className="text-xs text-amber-500 bg-amber-500/10 border border-amber-500/30 rounded px-3 py-2">
-            当前条件下没有可分配的实例。请调整实例范围。
+            当前条件下没有可分配的实例。可切换实例范围为「全部实例」，或关闭「跳过已设置代理」。
           </div>
         )}
 
-        {/* 预览 */}
         {assignments.length > 0 && (
           <div className="border border-[var(--color-border)] rounded overflow-hidden">
             <div className="px-3 py-2 bg-[var(--color-bg-secondary)] text-xs text-[var(--color-text-muted)] flex items-center justify-between">
@@ -322,27 +467,31 @@ export function SmartAssignProxyModal({
                     <th className="px-3 py-1.5 text-left font-medium text-[var(--color-text-muted)] w-10">#</th>
                     <th className="px-3 py-1.5 text-left font-medium text-[var(--color-text-muted)]">实例</th>
                     <th className="px-3 py-1.5 text-left font-medium text-[var(--color-text-muted)]">代理</th>
-                    <th className="px-3 py-1.5 text-right font-medium text-[var(--color-text-muted)] w-24">该代理共分到</th>
+                    <th className="px-3 py-1.5 text-left font-medium text-[var(--color-text-muted)]">协议/地址</th>
+                    <th className="px-3 py-1.5 text-right font-medium text-[var(--color-text-muted)] w-20">共分到</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {assignments.slice(0, 12).map((row, idx) => (
-                    <tr key={row.profile.profileId} className="border-t border-[var(--color-border)]/40">
-                      <td className="px-3 py-1.5 text-[var(--color-text-muted)]">{idx + 1}</td>
-                      <td className="px-3 py-1.5 text-[var(--color-text-primary)] truncate max-w-[200px]">
-                        {row.profile.profileName || row.profile.profileId}
-                      </td>
-                      <td className="px-3 py-1.5 text-[var(--color-text-primary)] truncate max-w-[260px]">
-                        {row.proxy.proxyName || row.proxy.proxyId}
-                        {row.proxy.groupName && (
-                          <span className="ml-1.5 text-[var(--color-primary)]/70">[{row.proxy.groupName}]</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-1.5 text-right text-[var(--color-text-muted)]">
-                        {distribution.get(row.proxy.proxyId) || 0}
-                      </td>
-                    </tr>
-                  ))}
+                  {assignments.slice(0, 12).map((row, idx) => {
+                    const { protocol, hostPort } = parseProxyEndpoint(row.proxy.proxyConfig)
+                    return (
+                      <tr key={row.profile.profileId} className="border-t border-[var(--color-border)]/40">
+                        <td className="px-3 py-1.5 text-[var(--color-text-muted)]">{idx + 1}</td>
+                        <td className="px-3 py-1.5 text-[var(--color-text-primary)] truncate max-w-[160px]">
+                          {row.profile.profileName || row.profile.profileId}
+                        </td>
+                        <td className="px-3 py-1.5 text-[var(--color-text-primary)] truncate max-w-[160px]">
+                          {row.proxy.proxyName || row.proxy.proxyId}
+                        </td>
+                        <td className="px-3 py-1.5 font-mono text-[var(--color-text-muted)] truncate max-w-[200px]">
+                          {protocol} {hostPort}
+                        </td>
+                        <td className="px-3 py-1.5 text-right text-[var(--color-text-muted)]">
+                          {distribution.get(row.proxy.proxyId) || 0}
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -373,8 +522,8 @@ function SummaryCell({
     tone === 'primary'
       ? 'text-[var(--color-primary)]'
       : tone === 'muted'
-      ? 'text-[var(--color-text-muted)]'
-      : 'text-[var(--color-text-primary)]'
+        ? 'text-[var(--color-text-muted)]'
+        : 'text-[var(--color-text-primary)]'
   return (
     <div className="border border-[var(--color-border)] rounded px-3 py-2">
       <div className="text-xs text-[var(--color-text-muted)]">{label}</div>

@@ -67,7 +67,7 @@ const DIRECT_PROXY_PROTOCOL_OPTIONS = [
 
 const INITIAL_DIRECT_IMPORT_FORM: DirectImportForm = {
   proxyName: '',
-  protocol: 'http',
+  protocol: 'socks5',
   server: '',
   port: '',
   username: '',
@@ -396,7 +396,7 @@ function buildLooseDirectProxyURL(
   return `${protocol}://${auth}${formatDirectProxyHost(cleanHost)}:${port.trim()}`
 }
 
-function normalizeDirectProxyLine(raw: string, defaultProtocol: DirectImportForm['protocol'] = 'http'): string {
+function normalizeDirectProxyLine(raw: string, defaultProtocol: DirectImportForm['protocol'] = 'socks5'): string {
   let line = raw.trim().replace(/^["']|["']$/g, '')
   if (!line || line.startsWith('#')) return ''
 
@@ -497,7 +497,7 @@ function parseDirectProxyLine(
   raw: string,
   index: number,
   prefix: string,
-  defaultProtocol: DirectImportForm['protocol'] = 'http',
+  defaultProtocol: DirectImportForm['protocol'] = 'socks5',
 ): ImportCandidate | null {
   const normalized = normalizeDirectProxyLine(raw, defaultProtocol)
   if (!normalized) return null
