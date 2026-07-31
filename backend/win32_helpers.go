@@ -44,14 +44,18 @@ const (
 	SWP_SHOWWINDOW = 0x0040
 	GW_HWNDPREV    = 3
 	GW_OWNER       = 4
-	WS_EX_TOPMOST  = 0x00000008
+	WS_EX_TOPMOST       = 0x00000008
+	WS_EX_TOOLWINDOW    = 0x00000080
+	WS_EX_DLGMODALFRAME = 0x00000001
+	WS_POPUP            = 0x80000000
 
 	// Win32 pseudo handles and signed GetWindowLong index encoded as uintptr.
 	// These forms compile consistently for Windows x64 without routing ordinary
 	// popup placement through a global HWND_TOPMOST band.
 	HWND_TOP       = uintptr(0)
 	HWND_NOTOPMOST = ^uintptr(1)
-	GWL_EXSTYLE    = ^uintptr(19)
+	GWL_STYLE      = ^uintptr(15) // -16
+	GWL_EXSTYLE    = ^uintptr(19) // -20
 
 	// Virtual Key Codes
 	VK_CONTROL = 0x11

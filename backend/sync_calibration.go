@@ -6,12 +6,15 @@ import (
 	"unicode/utf8"
 )
 
-// Chrome-Manager calibration primitives (ported from galaylm/Chrome-Manager-Clean).
+// Chrome-Manager calibration primitives.
+// Source of truth: https://github.com/galaylm/Chrome-Manager-Clean (chrome_manager.py)
 //
-// Core idea used by that tool's sync assistant:
-//  1. Map pointer with OUTER window rect proportions (GetWindowRect), not only client area.
-//  2. Match extension/wallet popups by size + title Jaccard + relative offset to parent.
-//  3. Throttle mouse moves by time AND pixel distance so multi-window stays smooth.
+// Algorithms mirrored from that sync assistant:
+//  1. Map pointer with OUTER window rect (GetWindowRect): same-size → absolute 1:1,
+//     different size → proportional rel_x/rel_y (on_mouse_event).
+//  2. Floating wallet popups: match by size_delta * (2 - title_jaccard) primarily.
+//  3. Anchored popups: relative offset to parent (popup - main) on follower.
+//  4. Throttle mouse moves by time AND pixel distance (move_interval + mouse_threshold).
 
 // sameSizePixelTolerance: uniform tile cells (and same-size stack) should map
 // 1:1 absolute so scrollbars / IME carets / hit targets stay pixel-true.
@@ -129,10 +132,19 @@ func chromeManagerPopupMatchScore(
 	sizeDelta := absCalibInt(masterW-candidateW) + absCalibInt(masterH-candidateH)
 	positionDelta := absCalibInt(expectedLeft-candidateLeft) + absCalibInt(expectedTop-candidateTop)
 	titleSim := titleSimilarityJaccard(masterTitle, candidateTitle)
-	// CM: size_diff * (2.0 - title_sim). Keep integer micro-score for ordering.
+	// CM floating path: size_diff * (2.0 - title_sim) dominates for WS_POPUP wallets.
+	if isChromeManagerFloatingPopupSize(masterW, masterH) {
+		return int64(math.Round(float64(sizeDelta)*(2.0-titleSim)*1000.0)) + int64(positionDelta)/4
+	}
+	// Anchored / secondary chrome: relative offset to parent is the primary key.
 	titlePenalty := int64(math.Round((1.0 - titleSim) * 5000))
-	// Prefer title+size for wallet popups (CM title_similarity > 0.5 or size±50).
 	return int64(sizeDelta)*1000 + int64(positionDelta) + titlePenalty
+}
+
+// isChromeManagerFloatingPopupSize mirrors CM wallet_size / floating_layer bounds
+// (compact surfaces, not full browser frames).
+func isChromeManagerFloatingPopupSize(w, h int) bool {
+	return w >= 120 && h >= 80 && w <= 800 && h <= 800
 }
 
 // mouseMovePixelThreshold is Chrome-Manager's mouse_threshold (2px) — ignore

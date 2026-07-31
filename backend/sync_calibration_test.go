@@ -61,6 +61,16 @@ func TestChromeManagerPopupMatchScorePrefersTitleAndSize(t *testing.T) {
 	}
 }
 
+func TestChromeManagerFloatingPopupScoreIgnoresDistantPosition(t *testing.T) {
+	// Floating wallet: size+title match should beat distant wrong-title even if
+	// position delta is larger (CM floating path weights size*title first).
+	nearWrong := chromeManagerPopupMatchScore(360, 600, 180, 120, 100, 80, 100, 80, "MetaMask", "Example")
+	farCorrect := chromeManagerPopupMatchScore(360, 600, 360, 600, 100, 80, 800, 700, "MetaMask", "MetaMask")
+	if farCorrect >= nearWrong {
+		t.Fatalf("floating far-correct=%d should beat near-wrong=%d", farCorrect, nearWrong)
+	}
+}
+
 func TestShouldThrottleMouseMoveByDistance(t *testing.T) {
 	if !shouldThrottleMouseMoveByDistance(10, 10, 11, 10, 2) {
 		t.Fatal("1px move must throttle at threshold 2")

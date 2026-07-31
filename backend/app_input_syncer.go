@@ -1069,24 +1069,21 @@ func syncMouseDragThrottle(followerCount int) time.Duration {
 // Chrome 内部会根据 Y 坐标将消息路由到标签栏/地址栏/render child
 // ============================================================================
 
-// mapCoordsChromeManager 将主控屏幕坐标映射到跟随窗口的客户区坐标。
-//
-// 多平铺方式（横向/竖列/网格）引入后，单纯基于顶层窗口 / render child 的混合映射
-// 在某些宽高比下会把坐标送偏，表现为“同步像失效了一样”。
-// 这里改回与 Python 稳定版一致的策略：
-// 1) 先把屏幕坐标转成主控 top-level client 坐标
-// 2) 按 master/follower 的 client 区比例做映射
-// 3) render-content 映射只保留为兜底
+// mapCoordsChromeManager maps master screen coords → follower client lParam.
+// Order matches galaylm/Chrome-Manager-Clean on_mouse_event:
+//  1) outer GetWindowRect (same-size absolute / else proportional)
+//  2) client-area absolute or proportional
+//  3) Chrome render-child content rect as last resort
 func mapCoordsChromeManager(screenX, screenY int, masterHwnd, followerHwnd windows.HWND) (uintptr, bool) {
+	if lparam, ok := mapCoordsOuterWindowRects(screenX, screenY, masterHwnd, followerHwnd); ok {
+		return lparam, true
+	}
 	if lparam, ok := mapCoordsViaClientArea(screenX, screenY, masterHwnd, followerHwnd); ok {
 		return lparam, true
 	}
-
-	// 兜底：保留 render child 内容区映射，避免特殊窗口结构完全失效。
 	if lparam, ok := mapCoordsViaRenderContent(screenX, screenY, masterHwnd, followerHwnd); ok {
 		return lparam, true
 	}
-
 	return 0, false
 }
 
@@ -1402,14 +1399,26 @@ var chromePopupListEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lP
 	}
 	l, t, r, b := getWindowRect(hwnd)
 	w, h := int(r-l), int(b-t)
-	// CM wallet-size heuristic: compact surfaces, not full browser frames.
+	// CM wallet-size / floating_layer heuristic: compact surfaces only.
 	if w < 120 || h < 80 || w > 900 || h > 900 {
 		return 1
 	}
+	style, _, _ := procGetWindowLongW.Call(uintptr(hwnd), GWL_STYLE)
+	exStyle, _, _ := procGetWindowLongW.Call(uintptr(hwnd), GWL_EXSTYLE)
+	isPopupStyle := style&WS_POPUP != 0 ||
+		exStyle&WS_EX_TOOLWINDOW != 0 ||
+		exStyle&WS_EX_DLGMODALFRAME != 0
+	// CM is_floating_layer: WS_POPUP + compact size.
+	isFloatingLayer := style&WS_POPUP != 0 && w < 600 && h < 600
+	titleMatch := looksLikeWalletOrExtensionPopupTitle(title)
+	walletSize := isChromeManagerFloatingPopupSize(w, h)
+	if !titleMatch && !isPopupStyle && !isFloatingLayer && !walletSize {
+		return 1
+	}
 	ml, mt, mr, mb := getWindowRect(st.main)
-	// Near main frame (CM is_near_chrome ±100).
+	// Near main frame (CM is_near_chrome ±100); titled wallets may float further.
 	if int(l) < int(ml)-120 || int(t) < int(mt)-120 || int(r) > int(mr)+120 || int(b) > int(mb)+120 {
-		if !looksLikeWalletOrExtensionPopupTitle(title) {
+		if !titleMatch && !isFloatingLayer {
 			return 1
 		}
 	}
@@ -1439,9 +1448,12 @@ func looksLikeWalletOrExtensionPopupTitle(title string) bool {
 	if t == "" {
 		return true // empty-title Chrome menus (CM treats as popup candidates)
 	}
+	// Mirror CM get_chrome_popups / is_likely_wallet_popup keyword set.
 	for _, kw := range []string{
 		"metamask", "rabby", "okx", "wallet", "钱包", "notification",
 		"extension", "扩展", "sign", "confirm", "connect", "permission",
+		"token", "signature", "transaction", "web3", "modal", "dialog",
+		"插件", "unisat", "phantom", "keplr", "petra",
 	} {
 		if strings.Contains(t, kw) {
 			return true
