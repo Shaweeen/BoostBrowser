@@ -37,7 +37,8 @@ function compareProfileName(a: SyncProfileInfo, b: SyncProfileInfo) {
 
 type FilterMode = 'all' | 'selected' | 'master' | 'followers'
 type ToolbarMenu = 'layout' | null
-type DelayPreset = '1ms' | '5ms' | 'random'
+// Delay is OFF by default (immediate sync). Only "random" is an explicit opt-in.
+type DelayPreset = 'off' | 'random'
 
 const FILTER_OPTIONS: Array<{ value: FilterMode; label: string }> = [
   { value: 'all', label: '全部实例' },
@@ -85,7 +86,7 @@ export function WindowSyncPage() {
   const [displayLabel, setDisplayLabel] = useState('当前显示器')
   const [, setPanelFocused] = useState(false)
   const [, setPanelHovered] = useState(false)
-  const [delayPreset, setDelayPreset] = useState<DelayPreset | null>(null)
+  const [delayPreset, setDelayPreset] = useState<DelayPreset>('off')
   const [resumeNoticeVisible, setResumeNoticeVisible] = useState(false)
 
   const loadProfilesSeq = useRef(0)
@@ -104,12 +105,10 @@ export function WindowSyncPage() {
       setProfiles(sorted)
       setSyncStatus(status)
       if (status?.active) {
-        if (!status.randomDelayEnabled) setDelayPreset(null)
-        else if (status.randomDelayMinMs === 1 && status.randomDelayMaxMs === 1) setDelayPreset('1ms')
-        else if (status.randomDelayMinMs === 5 && status.randomDelayMaxMs === 5) setDelayPreset('5ms')
-        else setDelayPreset('random')
+        // Any enabled delay maps to the single opt-in "random" mode.
+        setDelayPreset(status.randomDelayEnabled ? 'random' : 'off')
       } else {
-        setDelayPreset(null)
+        setDelayPreset('off')
       }
       if (status?.active) {
         const nextSelected = new Set([status.masterId, ...(status.followerIds || [])].filter(Boolean))
@@ -497,6 +496,8 @@ export function WindowSyncPage() {
         setSelectedIds(new Set([status.masterId, ...(status.followerIds || [])].filter(Boolean)))
         setMasterId(status.masterId)
       }
+      // Always start in immediate mode; random delay is opt-in only.
+      setDelayPreset('off')
       setPanelPresentation('compact')
       setShowSyncControls(false)
     } finally {
@@ -527,23 +528,25 @@ export function WindowSyncPage() {
 
   const handleDelayPresetChange = async (preset: DelayPreset) => {
     if (!isSyncing) return
-    if (delayPreset === preset) {
+    if (preset === 'off') {
       const err = await updateSyncRandomDelay(false, 0, 0)
       if (err) {
         toast.error(`关闭同步延时失败：${err}`)
         return
       }
-      setDelayPreset(null)
+      setDelayPreset('off')
       setSyncStatus(prev => prev ? { ...prev, randomDelayEnabled: false, randomDelayMinMs: 0, randomDelayMaxMs: 0 } : prev)
       return
     }
-    const [minMs, maxMs] = preset === '1ms' ? [1, 1] : preset === '5ms' ? [5, 5] : [3, 8]
+    // Opt-in: each follower window runs master actions after a random delay.
+    const minMs = 1
+    const maxMs = 30
     const err = await updateSyncRandomDelay(true, minMs, maxMs)
     if (err) {
       toast.error(`更新同步延时失败：${err}`)
       return
     }
-    setDelayPreset(preset)
+    setDelayPreset('random')
     setSyncStatus(prev => prev ? { ...prev, randomDelayEnabled: true, randomDelayMinMs: minMs, randomDelayMaxMs: maxMs } : prev)
   }
 
@@ -822,14 +825,14 @@ export function WindowSyncPage() {
             </button>
           </div>
 
-          <div className="mt-2 grid grid-cols-3 gap-2" style={{ ['--wails-draggable' as any]: 'no-drag' }}>
-            {([['1ms', '即时'], ['5ms', '轻抖动'], ['random', '随机延时']] as Array<[DelayPreset, string]>).map(([value, label]) => (
+          <div className="mt-2 grid grid-cols-2 gap-2" style={{ ['--wails-draggable' as any]: 'no-drag' }}>
+            {([['off', '立即同步'], ['random', '随机延时']] as Array<[DelayPreset, string]>).map(([value, label]) => (
               <button
                 key={value}
                 type="button"
                 className={`h-8 rounded-xl border px-2 text-xs font-semibold transition ${delayPreset === value ? 'border-[#4ade80] bg-[#22c55e] text-white shadow-[0_6px_16px_rgba(34,197,94,.24)]' : 'border-white/16 bg-white/10 text-white/80 hover:bg-white/16'}`}
                 onClick={() => void handleDelayPresetChange(value)}
-                title={value === '1ms' ? '几乎无延迟，日常操作推荐' : value === '5ms' ? '轻微错峰，减轻同时点击压力' : '随机 1–30ms，模拟人工差异'}
+                title={value === 'off' ? '默认：主控操作后所有窗口立即同步，无额外延时' : '可选：主控操作后，各跟随窗口在 1–30ms 内随机延时执行'}
               >
                 {label}
               </button>
@@ -1047,7 +1050,7 @@ export function WindowSyncPage() {
                   <div className="font-medium text-[#3a5fad]">同步操作提示</div>
                   <div>1. 勾选环境 → 设主控 → 开始同步。在主控窗口操作，跟随窗口实时复现。</div>
                   <div>2. <span className="font-medium">Esc</span> 暂停/恢复 · <span className="font-medium">Ctrl+滚轮</span> 缩放 · <span className="font-medium">Shift+滚轮</span> 横向滚动 · 滚轮/滚动条/键鼠/输入法均可同步。</div>
-                  <div>3. 延迟默认关闭（最跟手）；需要错峰时再选「即时 / 轻抖动 / 随机延时」。</div>
+                  <div>3. 默认同步无延时（最跟手）；仅当需要模拟人工错峰时，再手动打开「随机延时」。</div>
                 </div>
               </div>
             </div>

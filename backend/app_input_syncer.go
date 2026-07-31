@@ -496,8 +496,8 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	atomic.StoreInt32(&s.popupUpdating, 0)
 	atomic.StoreInt32(&s.mouseEnabled, 1)
 	atomic.StoreInt32(&s.keyEnabled, 1)
-	// Default to immediate delivery. Delay is enabled only after the user
-	// explicitly selects a preset in the sync assistant.
+	// Default: all followers dispatch immediately. Random delay is opt-in only
+	// (sync assistant "随机延时"); never auto-enable on Start.
 	atomic.StoreInt32(&s.randomDelayEnabled, 0)
 	atomic.StoreInt32(&s.randomDelayMinMs, 0)
 	atomic.StoreInt32(&s.randomDelayMaxMs, 0)
@@ -923,12 +923,25 @@ func (s *InputSyncer) dispatchWithRandomDelayComplete(hwnd windows.HWND, action 
 			action()
 		}
 	}
+	// Immediate path: no timer, no queue — every follower runs as soon as the
+	// master event is observed (default when random delay is off).
 	if atomic.LoadInt32(&s.randomDelayEnabled) == 0 {
 		guarded()
 		return
 	}
 	minMs := int(atomic.LoadInt32(&s.randomDelayMinMs))
 	maxMs := int(atomic.LoadInt32(&s.randomDelayMaxMs))
+	if minMs < 0 {
+		minMs = 0
+	}
+	if maxMs < minMs {
+		maxMs = minMs
+	}
+	// 0–0 with enabled still means immediate (treat as misconfig → sync now).
+	if maxMs <= 0 {
+		guarded()
+		return
+	}
 	delayMs := minMs
 	if maxMs > minMs {
 		delayMs += rand.Intn(maxMs - minMs + 1)

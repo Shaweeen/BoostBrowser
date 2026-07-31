@@ -290,6 +290,9 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	if err := syncer.StartWithURLSync(masterHwnd, followerHwnds, masterSnapshot.Pid, masterDebugPort, followerDebugPorts); err != nil {
 		return fmt.Errorf("启动同步失败：%v", err)
 	}
+	// Hard guarantee: starting sync is always immediate. Random delay is only
+	// applied after the user explicitly enables it in the assistant UI.
+	syncer.SetRandomDelay(false, 0, 0)
 
 	syncState.mu.Lock()
 	syncState.syncer = syncer
