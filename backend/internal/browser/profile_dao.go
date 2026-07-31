@@ -27,18 +27,21 @@ func NewSQLiteProfileDAO(db *sql.DB) *SQLiteProfileDAO {
 	return &SQLiteProfileDAO{db: db}
 }
 
+// profileSelectColumns is shared by List/Get/ListByGroup so scanProfile stays aligned.
+const profileSelectColumns = `
+		profile_id, profile_name, user_data_dir, core_id,
+		fingerprint_args, proxy_id, proxy_config,
+		COALESCE(proxy_bind_source_id, ''), COALESCE(proxy_bind_source_url, ''),
+		COALESCE(proxy_bind_name, ''), COALESCE(proxy_bind_updated_at, ''),
+		launch_args, COALESCE(last_tabs, '[]'),
+		tags, keywords, group_id, created_at, updated_at,
+		COALESCE(last_window_x, 0), COALESCE(last_window_y, 0),
+		COALESCE(last_window_width, 0), COALESCE(last_window_height, 0),
+		COALESCE(last_start_at, ''), COALESCE(last_stop_at, '')`
+
 // List 查询所有实例配置，按创建时间升序
 func (d *SQLiteProfileDAO) List() ([]*Profile, error) {
-	rows, err := d.db.Query(`
-		SELECT profile_id, profile_name, user_data_dir, core_id,
-		       fingerprint_args, proxy_id, proxy_config,
-		       COALESCE(proxy_bind_source_id, ''), COALESCE(proxy_bind_source_url, ''),
-		       COALESCE(proxy_bind_name, ''), COALESCE(proxy_bind_updated_at, ''),
-		       launch_args, COALESCE(last_tabs, '[]'),
-		       tags, keywords, group_id, created_at, updated_at,
-		       COALESCE(last_window_x, 0), COALESCE(last_window_y, 0),
-		       COALESCE(last_window_width, 0), COALESCE(last_window_height, 0)
-		FROM browser_profiles ORDER BY created_at ASC`)
+	rows, err := d.db.Query(`SELECT ` + profileSelectColumns + ` FROM browser_profiles ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("查询实例列表失败: %w", err)
 	}
@@ -57,16 +60,7 @@ func (d *SQLiteProfileDAO) List() ([]*Profile, error) {
 
 // GetById 根据 profileId 查询单个实例
 func (d *SQLiteProfileDAO) GetById(profileId string) (*Profile, error) {
-	row := d.db.QueryRow(`
-		SELECT profile_id, profile_name, user_data_dir, core_id,
-		       fingerprint_args, proxy_id, proxy_config,
-		       COALESCE(proxy_bind_source_id, ''), COALESCE(proxy_bind_source_url, ''),
-		       COALESCE(proxy_bind_name, ''), COALESCE(proxy_bind_updated_at, ''),
-		       launch_args, COALESCE(last_tabs, '[]'),
-		       tags, keywords, group_id, created_at, updated_at,
-		       COALESCE(last_window_x, 0), COALESCE(last_window_y, 0),
-		       COALESCE(last_window_width, 0), COALESCE(last_window_height, 0)
-		FROM browser_profiles WHERE profile_id = ?`, profileId)
+	row := d.db.QueryRow(`SELECT `+profileSelectColumns+` FROM browser_profiles WHERE profile_id = ?`, profileId)
 	p, err := scanProfile(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("实例不存在: %s", profileId)
@@ -106,8 +100,9 @@ func upsertProfile(exec profileExecer, profile *Profile) error {
 		  (profile_id, profile_name, user_data_dir, core_id, fingerprint_args,
 		   proxy_id, proxy_config, proxy_bind_source_id, proxy_bind_source_url, proxy_bind_name, proxy_bind_updated_at,
 		   launch_args, last_tabs, tags, keywords, group_id, created_at, updated_at,
-		   last_window_x, last_window_y, last_window_width, last_window_height)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		   last_window_x, last_window_y, last_window_width, last_window_height,
+		   last_start_at, last_stop_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(profile_id) DO UPDATE SET
 		  profile_name     = excluded.profile_name,
 		  user_data_dir    = excluded.user_data_dir,
@@ -128,13 +123,16 @@ func upsertProfile(exec profileExecer, profile *Profile) error {
 		  last_window_x      = excluded.last_window_x,
 		  last_window_y      = excluded.last_window_y,
 		  last_window_width  = excluded.last_window_width,
-		  last_window_height = excluded.last_window_height`,
+		  last_window_height = excluded.last_window_height,
+		  last_start_at      = excluded.last_start_at,
+		  last_stop_at       = excluded.last_stop_at`,
 		profile.ProfileId, profile.ProfileName, profile.UserDataDir, profile.CoreId,
 		string(fingerprintArgs), profile.ProxyId, profile.ProxyConfig,
 		profile.ProxyBindSourceID, profile.ProxyBindSourceURL, profile.ProxyBindName, profile.ProxyBindUpdatedAt,
 		string(launchArgs), string(lastTabs), string(tags), string(keywords), profile.GroupId,
 		profile.CreatedAt, profile.UpdatedAt,
 		profile.LastWindowX, profile.LastWindowY, profile.LastWindowWidth, profile.LastWindowHeight,
+		profile.LastStartAt, profile.LastStopAt,
 	)
 	if err != nil {
 		return fmt.Errorf("保存实例配置失败: %w", err)
@@ -193,26 +191,12 @@ func (d *SQLiteProfileDAO) ListByGroup(groupId string, includeChildren bool, chi
 			args[i] = id
 		}
 		rows, err = d.db.Query(fmt.Sprintf(`
-			SELECT profile_id, profile_name, user_data_dir, core_id,
-			       fingerprint_args, proxy_id, proxy_config,
-			       COALESCE(proxy_bind_source_id, ''), COALESCE(proxy_bind_source_url, ''),
-			       COALESCE(proxy_bind_name, ''), COALESCE(proxy_bind_updated_at, ''),
-			       launch_args, COALESCE(last_tabs, '[]'),
-			       tags, keywords, group_id, created_at, updated_at,
-			       COALESCE(last_window_x, 0), COALESCE(last_window_y, 0),
-			       COALESCE(last_window_width, 0), COALESCE(last_window_height, 0)
+			SELECT `+profileSelectColumns+`
 			FROM browser_profiles WHERE group_id IN (%s) ORDER BY created_at ASC`, inClause), args...)
 	} else {
 		// 仅查询指定分组
 		rows, err = d.db.Query(`
-			SELECT profile_id, profile_name, user_data_dir, core_id,
-			       fingerprint_args, proxy_id, proxy_config,
-			       COALESCE(proxy_bind_source_id, ''), COALESCE(proxy_bind_source_url, ''),
-			       COALESCE(proxy_bind_name, ''), COALESCE(proxy_bind_updated_at, ''),
-			       launch_args, COALESCE(last_tabs, '[]'),
-			       tags, keywords, group_id, created_at, updated_at,
-			       COALESCE(last_window_x, 0), COALESCE(last_window_y, 0),
-			       COALESCE(last_window_width, 0), COALESCE(last_window_height, 0)
+			SELECT `+profileSelectColumns+`
 			FROM browser_profiles WHERE group_id = ? ORDER BY created_at ASC`, groupId)
 	}
 
@@ -271,6 +255,7 @@ func scanProfile(s scanner) (*Profile, error) {
 		&launchArgsJSON, &lastTabsJSON, &tagsJSON, &keywordsJSON, &p.GroupId,
 		&p.CreatedAt, &p.UpdatedAt,
 		&p.LastWindowX, &p.LastWindowY, &p.LastWindowWidth, &p.LastWindowHeight,
+		&p.LastStartAt, &p.LastStopAt,
 	)
 	if err != nil {
 		return nil, err

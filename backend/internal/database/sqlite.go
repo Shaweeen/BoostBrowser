@@ -152,6 +152,14 @@ var migrations = []migration{
 			`ALTER TABLE browser_profiles ADD COLUMN last_tabs TEXT NOT NULL DEFAULT '[]'`,
 		},
 	},
+	{
+		version: 9,
+		desc:    "实例表添加最后启动/关闭使用时间",
+		stmts: []string{
+			`ALTER TABLE browser_profiles ADD COLUMN last_start_at TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE browser_profiles ADD COLUMN last_stop_at TEXT NOT NULL DEFAULT ''`,
+		},
+	},
 	// ── 新版本在此追加，格式：
 	// {
 	//     version: 4,

@@ -804,6 +804,7 @@ func (a *App) BrowserInstanceStop(profileId string) (*BrowserProfile, error) {
 	}
 	if debugPort <= 0 && pid <= 0 && cmd == nil && !browserSingletonArtifactsPresent(userDataDir) {
 		a.markProfileStoppedLocked(profileId, profile)
+		_ = a.browserMgr.SaveProfiles()
 		snapshot := copyBrowserProfileSnapshot(profile)
 		a.browserMgr.Mutex.Unlock()
 		return snapshot, nil
@@ -854,9 +855,19 @@ func (a *App) BrowserInstanceStop(profileId string) (*BrowserProfile, error) {
 	if current.Running || current.DebugPort > 0 || current.Pid > 0 || a.browserMgr.BrowserProcesses[profileId] != nil {
 		a.markProfileStoppedLocked(profileId, current)
 	}
-	current.LastStopAt = closedAt.Format(time.RFC3339)
+	// Prefer the confirmed flush timestamp as last-usage close/save time.
+	closedAtStr := closedAt.Format(time.RFC3339)
+	current.LastStopAt = closedAtStr
+	current.UpdatedAt = closedAtStr
 	if pointerErr != nil {
 		current.LastError = fmt.Sprintf("环境数据已由浏览器正常写盘，但数据指向索引保存失败: %v", pointerErr)
+	}
+	// Persist last_stop_at so the list "更新时间" survives restart.
+	if saveErr := a.browserMgr.SaveProfiles(); saveErr != nil {
+		log.Error("关闭后持久化最后使用时间失败",
+			logger.F("profile_id", profileId),
+			logger.F("error", saveErr.Error()),
+		)
 	}
 	snapshot := copyBrowserProfileSnapshot(current)
 	a.browserMgr.Mutex.Unlock()
@@ -872,6 +883,7 @@ func (a *App) BrowserInstanceStop(profileId string) (*BrowserProfile, error) {
 		logger.F("profile_id", profileId),
 		logger.F("pid", pid),
 		logger.F("method", method),
+		logger.F("last_stop_at", closedAtStr),
 	)
 	return snapshot, nil
 }
@@ -1320,7 +1332,11 @@ func (a *App) markProfileStoppedLocked(profileId string, profile *BrowserProfile
 	profile.Pid = 0
 	profile.DebugPort = 0
 	profile.RuntimeWarning = ""
-	profile.LastStopAt = time.Now().Format(time.RFC3339)
+	// Last close/save time after the user finished using the environment.
+	// Also mirror into UpdatedAt so list "更新时间" reflects last usage close.
+	closedAt := time.Now().Format(time.RFC3339)
+	profile.LastStopAt = closedAt
+	profile.UpdatedAt = closedAt
 	delete(a.browserMgr.BrowserProcesses, profileId)
 	a.releaseProfileXrayBridge(profileId)
 	a.releaseProfileStandardRelay(profileId)

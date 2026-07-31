@@ -101,6 +101,8 @@ func (a *App) markProfileRunningLocked(profileId string, profile *BrowserProfile
 		a.launchServer.SetActiveProfile(profile)
 	}
 	a.persistBrowserRuntimeSnapshotLocked()
+	// Best-effort persist last_start_at (non-fatal if save fails under lock).
+	_ = a.browserMgr.SaveProfiles()
 }
 
 func (a *App) markProfileDebugReadyLocked(profile *BrowserProfile, debugPort int) {

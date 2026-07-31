@@ -25,7 +25,8 @@ func newProfileDAOTestDB(t *testing.T) (*sql.DB, *SQLiteProfileDAO) {
 			last_tabs TEXT NOT NULL DEFAULT '[]', tags TEXT NOT NULL, keywords TEXT NOT NULL,
 			group_id TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
 			last_window_x INTEGER NOT NULL DEFAULT 0, last_window_y INTEGER NOT NULL DEFAULT 0,
-			last_window_width INTEGER NOT NULL DEFAULT 0, last_window_height INTEGER NOT NULL DEFAULT 0
+			last_window_width INTEGER NOT NULL DEFAULT 0, last_window_height INTEGER NOT NULL DEFAULT 0,
+			last_start_at TEXT NOT NULL DEFAULT '', last_stop_at TEXT NOT NULL DEFAULT ''
 		)`); err != nil {
 		t.Fatal(err)
 	}

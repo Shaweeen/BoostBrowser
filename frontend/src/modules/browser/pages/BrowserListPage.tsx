@@ -144,6 +144,11 @@ const formatTime = (value?: string) => {
   return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('zh-CN')
 }
 
+/** Last finished use: close/save time after the user stops the environment. */
+const formatLastCloseTime = (record: { lastStopAt?: string; updatedAt?: string }) => {
+  return formatTime(record.lastStopAt || record.updatedAt)
+}
+
 function LaunchCodeCell({ profileId, code, onRefresh }: { profileId: string; code: string; onRefresh: () => void }) {
   const [loading, setLoading] = useState(false)
 
@@ -1198,9 +1203,9 @@ export function BrowserListPage() {
       render: (value) => <KeywordInlineRow keywords={value || []} />,
     },
     {
-      key: 'updatedAt',
-      title: '上次更新',
-      render: formatTime,
+      key: 'lastStopAt',
+      title: '上次关闭',
+      render: (_value, record) => formatLastCloseTime(record),
     },
     {
       key: 'actions',
@@ -1441,8 +1446,8 @@ export function BrowserListPage() {
                         <div className="mt-0.5"><LaunchCodeCell profileId={record.profileId} code={record.launchCode || ''} onRefresh={loadProfiles} /></div>
                       </div>
                       <div className="flex flex-col gap-0.5">
-                        <span className="text-xs text-[var(--color-text-muted)] font-medium">上次更新时间</span>
-                        <span className="text-xs text-[var(--color-text-primary)]">{formatTime(record.updatedAt)}</span>
+                        <span className="text-xs text-[var(--color-text-muted)] font-medium">上次关闭时间</span>
+                        <span className="text-xs text-[var(--color-text-primary)]">{formatLastCloseTime(record)}</span>
                       </div>
                     </div>
 
