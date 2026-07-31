@@ -134,6 +134,19 @@ func waitBrowserDebugPortStable(initialDebugPort int, userDataDir string, timeou
 	if stableFor <= 0 {
 		return debugPort, nil
 	}
+	// Multi-open hot path: environments use a dedicated assigned debug port.
+	// One short settle + re-probe (~150ms) catches ephemeral ports without the
+	// old 450ms multi-probe hold that dominated batch-start wall time.
+	if initialDebugPort > 0 {
+		time.Sleep(150 * time.Millisecond)
+		if err := probeBrowserDebugPort(debugPort, browserDebugProbeTimeout); err != nil {
+			if monitor != nil && monitor.HasExited() {
+				return 0, newBrowserStartupExitError(monitor.Result())
+			}
+			return 0, fmt.Errorf("浏览器调试端口 %d 短暂就绪后又失效：%w", debugPort, err)
+		}
+		return debugPort, nil
+	}
 	allowDetachedGrace := initialDebugPort > 0
 
 	deadline := time.Now().Add(stableFor)

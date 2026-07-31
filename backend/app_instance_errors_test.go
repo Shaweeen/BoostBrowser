@@ -75,8 +75,8 @@ func TestDescribeBrowserReadyFailureUsesExitDetail(t *testing.T) {
 }
 
 func TestBrowserStartAttemptCountDefault(t *testing.T) {
-	if browserStartAttemptCount() != 5 {
-		t.Fatalf("expected default browser start attempts to be 5, got %d", browserStartAttemptCount())
+	if browserStartAttemptCount() != 3 {
+		t.Fatalf("expected default browser start attempts to be 3, got %d", browserStartAttemptCount())
 	}
 }
 

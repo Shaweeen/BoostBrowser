@@ -776,13 +776,39 @@ export function BrowserListPage() {
   }
 
   const handleBatchStart = async () => {
-    const ids = Array.from(visibleSelectedIds)
-    if (ids.length === 0) return
+    const rawIds = Array.from(visibleSelectedIds)
+    if (rawIds.length === 0) return
+    // Natural numeric order (1,2,10 not 1,10,2) so launch + tile follow 编号.
+    const naturalCompare = (a: string, b: string): number => {
+      const re = /(\d+)|(\D+)/g
+      const partsA = a.match(re) || []
+      const partsB = b.match(re) || []
+      for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+        if (i >= partsA.length) return -1
+        if (i >= partsB.length) return 1
+        const pa = partsA[i], pb = partsB[i]
+        const na = Number(pa), nb = Number(pb)
+        if (!isNaN(na) && !isNaN(nb)) {
+          if (na !== nb) return na - nb
+        } else {
+          const cmp = pa.localeCompare(pb, 'zh-CN')
+          if (cmp !== 0) return cmp
+        }
+      }
+      return 0
+    }
+    const ids = [...rawIds].sort((idA, idB) => {
+      const pa = profiles.find(p => p.profileId === idA)
+      const pb = profiles.find(p => p.profileId === idB)
+      return naturalCompare(pa?.profileName || idA, pb?.profileName || idB)
+    })
     setBatchLoading(true)
     let success = 0, pending = 0, failed = 0
     const pendingMessages: string[] = []
     const failureMessages: string[] = []
-    // Fixed pool of 5 concurrent environment starts (product requirement).
+    const startedOrderedIds: string[] = []
+    // Fixed pool of 5 concurrent starts; queue is already natural-sorted so
+    // lower numbers begin first (FIFO workers).
     const concurrency = Math.min(ids.length, 5)
     let cursor = 0
     const launchNext = async () => {
@@ -794,11 +820,13 @@ export function BrowserListPage() {
         try {
           const startedProfile = await startBrowserInstance(id)
           mergeProfileState(startedProfile)
+          startedOrderedIds.push(id)
           success++
         } catch (error: any) {
           const feedback = resolveActionFeedback(error, '环境启动失败')
           if (feedback.pendingAttach) {
             pending++
+            startedOrderedIds.push(id)
             pendingMessages.push(`${profile.profileName}：${feedback.message}`)
           } else {
             failed++
@@ -810,11 +838,25 @@ export function BrowserListPage() {
       }
     }
     await Promise.all(Array.from({ length: concurrency }, () => launchNext()))
+    // Re-sort by natural name: concurrent finish order may differ from start order.
+    const tileIds = [...new Set(startedOrderedIds)].sort((idA, idB) => {
+      const pa = profiles.find(p => p.profileId === idA)
+      const pb = profiles.find(p => p.profileId === idB)
+      return naturalCompare(pa?.profileName || idA, pb?.profileName || idB)
+    })
+    if (tileIds.length >= 2) {
+      try {
+        const { syncTileWindows } = await import('../api_sync')
+        await syncTileWindows(tileIds, tileIds[0], 'grid')
+      } catch {
+        // Layout is best-effort; startup success already reported.
+      }
+    }
     setBatchLoading(false)
     const summary = [`成功 ${success}`]
     if (pending > 0) summary.push(`待接管 ${pending}`)
     if (failed > 0) summary.push(`失败 ${failed}`)
-    toast.success(`批量启动完成：${summary.join('，')}`)
+    toast.success(`批量启动完成：${summary.join('，')}${tileIds.length >= 2 ? '（已按编号顺序平铺）' : ''}`)
     if (pendingMessages.length > 0) {
       const preview = pendingMessages.slice(0, 3)
       const more = pendingMessages.length > preview.length ? `\n另有 ${pendingMessages.length - preview.length} 个实例已打开窗口，仍在后台接管。` : ''

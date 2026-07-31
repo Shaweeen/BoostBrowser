@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	stdruntime "runtime"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -12,6 +14,38 @@ import (
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+// Debounced profile DB write so multi-open start does not rewrite the entire
+// profile catalog under the manager lock on every single environment launch.
+var (
+	profilePersistMu      sync.Mutex
+	profilePersistTimer   *time.Timer
+	profilePersistPending atomic.Bool
+)
+
+func (a *App) scheduleProfilePersist() {
+	if a == nil || a.browserMgr == nil {
+		return
+	}
+	profilePersistMu.Lock()
+	defer profilePersistMu.Unlock()
+	if profilePersistTimer != nil {
+		profilePersistTimer.Stop()
+	}
+	profilePersistPending.Store(true)
+	profilePersistTimer = time.AfterFunc(500*time.Millisecond, func() {
+		profilePersistPending.Store(false)
+		if a == nil || a.browserMgr == nil {
+			return
+		}
+		a.browserMgr.Mutex.Lock()
+		err := a.browserMgr.SaveProfiles()
+		a.browserMgr.Mutex.Unlock()
+		if err != nil {
+			logger.New("Browser").Warn("防抖持久化环境配置失败", logger.F("error", err.Error()))
+		}
+	})
+}
 
 const (
 	browserAsyncDebugAttachTimeout   = 45 * time.Second
@@ -101,8 +135,10 @@ func (a *App) markProfileRunningLocked(profileId string, profile *BrowserProfile
 		a.launchServer.SetActiveProfile(profile)
 	}
 	a.persistBrowserRuntimeSnapshotLocked()
-	// Best-effort persist last_start_at (non-fatal if save fails under lock).
-	_ = a.browserMgr.SaveProfiles()
+	// Debounced persist: multi-open used to call SaveProfiles on every start
+	// under the manager lock, serializing N full SQLite rewrites and stretching
+	// batch start wall time dramatically.
+	a.scheduleProfilePersist()
 }
 
 func (a *App) markProfileDebugReadyLocked(profile *BrowserProfile, debugPort int) {

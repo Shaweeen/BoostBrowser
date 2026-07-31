@@ -8,8 +8,10 @@ import (
 
 const (
 	defaultBrowserStartReadyTimeout = 3 * time.Second
-	defaultBrowserStartStableWindow = 450 * time.Millisecond
-	defaultBrowserStartMaxAttempts  = 5
+	// Kept for unassigned-port / legacy paths. Assigned debug ports skip the
+	// long hold (see waitBrowserDebugPortStable).
+	defaultBrowserStartStableWindow = 200 * time.Millisecond
+	defaultBrowserStartMaxAttempts  = 3
 )
 
 func browserStartReadyTimeoutMillis(cfg *config.Config) int {
