@@ -3,6 +3,9 @@
 package backend
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,15 +19,20 @@ import (
 // confinement share one App without wiring every InputSyncer to a pointer.
 var environmentPopupApp atomic.Pointer[App]
 
+// layoutHoldRoot is the app data root used for a cross-process layout-hold flag
+// (main confiner must yield while the panel tiles or the main list batch-tiles).
+var layoutHoldRoot atomic.Value // string
+
 // environmentPopupConfiner is the single owner of popup / extension / secondary
-// Chrome window geometry for every running environment. It runs whenever at
-// least one environment is open — the sync assistant is not required.
+// Chrome window geometry for every running environment on the main client.
+// The sync assistant must NOT run a parallel SetWindowPos loop (relative-align
+// thrash). InputSyncer only maps input coordinates to existing surfaces.
 //
 // Policy:
-//   - one owner only (InputSyncer no longer runs a parallel loop);
+//   - one geometry writer (this confiner on main);
 //   - action/lifecycle driven start/stop from environment start/stop;
-//   - natural popup size, uniform shrink only when the cell is too small;
-//   - no fixed wallet width/height templates.
+//   - natural popup size (position-only nudge; never shrink wallets);
+//   - layout hold (local + shared flag) while tiles move.
 type environmentPopupConfiner struct {
 	mu       sync.Mutex
 	stopCh   chan struct{}
@@ -33,10 +41,65 @@ type environmentPopupConfiner struct {
 	busy     int32
 }
 
+// setLayoutHoldRoot records the shared data root for both main and panel.
+func setLayoutHoldRoot(appRoot string) {
+	appRoot = strings.TrimSpace(appRoot)
+	if appRoot == "" {
+		return
+	}
+	layoutHoldRoot.Store(appRoot)
+}
+
+func layoutHoldFlagPath() string {
+	root, _ := layoutHoldRoot.Load().(string)
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, "data", "layout-hold.flag")
+}
+
+// setSharedLayoutHold publishes a short-lived cross-process hold so the main
+// confiner yields while any process rearranges environment windows.
+func setSharedLayoutHold(hold bool) {
+	path := layoutHoldFlagPath()
+	if path == "" {
+		return
+	}
+	if hold {
+		_ = os.MkdirAll(filepath.Dir(path), 0o755)
+		_ = os.WriteFile(path, []byte(time.Now().UTC().Format(time.RFC3339Nano)), 0o600)
+		return
+	}
+	_ = os.Remove(path)
+}
+
+func sharedLayoutHoldActive() bool {
+	path := layoutHoldFlagPath()
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	raw := strings.TrimSpace(string(data))
+	if raw == "" {
+		return true
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		// Corrupt flag: treat as active briefly until removed.
+		return true
+	}
+	// Auto-expire so a crashed panel cannot pin the confiner forever.
+	return time.Since(t) < 3*time.Second
+}
+
 func (a *App) registerEnvironmentPopupConfiner() {
 	if a == nil || a.panelMode {
 		return
 	}
+	setLayoutHoldRoot(a.appRoot)
 	environmentPopupApp.Store(a)
 	a.refreshEnvironmentPopupConfinement()
 }
@@ -53,6 +116,12 @@ func (a *App) unregisterEnvironmentPopupConfiner() {
 
 func (a *App) holdEnvironmentPopupConfinement(hold bool) {
 	if a == nil {
+		return
+	}
+	setLayoutHoldRoot(a.appRoot)
+	setSharedLayoutHold(hold)
+	if a.panelMode {
+		// Panel has no confiner; shared flag is enough for the main process.
 		return
 	}
 	if a.envPopup == nil {
@@ -228,6 +297,10 @@ func (c *environmentPopupConfiner) applyOnce(
 		return
 	}
 	if layoutHeld != nil && layoutHeld() {
+		return
+	}
+	// Cross-process: panel tile / batch tile write layout-hold.flag.
+	if sharedLayoutHoldActive() {
 		return
 	}
 	if !atomic.CompareAndSwapInt32(&c.busy, 0, 1) {

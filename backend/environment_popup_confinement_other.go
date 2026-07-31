@@ -10,6 +10,12 @@ var environmentPopupApp atomic.Pointer[App]
 
 type environmentPopupConfiner struct{}
 
+func setLayoutHoldRoot(appRoot string) {}
+
+func setSharedLayoutHold(hold bool) {}
+
+func sharedLayoutHoldActive() bool { return false }
+
 func (a *App) registerEnvironmentPopupConfiner() {}
 
 func (a *App) unregisterEnvironmentPopupConfiner() {}

@@ -434,6 +434,17 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	// Minimise it before arranging browser windows so it cannot cover the grid.
 	minimizeMainClientWindow()
 
+	// Always hold popup confinement during tile (main local flag + shared flag
+	// for panel). Batch multi-start auto-tile has no InputSyncer session.
+	if a != nil {
+		setLayoutHoldRoot(a.appRoot)
+	}
+	holdPopupConfinementForLayout(true)
+	defer func() {
+		time.Sleep(50 * time.Millisecond)
+		holdPopupConfinementForLayout(false)
+	}()
+
 	// Window movement and coordinate replay must never overlap. Invalidate
 	// queued actions, suspend dispatch while geometry changes, then allow a
 	// short DWM settle interval before accepting new input.

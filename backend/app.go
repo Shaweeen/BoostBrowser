@@ -349,6 +349,9 @@ func (a *App) startup(ctx context.Context) {
 	a.lifecycleLog("cache-auto-clean", "state=scheduled", "initialDelay=2m", "pollInterval=6h")
 	a.startCacheAutoCleanScheduler()
 	// a.startBrowserRuntimeReconciler()
+	// Shared layout-hold flag root for main confiner ↔ panel tile coordination.
+	setLayoutHoldRoot(a.appRoot)
+
 	if a.panelMode {
 		a.lifecycleLog("sync-engine-owner", "mode=panel-process", "isolation=main-client")
 	} else {
@@ -367,7 +370,7 @@ func (a *App) startup(ctx context.Context) {
 
 	if !a.panelMode {
 		// Single owner for wallet/extension/secondary window geometry across every
-		// running environment. Sync assistant is not required.
+		// running environment. Sync assistant must not run a parallel SetWindowPos loop.
 		a.registerEnvironmentPopupConfiner()
 	}
 

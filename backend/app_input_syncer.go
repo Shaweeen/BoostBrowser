@@ -545,12 +545,9 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	s.mu.Unlock()
 	s.runWorker(func() { s.cdpKeyDispatchLoop(s.stopCh, s.cdpKeyQueue) })
 	s.runWorker(func() { s.pageInputDispatchLoop(s.stopCh, s.pageInputQueue) })
-	// Popup/extension secondary-window geometry is owned by the main client's
-	// environmentPopupConfiner for every running profile, including when the
-	// sync assistant is closed. Additionally, while input sync runs, mirror
-	// master popup relative placement onto follower popups (Chrome-Manager
-	// sync_specific_popup) so wallet UIs land in corresponding tile positions.
-	s.runWorker(func() { s.popupRelativeAlignLoop(s.stopCh) })
+	// Popup geometry is owned solely by the main-process environmentPopupConfiner
+	// (position-only). InputSyncer does not run a parallel SetWindowPos loop —
+	// dual writers caused wallet flicker under multi-open + sync.
 
 	// 安装全局鼠标和键盘钩子。启动必须等待安装结果；旧逻辑在安装
 	// 失败时仍立即返回成功，前端因此会显示“同步中”但没有任何事件。
@@ -821,31 +818,36 @@ func (s *InputSyncer) togglePausedFromEscape() bool {
 }
 
 func (s *InputSyncer) canDispatch() bool {
+	// popupUpdating must not block input: geometry work is rare and was
+	// freezing key/mouse for the whole multi-follower align pass.
 	return atomic.LoadInt32(&s.active) == 1 &&
 		atomic.LoadInt32(&s.paused) == 0 &&
-		atomic.LoadInt32(&s.layoutUpdating) == 0 &&
-		atomic.LoadInt32(&s.popupUpdating) == 0
+		atomic.LoadInt32(&s.layoutUpdating) == 0
 }
 
 // BeginLayoutUpdate creates a hard boundary between window movement and input
 // coordinate mapping. Events queued against the previous geometry are dropped.
+// Confiner hold is owned by syncTileWindowsLocal (not nested here) so End does
+// not release the hold mid-tile.
 func (s *InputSyncer) BeginLayoutUpdate() {
 	atomic.StoreInt32(&s.layoutUpdating, 1)
 	atomic.AddUint64(&s.dispatchGeneration, 1)
 	atomic.StoreInt32(&s.activePageMouseButton, 0)
-	// Yield the environment popup confiner while tiles move so it does not
-	// fight SetWindowPos on the same frames.
-	if activeApp := environmentPopupApp.Load(); activeApp != nil {
-		activeApp.holdEnvironmentPopupConfinement(true)
-	}
 }
 
 func (s *InputSyncer) EndLayoutUpdate() {
 	atomic.AddUint64(&s.dispatchGeneration, 1)
 	atomic.StoreInt32(&s.layoutUpdating, 0)
-	if activeApp := environmentPopupApp.Load(); activeApp != nil {
-		activeApp.holdEnvironmentPopupConfinement(false)
+}
+
+// holdPopupConfinementForLayout stops the main confiner during any tile/stack
+// from main or panel. Panel has no confiner but still writes the shared flag.
+func holdPopupConfinementForLayout(hold bool) {
+	if app := environmentPopupApp.Load(); app != nil {
+		app.holdEnvironmentPopupConfinement(hold)
+		return
 	}
+	setSharedLayoutHold(hold)
 }
 
 func (s *InputSyncer) withCDPPortLock(debugPort int, action func()) {
@@ -1361,83 +1363,9 @@ func mapChromeInputTarget(screenX, screenY int, masterMain, followerMain windows
 	return followerSurface, lparam, ok
 }
 
-// popupRelativeAlignLoop mirrors Chrome-Manager's monitor_popups +
-// sync_specific_popup: nudge follower wallet popups to the same relative
-// offset as master. Position-only (SWP_NOSIZE) — never resize, so we do not
-// fight the environment confiner or Chromium wallet layout (flicker source).
-func (s *InputSyncer) popupRelativeAlignLoop(stopCh <-chan struct{}) {
-	ticker := time.NewTicker(700 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-stopCh:
-			return
-		case <-ticker.C:
-		}
-		if atomic.LoadInt32(&s.active) == 0 {
-			return
-		}
-		if s.IsPaused() || atomic.LoadInt32(&s.layoutUpdating) != 0 || atomic.LoadInt32(&s.popupUpdating) != 0 {
-			continue
-		}
-		s.alignFollowerPopupsToMasterRelative()
-	}
-}
-
-func (s *InputSyncer) alignFollowerPopupsToMasterRelative() {
-	if s == nil || s.masterHwnd == 0 || !isWindow(s.masterHwnd) {
-		return
-	}
-	followers := s.getFollowerSnapshot()
-	if len(followers) == 0 {
-		return
-	}
-	masterPopups := listChromePopupSurfaces(s.masterHwnd)
-	if len(masterPopups) == 0 {
-		return
-	}
-	mml, mmt, _, _ := getWindowRect(s.masterHwnd)
-	atomic.StoreInt32(&s.popupUpdating, 1)
-	defer atomic.StoreInt32(&s.popupUpdating, 0)
-
-	for _, popup := range masterPopups {
-		pl, pt, pr, pb := getWindowRect(popup)
-		pw, ph := int(pr-pl), int(pb-pt)
-		if pw < 40 || ph < 40 {
-			continue
-		}
-		for _, follower := range followers {
-			if !isWindow(follower) {
-				continue
-			}
-			match := findMatchingChromeInputSurface(popup, s.masterHwnd, follower)
-			if match == 0 || match == follower {
-				continue
-			}
-			fl, ft, _, _ := getWindowRect(follower)
-			newX := expectedPopupOffsetLeft(int(pl), int(mml), int(fl))
-			newY := expectedPopupOffsetTop(int(pt), int(mmt), int(ft))
-			ol, ot, orr, ob := getWindowRect(follower)
-			owner := winRect{Left: ol, Top: ot, Right: orr, Bottom: ob}
-			desired := winRect{Left: int32(newX), Top: int32(newY), Right: int32(newX + pw), Bottom: int32(newY + ph)}
-			x, y, _, _, moved := constrainSyncPopupRect(desired, owner, syncPopupBoundsInset)
-			if !moved {
-				// Still apply relative offset if match drifted far from desired.
-				cl, ct, _, _ := getWindowRect(match)
-				if absSyncInt(int(cl)-x) < 4 && absSyncInt(int(ct)-y) < 4 {
-					continue
-				}
-			}
-			// Position only — preserve follower popup's current natural size.
-			procSetWindowPos.Call(
-				uintptr(match),
-				0,
-				uintptr(x), uintptr(y), 0, 0,
-				uintptr(SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOSIZE),
-			)
-		}
-	}
-}
+// listChromePopupSurfaces / chromePopupListSearch remain available for diagnostics
+// and tests. Continuous relative-align SetWindowPos was removed: the main
+// environmentPopupConfiner is the sole geometry writer (position-only).
 
 type chromePopupListSearch struct {
 	main      windows.HWND

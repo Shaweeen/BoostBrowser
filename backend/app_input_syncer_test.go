@@ -125,10 +125,10 @@ func TestLargeFollowerSchedulingUsesStableCadence(t *testing.T) {
 	if got := syncMouseDragThrottle(20); got >= syncMouseMoveThrottle(20) {
 		t.Fatalf("drag throttle must stay denser under large follower counts")
 	}
-	if got := syncPopupBoundsIntervalForFollowers(20); got != 450*time.Millisecond {
+	if got := syncPopupBoundsIntervalForFollowers(20); got != 700*time.Millisecond {
 		t.Fatalf("20 follower popup interval=%v", got)
 	}
-	if got := syncPopupBoundsIntervalForFollowers(2); got != 280*time.Millisecond {
+	if got := syncPopupBoundsIntervalForFollowers(2); got != 450*time.Millisecond {
 		t.Fatalf("small multi-open popup interval=%v", got)
 	}
 }
@@ -239,16 +239,17 @@ func TestLayoutBoundarySuspendsDispatchAndDropsOldGeometryEvents(t *testing.T) {
 	}
 }
 
-func TestPopupGeometryUpdateSuspendsDispatch(t *testing.T) {
+func TestPopupGeometryUpdateDoesNotBlockInputDispatch(t *testing.T) {
+	// Geometry work must never freeze key/mouse (was thrashing wallets + input).
 	s := NewInputSyncer()
 	atomic.StoreInt32(&s.active, 1)
 	atomic.StoreInt32(&s.popupUpdating, 1)
-	if s.canDispatch() {
-		t.Fatal("input dispatch must pause during popup geometry updates")
-	}
-	atomic.StoreInt32(&s.popupUpdating, 0)
 	if !s.canDispatch() {
-		t.Fatal("input dispatch must resume after popup geometry updates")
+		t.Fatal("popupUpdating must not block input dispatch")
+	}
+	atomic.StoreInt32(&s.layoutUpdating, 1)
+	if s.canDispatch() {
+		t.Fatal("layoutUpdating must still suspend input dispatch")
 	}
 }
 
