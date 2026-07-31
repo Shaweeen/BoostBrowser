@@ -26,7 +26,8 @@ import (
 //     reloads from the profile (protects wallet accounts / extension storage).
 //  4. Re-assign / remove clears the marker → one more adapt pass is required.
 //
-// Prep skips (scan/seed) also apply when ready; tab sole-blank handoff stays.
+// Prep skips (scan/seed) also apply when ready. Post-start tab CDP cleanup was
+// removed — do not reintroduce it as a substitute for selective inject.
 const extensionLaunchReadyMarkerName = ".boost_extension_launch_ready"
 
 type extensionLaunchReadyMarker struct {

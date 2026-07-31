@@ -9,7 +9,7 @@ import { InstanceFilterBar, EMPTY_FILTERS, isFiltersEmpty } from '../components/
 import type { InstanceFilters } from '../components/InstanceFilterBar'
 import { KeywordsModal } from '../components/KeywordsModal'
 import { EventsOn } from '../../../wailsjs/runtime/runtime'
-import { FinalizeEnvironmentTabsForUserHandoff } from '../../../wailsjs/go/main/App'
+
 import { resolveActionErrorMessage, resolveActionFeedback } from '../utils/actionErrors'
 import {
   cleanBrowserCache,
@@ -263,13 +263,6 @@ export function BrowserListPage() {
   const [loading, setLoading] = useState(true)
   const [proxies, setProxies] = useState<BrowserProxy[]>([])
   const [groups, setGroups] = useState<BrowserGroupWithCount[]>([])
-  // Final handoff: backend only collapses *newly started* environments still
-  // pending takeover. Already-open working envs keep their tabs when more start.
-  const requestUserTabHandoff = useCallback(() => {
-    if (!profiles.some(p => p.running)) return
-    void FinalizeEnvironmentTabsForUserHandoff().catch(() => {})
-  }, [profiles])
-
   // 视图模式
   const [viewMode, setViewMode] = useState<'card' | 'table'>(() => {
     return (localStorage.getItem('browser:viewMode') as 'card' | 'table') || 'table'
@@ -1329,10 +1322,7 @@ export function BrowserListPage() {
   ]
 
   return (
-    <div
-      className="overflow-auto p-5 space-y-5 animate-fade-in h-full"
-      onPointerDownCapture={requestUserTabHandoff}
-    >
+    <div className="overflow-auto p-5 space-y-5 animate-fade-in h-full">
       {/* 页头 */}
       <div className="flex items-center justify-between">
         <div>

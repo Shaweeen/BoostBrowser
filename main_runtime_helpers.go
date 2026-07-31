@@ -63,8 +63,6 @@ func (a *App) SaveNativeMainWindowBounds(bounds MainWindowBounds) bool {
 // mode. Single-instance handling keeps only one panel alive.
 func (a *App) OpenWindowSyncPanel() error {
 	a.App.PrepareWindowSyncRuntimeSnapshot()
-	// Final tab check: only blank remains, then full user control (once).
-	_ = a.App.FinalizeEnvironmentTabsForUserHandoff()
 	exePath, err := os.Executable()
 	if err != nil {
 		return err

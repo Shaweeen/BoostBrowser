@@ -115,9 +115,6 @@ func resolveBadgeDisplayNumber(profileId, profileName string, profiles map[strin
 }
 
 func (a *App) BrowserInstanceStart(profileId string) (*BrowserProfile, error) {
-	// Tab handoff is armed only for unsettled (first-adapt) starts inside
-	// browserInstanceStartInternal — hot starts with wallet data must not
-	// re-arm sole-blank wipe every open.
 	return a.browserInstanceStartInternal(profileId, nil, nil, false, false, false)
 }
 
@@ -587,10 +584,8 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				logger.F("max_attempts", maxStartAttempts),
 				logger.F("args", strings.Join(args, " ")),
 			)
-			// Tab policy: first-adapt cleans extension auto-pages + sole blank.
-			// Hot-settled (wallet/extension data already in env data) only does a
-			// light auto-page close — never wipe user session to about:blank.
-			finalizeBrowserStartupTabs(stableDebugPort, profileId, hotSettled)
+			// Post-start CDP tab collapse retired: selective inject + hot-settled
+			// starts prevent extension auto-pages; Preferences pin about:blank.
 
 			// 任务栏 badge 数字直接来自实例名字里的数字段：
 			//   名字 "1"        → badge 1
@@ -1360,9 +1355,6 @@ func (a *App) markProfileStoppedLocked(profileId string, profile *BrowserProfile
 		a.launchServer.ClearActiveProfile(profileId)
 	}
 	a.persistBrowserRuntimeSnapshotLocked()
-	// Drop pending handoff for this profile only; other open envs are untouched.
-	// Next start of this profile re-arms it alone via BrowserInstanceStart.
-	clearEnvironmentTabsUserHandoffForProfile(profileId)
 	// Async: this helper may already hold browserMgr.Mutex.
 	a.scheduleEnvironmentPopupConfinementRefresh()
 }
