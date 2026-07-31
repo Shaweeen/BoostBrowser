@@ -325,9 +325,9 @@ func TestWindowEnumerationCallbacksAreProcessReusable(t *testing.T) {
 }
 
 func TestPopupSurfaceMatchScorePrefersSameSizedSameOffsetMenu(t *testing.T) {
-	master := syncInputSurfaceCandidate{left: 700, top: 80, width: 320, height: 680}
-	exact := syncInputSurfaceCandidate{left: 1700, top: 80, width: 320, height: 680}
-	wrongSize := syncInputSurfaceCandidate{left: 1700, top: 80, width: 180, height: 60}
+	master := syncInputSurfaceCandidate{left: 700, top: 80, width: 320, height: 680, title: "MetaMask"}
+	exact := syncInputSurfaceCandidate{left: 1700, top: 80, width: 320, height: 680, title: "MetaMask"}
+	wrongSize := syncInputSurfaceCandidate{left: 1700, top: 80, width: 180, height: 60, title: "Other"}
 
 	exactScore := popupSurfaceMatchScore(master, exact, 1700, 80)
 	wrongScore := popupSurfaceMatchScore(master, wrongSize, 1700, 80)

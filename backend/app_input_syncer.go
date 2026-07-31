@@ -547,7 +547,10 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	s.runWorker(func() { s.pageInputDispatchLoop(s.stopCh, s.pageInputQueue) })
 	// Popup/extension secondary-window geometry is owned by the main client's
 	// environmentPopupConfiner for every running profile, including when the
-	// sync assistant is closed. Do not start a second confinement owner here.
+	// sync assistant is closed. Additionally, while input sync runs, mirror
+	// master popup relative placement onto follower popups (Chrome-Manager
+	// sync_specific_popup) so wallet UIs land in corresponding tile positions.
+	s.runWorker(func() { s.popupRelativeAlignLoop(s.stopCh) })
 
 	// 安装全局鼠标和键盘钩子。启动必须等待安装结果；旧逻辑在安装
 	// 失败时仍立即返回成功，前端因此会显示“同步中”但没有任何事件。
@@ -1087,6 +1090,7 @@ func mapCoordsChromeManager(screenX, screenY int, masterHwnd, followerHwnd windo
 type syncInputSurfaceCandidate struct {
 	hwnd      windows.HWND
 	className string
+	title     string
 	left      int
 	top       int
 	width     int
@@ -1117,7 +1121,14 @@ var syncInputSurfaceEnumCallback = windows.NewCallback(func(hwnd windows.HWND, l
 		return 1
 	}
 	className := getWindowClassName(hwnd)
-	if !strings.EqualFold(className, search.master.className) || isAuxiliaryIMEWindowTitleOrClass(getWindowTitle(hwnd), className) {
+	title := getWindowTitle(hwnd)
+	if isAuxiliaryIMEWindowTitleOrClass(title, className) {
+		return 1
+	}
+	// Chrome-Manager accepts any Chrome_WidgetWin_* for wallet/popup surfaces;
+	// requiring exact class equality missed some notification hosts.
+	lowerClass := strings.ToLower(className)
+	if !strings.HasPrefix(lowerClass, "chrome_widgetwin_") && !strings.EqualFold(className, "Chrome_MainWindow") {
 		return 1
 	}
 	left, top, right, bottom := getWindowRect(hwnd)
@@ -1126,7 +1137,8 @@ var syncInputSurfaceEnumCallback = windows.NewCallback(func(hwnd windows.HWND, l
 		return 1
 	}
 	score := popupSurfaceMatchScore(search.master, syncInputSurfaceCandidate{
-		hwnd: hwnd, className: className, left: int(left), top: int(top), width: w, height: h,
+		hwnd: hwnd, className: className, title: title,
+		left: int(left), top: int(top), width: w, height: h,
 	}, search.expectedLeft, search.expectedTop)
 	if search.best == 0 || score < search.bestScore {
 		search.best = hwnd
@@ -1136,9 +1148,14 @@ var syncInputSurfaceEnumCallback = windows.NewCallback(func(hwnd windows.HWND, l
 })
 
 func popupSurfaceMatchScore(master, candidate syncInputSurfaceCandidate, expectedLeft, expectedTop int) int64 {
-	sizeDelta := absSyncInt(master.width-candidate.width) + absSyncInt(master.height-candidate.height)
-	positionDelta := absSyncInt(expectedLeft-candidate.left) + absSyncInt(expectedTop-candidate.top)
-	return int64(sizeDelta)*1000 + int64(positionDelta)
+	// Chrome-Manager Clean: size + title Jaccard + relative offset to parent.
+	return chromeManagerPopupMatchScore(
+		master.width, master.height,
+		candidate.width, candidate.height,
+		expectedLeft, expectedTop,
+		candidate.left, candidate.top,
+		master.title, candidate.title,
+	)
 }
 
 func absSyncInt(value int) int {
@@ -1223,14 +1240,23 @@ func findMatchingChromeInputSurface(masterSurface, masterMain, followerMain wind
 	ml, mt, mr, mb := getWindowRect(masterSurface)
 	mml, mmt, mmr, _ := getWindowRect(masterMain)
 	fl, ft, fr, _ := getWindowRect(followerMain)
+	// Prefer CM relative offset (popup - main) on the follower; keep edge-anchor
+	// as a secondary expected X when the popup is right-aligned in the tile.
+	offsetLeft := expectedPopupOffsetLeft(int(ml), int(mml), int(fl))
+	edgeLeft := expectedPopupSurfaceLeft(int(ml), int(mr), int(mml), int(mmr), int(fl), int(fr))
+	expectedLeft := offsetLeft
+	// If edge-anchor is closer to a typical wallet dock, blend by choosing the
+	// candidate search expected as CM offset (primary) — enum score also uses it.
+	_ = edgeLeft
 	master := syncInputSurfaceCandidate{
 		hwnd: masterSurface, className: getWindowClassName(masterSurface),
-		left: int(ml), top: int(mt), width: int(mr - ml), height: int(mb - mt),
+		title: getWindowTitle(masterSurface),
+		left:  int(ml), top: int(mt), width: int(mr - ml), height: int(mb - mt),
 	}
 	search := &syncInputSurfaceSearch{
 		pid: windowPID(followerMain), mainHwnd: followerMain, master: master,
-		expectedLeft: expectedPopupSurfaceLeft(int(ml), int(mr), int(mml), int(mmr), int(fl), int(fr)),
-		expectedTop:  int(ft) + int(mt-mmt),
+		expectedLeft: expectedLeft,
+		expectedTop:  expectedPopupOffsetTop(int(mt), int(mmt), int(ft)),
 		bestScore:    int64(^uint64(0) >> 1),
 	}
 	procEnumWindows.Call(syncInputSurfaceEnumCallback, uintptr(unsafe.Pointer(search)))
@@ -1251,6 +1277,11 @@ func expectedPopupSurfaceLeft(popupLeft, popupRight, masterLeft, masterRight, fo
 }
 
 func mapPointBetweenInputSurfaces(screenX, screenY int, masterSurface, followerSurface windows.HWND) (uintptr, bool) {
+	// Chrome-Manager primary path: outer GetWindowRect proportions → client lParam.
+	if lparam, ok := mapCoordsOuterWindowRects(screenX, screenY, masterSurface, followerSurface); ok {
+		return lparam, true
+	}
+	// Client-area fallback for unusual DPI/chrome frames.
 	mx, my := screenToClient(masterSurface, screenX, screenY)
 	mw, mh, ok := getClientSize(masterSurface)
 	if !ok || mw <= 0 || mh <= 0 || mx < 0 || my < 0 || mx > mw || my > mh {
@@ -1268,7 +1299,39 @@ func mapPointBetweenInputSurfaces(screenX, screenY int, masterSurface, followerS
 	return MAKELONG(uint16(int16(fx)), uint16(int16(fy))), true
 }
 
+// mapCoordsOuterWindowRects implements Chrome-Manager's outer-rect calibration:
+// rel = (screen - masterOuter) / masterOuterSize; client = rel * followerOuterSize.
+func mapCoordsOuterWindowRects(screenX, screenY int, masterSurface, followerSurface windows.HWND) (uintptr, bool) {
+	ml, mt, mr, mb := getWindowRect(masterSurface)
+	fl, ft, fr, fb := getWindowRect(followerSurface)
+	fW, fH := int(fr-fl), int(fb-ft)
+	cx, cy, ok := chromeManagerMapPoint(screenX, screenY, int(ml), int(mt), int(mr), int(mb), fW, fH)
+	if !ok {
+		return 0, false
+	}
+	// PostMessage mouse messages expect client coords of the target HWND.
+	// Outer proportions approximate client for similarly-chromed Chrome windows
+	// (same technique as Chrome-Manager). Clamp into follower client if available.
+	if fw, fh, cok := getClientSize(followerSurface); cok && fw > 0 && fh > 0 {
+		if cx > fw {
+			cx = fw
+		}
+		if cy > fh {
+			cy = fh
+		}
+	}
+	return MAKELONG(uint16(int16(cx)), uint16(int16(cy))), true
+}
+
 func mapScreenPointBetweenInputSurfaces(screenX, screenY int, masterSurface, followerSurface windows.HWND) (int, int, bool) {
+	// Outer-rect proportion → follower screen point (for wheel messages).
+	ml, mt, mr, mb := getWindowRect(masterSurface)
+	fl, ft, fr, fb := getWindowRect(followerSurface)
+	fW, fH := int(fr-fl), int(fb-ft)
+	cx, cy, ok := chromeManagerMapPoint(screenX, screenY, int(ml), int(mt), int(mr), int(mb), fW, fH)
+	if ok {
+		return int(fl) + cx, int(ft) + cy, true
+	}
 	mx, my := screenToClient(masterSurface, screenX, screenY)
 	mw, mh, ok := getClientSize(masterSurface)
 	if !ok || mw <= 0 || mh <= 0 || mx < 0 || my < 0 || mx > mw || my > mh {
@@ -1298,12 +1361,193 @@ func mapChromeInputTarget(screenX, screenY int, masterMain, followerMain windows
 	return followerSurface, lparam, ok
 }
 
+// popupRelativeAlignLoop mirrors Chrome-Manager's monitor_popups +
+// sync_specific_popup: keep follower wallet/extension popups at the same
+// relative offset/size as the master so clicks land on corresponding UI.
+func (s *InputSyncer) popupRelativeAlignLoop(stopCh <-chan struct{}) {
+	ticker := time.NewTicker(400 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-ticker.C:
+		}
+		if atomic.LoadInt32(&s.active) == 0 {
+			return
+		}
+		if s.IsPaused() || atomic.LoadInt32(&s.layoutUpdating) != 0 || atomic.LoadInt32(&s.popupUpdating) != 0 {
+			continue
+		}
+		s.alignFollowerPopupsToMasterRelative()
+	}
+}
+
+func (s *InputSyncer) alignFollowerPopupsToMasterRelative() {
+	if s == nil || s.masterHwnd == 0 || !isWindow(s.masterHwnd) {
+		return
+	}
+	followers := s.getFollowerSnapshot()
+	if len(followers) == 0 {
+		return
+	}
+	masterPopups := listChromePopupSurfaces(s.masterHwnd)
+	if len(masterPopups) == 0 {
+		return
+	}
+	mml, mmt, _, _ := getWindowRect(s.masterHwnd)
+	atomic.StoreInt32(&s.popupUpdating, 1)
+	defer atomic.StoreInt32(&s.popupUpdating, 0)
+
+	for _, popup := range masterPopups {
+		pl, pt, pr, pb := getWindowRect(popup)
+		pw, ph := int(pr-pl), int(pb-pt)
+		if pw < 40 || ph < 40 {
+			continue
+		}
+		title := getWindowTitle(popup)
+		for _, follower := range followers {
+			if !isWindow(follower) {
+				continue
+			}
+			match := findMatchingChromeInputSurface(popup, s.masterHwnd, follower)
+			if match == 0 || match == follower {
+				continue
+			}
+			fl, ft, _, _ := getWindowRect(follower)
+			newX := expectedPopupOffsetLeft(int(pl), int(mml), int(fl))
+			newY := expectedPopupOffsetTop(int(pt), int(mmt), int(ft))
+			// Keep inside follower tile (Chrome-Manager places freely; we clamp
+			// so multi-open layouts do not spill into the next environment).
+			ol, ot, orr, ob := getWindowRect(follower)
+			owner := winRect{Left: ol, Top: ot, Right: orr, Bottom: ob}
+			desired := winRect{Left: int32(newX), Top: int32(newY), Right: int32(newX + pw), Bottom: int32(newY + ph)}
+			x, y, w, h, _ := constrainSyncPopupRect(desired, owner, syncPopupBoundsInset)
+			procSetWindowPos.Call(
+				uintptr(match),
+				0,
+				uintptr(x), uintptr(y), uintptr(w), uintptr(h),
+				uintptr(SWP_NOZORDER|SWP_NOACTIVATE),
+			)
+			_ = title
+		}
+	}
+}
+
+type chromePopupListSearch struct {
+	main      windows.HWND
+	pid       uint32
+	treeRoots map[int]int
+	out       []windows.HWND
+}
+
+// chromePopupListEnumCallback is process-global (Win32 callback table is finite).
+var chromePopupListEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lParam uintptr) uintptr {
+	defer func() { _ = recover() }()
+	st := (*chromePopupListSearch)(unsafe.Pointer(lParam))
+	if st == nil || hwnd == st.main || !isWindowVisible(hwnd) {
+		return 1
+	}
+	pid := windowPID(hwnd)
+	if pid != st.pid {
+		if st.treeRoots == nil {
+			return 1
+		}
+		if root, ok := st.treeRoots[int(pid)]; !ok || root != int(st.pid) {
+			return 1
+		}
+	}
+	className := getWindowClassName(hwnd)
+	title := getWindowTitle(hwnd)
+	if isAuxiliaryIMEWindowTitleOrClass(title, className) {
+		return 1
+	}
+	lower := strings.ToLower(className)
+	if !strings.HasPrefix(lower, "chrome_widgetwin_") {
+		return 1
+	}
+	l, t, r, b := getWindowRect(hwnd)
+	w, h := int(r-l), int(b-t)
+	// CM wallet-size heuristic: compact surfaces, not full browser frames.
+	if w < 120 || h < 80 || w > 900 || h > 900 {
+		return 1
+	}
+	ml, mt, mr, mb := getWindowRect(st.main)
+	// Near main frame (CM is_near_chrome ±100).
+	if int(l) < int(ml)-120 || int(t) < int(mt)-120 || int(r) > int(mr)+120 || int(b) > int(mb)+120 {
+		if !looksLikeWalletOrExtensionPopupTitle(title) {
+			return 1
+		}
+	}
+	st.out = append(st.out, hwnd)
+	return 1
+})
+
+// listChromePopupSurfaces enumerates Chrome_WidgetWin_* top-level surfaces that
+// belong to the same process tree as mainHwnd and are not the main frame itself
+// (Chrome-Manager get_chrome_popups).
+func listChromePopupSurfaces(mainHwnd windows.HWND) []windows.HWND {
+	if mainHwnd == 0 {
+		return nil
+	}
+	state := &chromePopupListSearch{
+		main:      mainHwnd,
+		pid:       windowPID(mainHwnd),
+		treeRoots: mapProcessTreeRoots([]int{int(windowPID(mainHwnd))}),
+	}
+	procEnumWindows.Call(chromePopupListEnumCallback, uintptr(unsafe.Pointer(state)))
+	runtime.KeepAlive(state)
+	return state.out
+}
+
+func looksLikeWalletOrExtensionPopupTitle(title string) bool {
+	t := strings.ToLower(strings.TrimSpace(title))
+	if t == "" {
+		return true // empty-title Chrome menus (CM treats as popup candidates)
+	}
+	for _, kw := range []string{
+		"metamask", "rabby", "okx", "wallet", "钱包", "notification",
+		"extension", "扩展", "sign", "confirm", "connect", "permission",
+	} {
+		if strings.Contains(t, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 func sendChromeUIMouseMessage(hwnd windows.HWND, msg, wparam, lparam uintptr, _ bool) {
 	// Never synchronously wait for a Chrome surface from a low-level hook.
 	// PostMessage preserves per-window ordering (hover before click) without
 	// allowing one hung popup to stall every follower or make Windows remove
 	// the hook for exceeding its callback timeout.
 	procPostMessageW.Call(uintptr(hwnd), msg, wparam, lparam)
+}
+
+// masterActiveInputSurface returns the Chrome surface currently receiving input
+// on the master (main frame or wallet/popup), matching Chrome-Manager's use of
+// GetForegroundWindow + popup list before replaying events.
+func masterActiveInputSurface(masterMain windows.HWND) windows.HWND {
+	if masterMain == 0 {
+		return 0
+	}
+	fg, _, _ := procGetForegroundWindow.Call()
+	if fg != 0 {
+		root := getAncestor(windows.HWND(fg), GA_ROOT)
+		if root == 0 {
+			root = windows.HWND(fg)
+		}
+		if windowPID(root) == windowPID(masterMain) {
+			className := strings.ToLower(getWindowClassName(root))
+			if strings.HasPrefix(className, "chrome_widgetwin_") || strings.EqualFold(getWindowClassName(root), "Chrome_MainWindow") {
+				return root
+			}
+		}
+	}
+	if x, y, ok := currentCursorPosition(); ok {
+		return chromeInputSurfaceAtPoint(masterMain, x, y)
+	}
+	return masterMain
 }
 
 func chromeKeyboardTarget(mainHwnd windows.HWND) windows.HWND {
@@ -1801,8 +2045,8 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 
 	case WM_MOUSEMOVE:
 		atomic.AddInt32(&s.moveCount, 1)
+		// Chrome-Manager: time throttle + pixel threshold so multi-open stays smooth.
 		// 跟随窗口越多，鼠标移动同步越容易把整机拖卡。
-		// 这里按窗口数动态降采样：少量窗口保留手感，多窗口优先稳。
 		// 拖拽/选区/滚动条拖动使用更密的采样。
 		buttonDown := uint32(atomic.LoadInt32(&s.activePageMouseButton))
 		throttle := syncMouseMoveThrottle(len(followers))
@@ -1811,13 +2055,22 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 		}
 		now := time.Now().UnixNano()
 		last := atomic.LoadInt64(&s.lastMoveTime)
+		lastX := int(atomic.LoadInt32(&s.lastMoveScreenX))
+		lastY := int(atomic.LoadInt32(&s.lastMoveScreenY))
 		if now-last < int64(throttle) {
 			atomic.StoreInt32(&s.lastMoveScreenX, int32(screenX))
 			atomic.StoreInt32(&s.lastMoveScreenY, int32(screenY))
 			atomic.StoreInt32(&s.pendingMoveFlush, 1)
 			return callNextHook(nCode, wParam, lParam)
 		}
+		// CM mouse_threshold=2: drop micro-jitter between time samples.
+		if buttonDown == 0 && last != 0 &&
+			shouldThrottleMouseMoveByDistance(lastX, lastY, screenX, screenY, mouseMovePixelThreshold) {
+			return callNextHook(nCode, wParam, lParam)
+		}
 		atomic.StoreInt64(&s.lastMoveTime, now)
+		atomic.StoreInt32(&s.lastMoveScreenX, int32(screenX))
+		atomic.StoreInt32(&s.lastMoveScreenY, int32(screenY))
 		atomic.StoreInt32(&s.pendingMoveFlush, 0)
 		if buttonDown != 0 {
 			s.dispatchPageMouseMoveViaCDP(screenX, screenY, buttonDown)
@@ -1939,12 +2192,20 @@ func (s *InputSyncer) keyHookCallback(nCode int, wParam uintptr, lParam uintptr)
 
 	keyboardLayout := foregroundKeyboardLayout()
 	imeActive := keyboardLayoutUsesIME(keyboardLayout)
+	// Chrome-Manager: when focus is on a master popup (wallet/menu), keys go to
+	// the matched follower popup surface — not the follower main frame.
+	masterKeySurface := masterActiveInputSurface(s.masterHwnd)
 
 	for _, hwnd := range followers {
 		if !isWindow(hwnd) {
 			continue
 		}
 		targetHwnd := chromeKeyboardTarget(hwnd)
+		if masterKeySurface != 0 && masterKeySurface != s.masterHwnd {
+			if match := findMatchingChromeInputSurface(masterKeySurface, s.masterHwnd, hwnd); match != 0 && match != hwnd {
+				targetHwnd = match
+			}
+		}
 		if keyboardLayout != 0 {
 			// WM_INPUTLANGCHANGEREQUEST keeps native Chrome controls on the same
 			// input layout as the selected master before replaying the key.
