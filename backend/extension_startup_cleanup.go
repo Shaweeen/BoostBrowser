@@ -251,9 +251,12 @@ func profilePendingTabHandoff(profileId string) bool {
 }
 
 // finalizeBrowserStartupTabs is phase-1 of tab management for every environment
-// start (including stop → open again). Foundation prefs pin about:blank; this
-// closes extension auto-pages present at debug-ready on THIS port only.
-// Phase-2 (sole about:blank) runs only for profiles still pending handoff.
+// start (including stop → open again). Runs ONLY on this profile's debug port:
+//  1) close extension auto-pages (never touch service workers / storage)
+//  2) collapse to a single about:blank so the user takes over a clean shell
+// Already-running environments are never re-armed here (per-profile handoff).
+// Phase-2 (user click / open sync) only re-collapses profiles still pending;
+// work tabs opened after handoff are never managed again until that env restarts.
 func finalizeBrowserStartupTabs(debugPort int, profileId string) {
 	if debugPort <= 0 {
 		return
@@ -261,10 +264,15 @@ func finalizeBrowserStartupTabs(debugPort int, profileId string) {
 	// Only this newly started profile waits for user handoff. Do not re-arm a
 	// global latch that would later collapse every already-open work session.
 	armEnvironmentTabsUserHandoffForProfile(profileId)
-	if n := runStartupTabCleanupOnce(debugPort); n > 0 {
-		logger.New("Browser").Info("启动时已关闭扩展自动页（等待用户点击完成最终接管）",
+	closedExt := runStartupTabCleanupOnce(debugPort)
+	// Leave exactly one blank page ready for takeover. Extension SW / storage /
+	// dapp providers stay alive (we only close page targets, not backgrounds).
+	closedTabs := collapseEnvironmentTabsToSoleAboutBlank(debugPort)
+	if closedExt > 0 || closedTabs > 0 {
+		logger.New("Browser").Info("启动标签检查：扩展自动页已清理并保留唯一空白页（等待用户接管）",
 			logger.F("profile_id", profileId),
-			logger.F("closed_extension_pages", n),
+			logger.F("closed_extension_pages", closedExt),
+			logger.F("closed_extra_tabs", closedTabs),
 		)
 	}
 }

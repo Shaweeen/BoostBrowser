@@ -19,6 +19,20 @@ func TestChromeManagerMapPointProportional(t *testing.T) {
 	}
 }
 
+func TestChromeManagerMapPointAbsoluteWhenSameSize(t *testing.T) {
+	// Uniform tile cells: absolute 1:1 so scrollbar/hit targets stay pixel-true.
+	// Master 100,50-900x650 (800x600); point at 100+123, 50+456 → client 123,456.
+	cx, cy, ok := chromeManagerMapPoint(223, 506, 100, 50, 900, 650, 800, 600)
+	if !ok || cx != 123 || cy != 456 {
+		t.Fatalf("same-size absolute: ok=%v cx=%d cy=%d", ok, cx, cy)
+	}
+	// Near-equal sizes (±4) still absolute.
+	cx, cy, ok = chromeManagerMapPoint(223, 506, 100, 50, 900, 650, 802, 598)
+	if !ok || cx != 123 || cy != 456 {
+		t.Fatalf("near-same absolute: ok=%v cx=%d cy=%d", ok, cx, cy)
+	}
+}
+
 func TestTitleSimilarityJaccard(t *testing.T) {
 	if titleSimilarityJaccard("MetaMask", "MetaMask") != 1 {
 		t.Fatal("exact match")

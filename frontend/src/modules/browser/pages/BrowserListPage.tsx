@@ -647,6 +647,54 @@ export function BrowserListPage() {
     setSelectedIds(visibleSelectedIds)
   }, [selectedIds, visibleSelectedIds])
 
+  // Natural numeric order for launch + window (1,2,10 not 1,10,2).
+  const naturalCompare = useCallback((a: string, b: string): number => {
+    const re = /(\d+)|(\D+)/g
+    const partsA = a.match(re) || []
+    const partsB = b.match(re) || []
+    for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+      if (i >= partsA.length) return -1
+      if (i >= partsB.length) return 1
+      const pa = partsA[i], pb = partsB[i]
+      const na = Number(pa), nb = Number(pb)
+      if (!isNaN(na) && !isNaN(nb)) {
+        if (na !== nb) return na - nb
+      } else {
+        const cmp = pa.localeCompare(pb, 'zh-CN')
+        if (cmp !== 0) return cmp
+      }
+    }
+    return 0
+  }, [])
+
+  /** After start: tile all running envs by natural name when ≥2 windows. */
+  const arrangeRunningByNaturalOrder = useCallback(async (preferIds: string[] = []) => {
+    try {
+      const latest = await fetchBrowserProfiles()
+      const running = (latest || []).filter(p => p.running)
+      if (running.length < 2) return
+      const ids = running
+        .map(p => p.profileId)
+        .sort((idA, idB) => {
+          const pa = running.find(p => p.profileId === idA)
+          const pb = running.find(p => p.profileId === idB)
+          return naturalCompare(pa?.profileName || idA, pb?.profileName || idB)
+        })
+      // Prefer first preferId that is running as master when provided.
+      let master = ids[0]
+      for (const id of preferIds) {
+        if (ids.includes(id)) {
+          master = id
+          break
+        }
+      }
+      const { syncTileWindows } = await import('../api_sync')
+      await syncTileWindows(ids, master, 'grid')
+    } catch {
+      // Layout is best-effort.
+    }
+  }, [naturalCompare])
+
   const handleStart = async (profileId: string) => {
     const profile = profiles.find(p => p.profileId === profileId)
     updatePendingIds(setStartingIds, profileId, true)
@@ -669,6 +717,10 @@ export function BrowserListPage() {
         toast.success(`环境已启动${startedProfile?.profileName ? `：${startedProfile.profileName}` : ''}`)
       }
       await loadProfiles({ silent: true, syncRuntimeState: true })
+      // Auto natural-order tile when multiple environments are open.
+      if (startedProfile?.running || startedProfile?.pid) {
+        await arrangeRunningByNaturalOrder([profileId])
+      }
     } catch (error: any) {
       const feedback = resolveActionFeedback(error, '环境启动失败')
       if (feedback.tone === 'warning') {
@@ -778,25 +830,7 @@ export function BrowserListPage() {
   const handleBatchStart = async () => {
     const rawIds = Array.from(visibleSelectedIds)
     if (rawIds.length === 0) return
-    // Natural numeric order (1,2,10 not 1,10,2) so launch + tile follow 编号.
-    const naturalCompare = (a: string, b: string): number => {
-      const re = /(\d+)|(\D+)/g
-      const partsA = a.match(re) || []
-      const partsB = b.match(re) || []
-      for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
-        if (i >= partsA.length) return -1
-        if (i >= partsB.length) return 1
-        const pa = partsA[i], pb = partsB[i]
-        const na = Number(pa), nb = Number(pb)
-        if (!isNaN(na) && !isNaN(nb)) {
-          if (na !== nb) return na - nb
-        } else {
-          const cmp = pa.localeCompare(pb, 'zh-CN')
-          if (cmp !== 0) return cmp
-        }
-      }
-      return 0
-    }
+    // Natural numeric order so launch + tile follow 编号.
     const ids = [...rawIds].sort((idA, idB) => {
       const pa = profiles.find(p => p.profileId === idA)
       const pb = profiles.find(p => p.profileId === idB)
@@ -838,25 +872,13 @@ export function BrowserListPage() {
       }
     }
     await Promise.all(Array.from({ length: concurrency }, () => launchNext()))
-    // Re-sort by natural name: concurrent finish order may differ from start order.
-    const tileIds = [...new Set(startedOrderedIds)].sort((idA, idB) => {
-      const pa = profiles.find(p => p.profileId === idA)
-      const pb = profiles.find(p => p.profileId === idB)
-      return naturalCompare(pa?.profileName || idA, pb?.profileName || idB)
-    })
-    if (tileIds.length >= 2) {
-      try {
-        const { syncTileWindows } = await import('../api_sync')
-        await syncTileWindows(tileIds, tileIds[0], 'grid')
-      } catch {
-        // Layout is best-effort; startup success already reported.
-      }
-    }
+    // Tile ALL running windows (including already-open work envs) by natural order.
+    await arrangeRunningByNaturalOrder(startedOrderedIds)
     setBatchLoading(false)
     const summary = [`成功 ${success}`]
     if (pending > 0) summary.push(`待接管 ${pending}`)
     if (failed > 0) summary.push(`失败 ${failed}`)
-    toast.success(`批量启动完成：${summary.join('，')}${tileIds.length >= 2 ? '（已按编号顺序平铺）' : ''}`)
+    toast.success(`批量启动完成：${summary.join('，')}${startedOrderedIds.length >= 1 ? '（已按编号自然序平铺）' : ''}`)
     if (pendingMessages.length > 0) {
       const preview = pendingMessages.slice(0, 3)
       const more = pendingMessages.length > preview.length ? `\n另有 ${pendingMessages.length - preview.length} 个实例已打开窗口，仍在后台接管。` : ''

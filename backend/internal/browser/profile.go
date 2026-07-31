@@ -578,7 +578,10 @@ func samePath(a, b string) bool {
 	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
 }
 
-// ApplyDefaults 应用默认配置；返回 true 表示发生了需要持久化的变更
+// ApplyDefaults 应用默认配置；返回 true 表示发生了需要持久化的变更。
+// 启动路径会调用本函数：若实例尚无完整随机指纹（无 --fingerprint= 种子），
+// 自动生成一组独立身份并落库；之后每次启动都按已落库的 FingerprintArgs 匹配启动，
+// 不会再次随机（手动「随机指纹」除外）。
 func (m *Manager) ApplyDefaults(profile *Profile) bool {
 	log := logger.New("Browser")
 	changed := false
@@ -586,8 +589,7 @@ func (m *Manager) ApplyDefaults(profile *Profile) bool {
 		profile.FingerprintArgs = append([]string{}, m.Config.Browser.DefaultFingerprintArgs...)
 		changed = true
 	}
-	// 自动补全指纹随机种子（兼容历史实例：之前只写了 brand/platform 开关，
-	// 缺 --fingerprint=<seed>，导致所有实例 UI/DB 上看起来一样）
+	// 完整指纹种子：缺失时整组随机身份 + 种子一次写入，后续启动复用。
 	hasSeed := false
 	for _, a := range profile.FingerprintArgs {
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(a)), "--fingerprint=") {
@@ -596,11 +598,23 @@ func (m *Manager) ApplyDefaults(profile *Profile) bool {
 		}
 	}
 	if !hasSeed {
+		// 保留未识别的自定义开关，重建基础身份（与 RandomizeFingerprint 一致）。
+		rest := StripIdentityArgs(profile.FingerprintArgs)
+		platform := PlatformFromArgs(profile.FingerprintArgs)
+		if platform == "" {
+			platform = "windows"
+		}
+		rest = append(rest, RandomFingerprintIdentityForPlatform(platform)...)
 		seed := fmt.Sprintf("--fingerprint=%d", rand.Int31n(2147483647)+1)
-		profile.FingerprintArgs = append(profile.FingerprintArgs, seed)
+		rest = append(rest, seed)
+		profile.FingerprintArgs = rest
 		changed = true
-		log.Debug("自动生成指纹种子", logger.F("profile_id", profile.ProfileId), logger.F("seed", seed))
+		log.Info("启动前自动生成并落库随机指纹（后续按此指纹匹配启动）",
+			logger.F("profile_id", profile.ProfileId),
+			logger.F("seed", seed),
+		)
 	}
+	// 已有种子时仅补缺失的版本字段，不改动已绑定的身份。
 	if !HasArgPrefix(profile.FingerprintArgs, "--fingerprint-brand-version=") {
 		profile.FingerprintArgs = append(profile.FingerprintArgs, RandomBrandVersionArg())
 		changed = true

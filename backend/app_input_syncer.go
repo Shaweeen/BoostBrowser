@@ -4,6 +4,7 @@ package backend
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"runtime"
@@ -1536,28 +1537,47 @@ func mapCoordsViaClientArea(screenX, screenY int, masterHwnd, followerHwnd windo
 		return 0, false
 	}
 
-	relX := float64(mClientX) / float64(mW)
-	relY := float64(mClientY) / float64(mH)
-	if relX < 0 {
-		relX = 0
-	}
-	if relX > 1 {
-		relX = 1
-	}
-	if relY < 0 {
-		relY = 0
-	}
-	if relY > 1 {
-		relY = 1
-	}
-
 	fW, fH, ok := getClientSize(followerHwnd)
 	if !ok || fW <= 0 || fH <= 0 || fW > 10000 || fH > 10000 {
 		return 0, false
 	}
 
-	clientX := int(float64(fW) * relX)
-	clientY := int(float64(fH) * relY)
+	var clientX, clientY int
+	// Uniform tiles / equal client sizes: 1:1 absolute pixels for scrollbar,
+	// IME caret, and in-page hit targets (including extension popups mapped
+	// through the main surface).
+	if absCalibInt(mW-fW) <= sameSizePixelTolerance && absCalibInt(mH-fH) <= sameSizePixelTolerance {
+		clientX, clientY = mClientX, mClientY
+	} else {
+		relX := float64(mClientX) / float64(mW)
+		relY := float64(mClientY) / float64(mH)
+		if relX < 0 {
+			relX = 0
+		}
+		if relX > 1 {
+			relX = 1
+		}
+		if relY < 0 {
+			relY = 0
+		}
+		if relY > 1 {
+			relY = 1
+		}
+		clientX = int(math.Round(float64(fW) * relX))
+		clientY = int(math.Round(float64(fH) * relY))
+	}
+	if clientX < 0 {
+		clientX = 0
+	}
+	if clientY < 0 {
+		clientY = 0
+	}
+	if clientX > fW {
+		clientX = fW
+	}
+	if clientY > fH {
+		clientY = fH
+	}
 	if clientX < -32768 || clientX > 32767 || clientY < -32768 || clientY > 32767 {
 		return 0, false
 	}

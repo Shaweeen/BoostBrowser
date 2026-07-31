@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { AlertTriangle, FileDown, KeyRound, PackagePlus, Puzzle, Search, ShieldCheck, Trash2, UploadCloud, Wallet } from 'lucide-react'
 import { Button, Card, ConfirmModal, FormItem, Input, Modal, Select, Textarea, toast } from '../../../shared/components'
 import { EventsOn } from '../../../wailsjs/runtime/runtime'
@@ -81,9 +81,18 @@ function extensionIcon(name: string) {
   ]
   const idx = Math.abs(name.split('').reduce((acc, ch) => acc + ch.charCodeAt(0), 0)) % palettes.length
   return (
-    <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${palettes[idx]} text-white flex items-center justify-center font-bold shadow-sm`}>
+    <div className={`w-7 h-7 shrink-0 rounded-lg bg-gradient-to-br ${palettes[idx]} text-white flex items-center justify-center text-xs font-bold shadow-sm`}>
       {text}
     </div>
+  )
+}
+
+/** Compact horizontal badge for counts / platform — never vertical writing-mode. */
+function InlineMeta({ children, className = '' }: { children: ReactNode; className?: string }) {
+  return (
+    <span className={`inline-flex items-center gap-1 whitespace-nowrap text-[11px] leading-none ${className}`}>
+      {children}
+    </span>
   )
 }
 
@@ -471,30 +480,30 @@ export function ExtensionManagementPage() {
   const modalTitle = currentId ? '配置扩展' : '上传扩展'
 
   return (
-    <div className="flex flex-col h-full bg-[var(--color-bg-layout)]">
-      <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
-        <div className="flex items-center gap-3">
-          <Puzzle className="w-5 h-5 text-[var(--color-accent)]" />
-          <div>
-            <h1 className="text-lg font-semibold text-[var(--color-text-primary)]">扩展管理</h1>
-            <p className="text-xs text-[var(--color-text-muted)] mt-0.5">仅添加你信任的扩展，并分配到指定浏览器实例</p>
+    <div className="flex flex-col h-full bg-[var(--color-bg-layout)] text-[13px]">
+      <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
+        <div className="flex items-center gap-2 min-w-0">
+          <Puzzle className="w-4 h-4 shrink-0 text-[var(--color-accent)]" />
+          <div className="min-w-0 flex items-baseline gap-2 flex-wrap">
+            <h1 className="text-sm font-semibold text-[var(--color-text-primary)] whitespace-nowrap">扩展管理</h1>
+            <p className="text-[11px] text-[var(--color-text-muted)] whitespace-nowrap">配置 · 分配 · 移除 · 横向紧凑布局</p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="secondary" onClick={openRabbyImport}><Wallet className="w-4 h-4" />钱包批量导入</Button>
-          <Button onClick={openUpload}><UploadCloud className="w-4 h-4" />上传扩展</Button>
-          <Button variant="secondary" onClick={() => toast.info('扩展中心入口已预留，可继续接入在线扩展市场')}><PackagePlus className="w-4 h-4" />扩展中心</Button>
+        <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+          <Button size="sm" variant="secondary" onClick={openRabbyImport}><Wallet className="w-3.5 h-3.5" />钱包导入</Button>
+          <Button size="sm" onClick={openUpload}><UploadCloud className="w-3.5 h-3.5" />上传</Button>
+          <Button size="sm" variant="secondary" onClick={() => toast.info('扩展中心入口已预留，可继续接入在线扩展市场')}><PackagePlus className="w-3.5 h-3.5" />中心</Button>
         </div>
       </div>
 
-      <div className="px-6 py-3 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 text-sm border-b border-[var(--color-border-default)]">
-        安全提示：扩展可读取网页内容、剪贴板或钱包页面数据。只安装来自可信来源的扩展；已启动实例需要重启后生效。
+      <div className="px-4 py-1.5 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 text-[11px] border-b border-[var(--color-border-default)] leading-snug">
+        安全提示：只安装可信来源扩展；分配后需重启已开环境。关闭启动自动页不会卸载扩展或清空 storage / dapp 响应。
       </div>
 
-      <div className="p-6 space-y-4 overflow-auto">
+      <div className="p-3 space-y-2 overflow-auto">
         <Card padding="none" className="shadow-sm">
-          <div className="flex items-center justify-between gap-4 px-5 py-4 border-b border-[var(--color-border-muted)]">
-            <div className="flex items-center gap-2">
+          <div className="flex items-center justify-between gap-3 px-3 py-2 border-b border-[var(--color-border-muted)] flex-wrap">
+            <div className="flex items-center gap-1 flex-wrap">
               {[
                 { key: 'all', label: '全部' },
                 { key: 'google', label: 'Google' },
@@ -503,7 +512,7 @@ export function ExtensionManagementPage() {
                 <button
                   key={tab.key}
                   onClick={() => setActivePlatform(tab.key as any)}
-                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                  className={`px-2.5 py-1 rounded-md text-[12px] font-medium whitespace-nowrap transition-colors ${
                     activePlatform === tab.key
                       ? 'bg-[var(--color-accent)] text-[var(--color-text-inverse)]'
                       : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-accent-muted)]'
@@ -513,66 +522,78 @@ export function ExtensionManagementPage() {
                 </button>
               ))}
             </div>
-            <div className="relative w-72">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--color-text-muted)]" />
-              <Input value={keyword} onChange={e => setKeyword(e.target.value)} placeholder="请输入扩展名称" className="pl-9" />
+            <div className="relative w-56 max-w-full">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[var(--color-text-muted)]" />
+              <Input value={keyword} onChange={e => setKeyword(e.target.value)} placeholder="搜索扩展名称" className="pl-8 h-8 text-[12px]" />
             </div>
           </div>
 
-          <table className="w-full">
+          <div className="overflow-x-auto">
+          <table className="w-full min-w-[720px] table-fixed">
             <thead className="bg-[var(--color-bg-muted)] border-b border-[var(--color-border-muted)]">
-              <tr className="text-left text-xs font-semibold text-[var(--color-text-muted)]">
-                <th className="px-5 py-3">扩展</th>
-                <th className="px-5 py-3 w-48">开发者</th>
-                <th className="px-5 py-3 w-36">分配方式</th>
-                <th className="px-5 py-3 w-32">平台</th>
-                <th className="px-5 py-3 w-48 text-right">操作</th>
+              <tr className="text-left text-[11px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wide">
+                <th className="px-3 py-2 w-[32%]">扩展</th>
+                <th className="px-3 py-2 w-[16%]">开发者</th>
+                <th className="px-3 py-2 w-[14%]">分配</th>
+                <th className="px-3 py-2 w-[10%]">平台</th>
+                <th className="px-3 py-2 w-[12%]">规模</th>
+                <th className="px-3 py-2 w-[16%] text-right">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--color-border-muted)]">
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-5 py-14 text-center text-sm text-[var(--color-text-muted)]">暂无扩展</td>
+                  <td colSpan={6} className="px-3 py-10 text-center text-[12px] text-[var(--color-text-muted)]">暂无扩展</td>
                 </tr>
               ) : filtered.map(item => {
                 const count = item.distributionMode === 'global'
                   ? (appliedGlobalProfiles.get(extensionAddressKey(item.downloadAddress))?.size || 0)
                   : item.profileIds.length
+                const envTotal = profiles.length
                 return (
                   <tr key={item.id} className="hover:bg-[var(--color-bg-hover)] transition-colors">
-                    <td className="px-5 py-4">
-                      <div className="flex items-center gap-3">
+                    <td className="px-3 py-2">
+                      <div className="flex items-center gap-2 min-w-0">
                         {extensionIcon(item.name)}
-                        <div className="min-w-0">
-                          <div className="font-medium text-[var(--color-text-primary)] truncate">{item.name}</div>
-                          <div className="text-xs text-[var(--color-text-muted)] truncate max-w-xl">{item.description}</div>
+                        <div className="min-w-0 flex flex-col gap-0.5">
+                          <div className="text-[12px] font-medium text-[var(--color-text-primary)] truncate leading-tight">{item.name}</div>
+                          <div className="text-[11px] text-[var(--color-text-muted)] truncate leading-tight">{item.description || '—'}</div>
                         </div>
                       </div>
                     </td>
-                    <td className="px-5 py-4 text-sm text-[var(--color-text-secondary)]">{item.developer}</td>
-                    <td className="px-5 py-4">
-                      <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${
+                    <td className="px-3 py-2 text-[12px] text-[var(--color-text-secondary)] truncate whitespace-nowrap">{item.developer || '—'}</td>
+                    <td className="px-3 py-2">
+                      <InlineMeta className={`rounded-full px-2 py-0.5 font-medium ${
                         item.distributionMode === 'global'
                           ? 'bg-green-50 text-green-700 dark:bg-green-900/30 dark:text-green-300'
                           : 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
                       }`}>
-                        {modeLabel[item.distributionMode]}{count > 0 ? ` · ${count}` : item.distributionMode === 'global' ? ' · 待同步' : ''}
-                      </span>
+                        {modeLabel[item.distributionMode]}
+                        {count > 0 ? ` · ${count}` : item.distributionMode === 'global' ? ' · 待同步' : ''}
+                      </InlineMeta>
                     </td>
-                    <td className="px-5 py-4 text-sm text-[var(--color-text-secondary)]">{platformLabel[item.platform]}</td>
-                    <td className="px-5 py-4">
-                      <div className="flex items-center justify-end gap-2">
-                        <Button size="sm" variant="secondary" onClick={() => openConfig(item)}>配置</Button>
-                        <Button size="sm" onClick={() => distributeExtension(item)} disabled={submitting}>分配</Button>
+                    <td className="px-3 py-2 text-[12px] text-[var(--color-text-secondary)] whitespace-nowrap">{platformLabel[item.platform]}</td>
+                    <td className="px-3 py-2">
+                      <InlineMeta className="text-[var(--color-text-muted)]">
+                        <span className="font-medium text-[var(--color-text-secondary)]">{count}</span>
+                        <span>/</span>
+                        <span>{envTotal}</span>
+                        <span>环境</span>
+                      </InlineMeta>
+                    </td>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center justify-end gap-1 flex-nowrap">
+                        <Button size="sm" variant="secondary" onClick={() => openConfig(item)} className="!px-2 !h-7 text-[11px]">配置</Button>
+                        <Button size="sm" onClick={() => distributeExtension(item)} disabled={submitting} className="!px-2 !h-7 text-[11px]">分配</Button>
                         <Button
                           size="sm"
                           variant="secondary"
                           onClick={() => requestRemoveExtension(item)}
                           disabled={submitting}
                           title="移除扩展（需二次确认）"
-                          className="text-red-600 border-red-200 hover:bg-red-50 hover:border-red-300 dark:text-red-400 dark:border-red-900/50 dark:hover:bg-red-950/40"
+                          className="!px-2 !h-7 text-[11px] text-red-600 border-red-200 hover:bg-red-50 hover:border-red-300 dark:text-red-400 dark:border-red-900/50 dark:hover:bg-red-950/40"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          <Trash2 className="w-3 h-3" />
                           移除
                         </Button>
                       </div>
@@ -582,6 +603,7 @@ export function ExtensionManagementPage() {
               })}
             </tbody>
           </table>
+          </div>
         </Card>
       </div>
 
@@ -589,7 +611,7 @@ export function ExtensionManagementPage() {
         open={uploadOpen || configOpen}
         onClose={() => { if (!submitting) { setUploadOpen(false); setConfigOpen(false) } }}
         title={modalTitle}
-        width="760px"
+        width="680px"
         footer={
           <>
             <Button variant="secondary" onClick={() => { setUploadOpen(false); setConfigOpen(false) }} disabled={submitting}>取消</Button>

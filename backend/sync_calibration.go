@@ -13,9 +13,14 @@ import (
 //  2. Match extension/wallet popups by size + title Jaccard + relative offset to parent.
 //  3. Throttle mouse moves by time AND pixel distance so multi-window stays smooth.
 
+// sameSizePixelTolerance: uniform tile cells (and same-size stack) should map
+// 1:1 absolute so scrollbars / IME carets / hit targets stay pixel-true.
+const sameSizePixelTolerance = 4
+
 // chromeManagerMapPoint maps a screen point from a master surface outer rect
-// into client coordinates of a follower surface of size (fW,fH), using the same
-// proportional calibration as Chrome-Manager's on_mouse_event.
+// into client coordinates of a follower surface of size (fW,fH).
+// When master and follower sizes match (within tolerance), use absolute pixel
+// offsets — Chrome-Manager proportional only when sizes differ.
 func chromeManagerMapPoint(screenX, screenY, mLeft, mTop, mRight, mBottom, fW, fH int) (clientX, clientY int, ok bool) {
 	mW := mRight - mLeft
 	mH := mBottom - mTop
@@ -26,22 +31,31 @@ func chromeManagerMapPoint(screenX, screenY, mLeft, mTop, mRight, mBottom, fW, f
 	if screenX < mLeft-2 || screenX > mRight+2 || screenY < mTop-2 || screenY > mBottom+2 {
 		return 0, 0, false
 	}
-	relX := float64(screenX-mLeft) / float64(mW)
-	relY := float64(screenY-mTop) / float64(mH)
-	if relX < 0 {
-		relX = 0
+
+	// Same-size windows: absolute client offset (master origin → follower).
+	// Proportional rounding was the main source of scrollbar/dapp click drift
+	// under uniform tile grids.
+	if absCalibInt(mW-fW) <= sameSizePixelTolerance && absCalibInt(mH-fH) <= sameSizePixelTolerance {
+		clientX = screenX - mLeft
+		clientY = screenY - mTop
+	} else {
+		relX := float64(screenX-mLeft) / float64(mW)
+		relY := float64(screenY-mTop) / float64(mH)
+		if relX < 0 {
+			relX = 0
+		}
+		if relX > 1 {
+			relX = 1
+		}
+		if relY < 0 {
+			relY = 0
+		}
+		if relY > 1 {
+			relY = 1
+		}
+		clientX = int(math.Round(float64(fW) * relX))
+		clientY = int(math.Round(float64(fH) * relY))
 	}
-	if relX > 1 {
-		relX = 1
-	}
-	if relY < 0 {
-		relY = 0
-	}
-	if relY > 1 {
-		relY = 1
-	}
-	clientX = int(math.Round(float64(fW) * relX))
-	clientY = int(math.Round(float64(fH) * relY))
 	if clientX < 0 {
 		clientX = 0
 	}
