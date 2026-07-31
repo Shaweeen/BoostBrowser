@@ -142,7 +142,7 @@ export function WindowSyncPage() {
     setSelectedIds(new Set())
     setMasterId(null)
     setSyncStatus(null)
-    setDelayPreset(null)
+    setDelayPreset('off')
     setFilterMode('all')
     setFilterOpen(false)
     setRefreshing(false)
