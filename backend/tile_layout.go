@@ -5,14 +5,18 @@ type tileLayoutRect struct {
 	X, Y, W, H int
 }
 
-// computeGaplessTileRects places n windows into a cols×rows grid covering the
-// work area with no leftover strip. Adjacent cells share an internal overlap so
-// Chrome/DWM non-client borders do not leave a visible seam. Outer edges bleed
-// past the work area to cover edge shadows. Incomplete last rows stretch so the
-// remaining windows still fill full work-area width.
+// computeGaplessTileRects places n windows into a cols×rows grid with **uniform
+// cell sizes**. Every environment gets the same outer width/height so input-sync
+// proportional calibration stays accurate.
 //
-// frameOverlapPx: how far adjacent windows overlap each other (typically 7–12).
-// outerBleedPx: how far outer edges extend past the work area (typically 8).
+// Incomplete last rows intentionally leave empty cells empty — they must NOT be
+// stretched to fill the work area (that made the last window wider and broke
+// multi-env coordinate alignment).
+//
+// frameOverlapPx: equal inset/outset applied to every cell edge so adjacent
+// frames overlap without changing relative size equality.
+// outerBleedPx: unused for size differentiation; kept for API compatibility and
+// applied uniformly as additional equal margin (max with frameOverlap).
 func computeGaplessTileRects(n, cols, rows, originX, originY, screenW, screenH, frameOverlapPx, outerBleedPx int) []tileLayoutRect {
 	if n <= 0 || cols <= 0 || rows <= 0 || screenW <= 0 || screenH <= 0 {
 		return nil
@@ -23,49 +27,49 @@ func computeGaplessTileRects(n, cols, rows, originX, originY, screenW, screenH, 
 	if outerBleedPx < 0 {
 		outerBleedPx = 0
 	}
-	// Cap so tiny cells (many environments) still keep usable content area.
-	maxOverlap := screenW / (cols * 3)
-	if maxOverlap < 1 {
-		maxOverlap = 1
+	// Uniform edge expand: same for every window so W/H stay identical.
+	// Use the larger of frame overlap and outer bleed as a single equal margin.
+	margin := frameOverlapPx
+	if outerBleedPx > margin {
+		margin = outerBleedPx
 	}
-	if frameOverlapPx > maxOverlap {
-		frameOverlapPx = maxOverlap
+	// Cap so tiny cells still keep usable content.
+	maxMargin := screenW / (cols * 3)
+	if maxMargin < 1 {
+		maxMargin = 1
 	}
-	maxOverlapH := screenH / (rows * 3)
-	if maxOverlapH < 1 {
-		maxOverlapH = 1
+	if margin > maxMargin {
+		margin = maxMargin
 	}
-	overlapY := frameOverlapPx
-	if overlapY > maxOverlapH {
-		overlapY = maxOverlapH
+	maxMarginH := screenH / (rows * 3)
+	if maxMarginH < 1 {
+		maxMarginH = 1
 	}
-	overlapX := frameOverlapPx
+	marginY := margin
+	if marginY > maxMarginH {
+		marginY = maxMarginH
+	}
+	marginX := margin
 
-	colWidths := make([]int, cols)
-	rowHeights := make([]int, rows)
-	baseW, remW := screenW/cols, screenW%cols
-	baseH, remH := screenH/rows, screenH%rows
-	for c := 0; c < cols; c++ {
-		colWidths[c] = baseW
-		if c < remW {
-			colWidths[c]++
-		}
+	// Integer floor: leftover strip at right/bottom is fine. Do not give remainder
+	// pixels to early columns — that made col0 one pixel wider than colN-1.
+	cellW := screenW / cols
+	cellH := screenH / rows
+	if cellW < 1 {
+		cellW = 1
 	}
-	for r := 0; r < rows; r++ {
-		rowHeights[r] = baseH
-		if r < remH {
-			rowHeights[r]++
-		}
+	if cellH < 1 {
+		cellH = 1
 	}
-	colX := make([]int, cols)
-	rowY := make([]int, rows)
-	colX[0] = originX
-	for c := 1; c < cols; c++ {
-		colX[c] = colX[c-1] + colWidths[c-1]
+
+	// Every window shares the same outer size (cell + equal margin on all sides).
+	winW := cellW + 2*marginX
+	winH := cellH + 2*marginY
+	if winW < 1 {
+		winW = 1
 	}
-	rowY[0] = originY
-	for r := 1; r < rows; r++ {
-		rowY[r] = rowY[r-1] + rowHeights[r-1]
+	if winH < 1 {
+		winH = 1
 	}
 
 	out := make([]tileLayoutRect, 0, n)
@@ -75,80 +79,10 @@ func computeGaplessTileRects(n, cols, rows, originX, originY, screenW, screenH, 
 		if row >= rows {
 			break
 		}
-
-		// Last incomplete row: stretch remaining windows across full width so
-		// the empty trailing cell does not look like a large gap.
-		rowStart := row * cols
-		rowCount := cols
-		if rowStart+rowCount > n {
-			rowCount = n - rowStart
-		}
-		useStretchedRow := rowCount > 0 && rowCount < cols
-		var left, top, right, bottom int
-		if useStretchedRow {
-			// Redistribute this row's width among the windows that exist.
-			stretchW := make([]int, rowCount)
-			baseSW, remSW := screenW/rowCount, screenW%rowCount
-			for c := 0; c < rowCount; c++ {
-				stretchW[c] = baseSW
-				if c < remSW {
-					stretchW[c]++
-				}
-			}
-			stretchX := originX
-			for c := 0; c < col; c++ {
-				stretchX += stretchW[c]
-			}
-			left = stretchX
-			right = left + stretchW[col]
-			// Horizontal neighbors within the stretched row.
-			if col > 0 {
-				left -= overlapX
-			} else {
-				left -= outerBleedPx
-			}
-			if col+1 < rowCount {
-				right += overlapX
-			} else {
-				right += outerBleedPx
-			}
-		} else {
-			left = colX[col]
-			right = left + colWidths[col]
-			if col > 0 {
-				left -= overlapX
-			} else {
-				left -= outerBleedPx
-			}
-			if col+1 < cols {
-				right += overlapX
-			} else {
-				right += outerBleedPx
-			}
-		}
-
-		top = rowY[row]
-		bottom = top + rowHeights[row]
-		if row > 0 {
-			top -= overlapY
-		} else {
-			top -= outerBleedPx
-		}
-		if row+1 < rows {
-			bottom += overlapY
-		} else {
-			bottom += outerBleedPx
-		}
-
-		w := right - left
-		h := bottom - top
-		if w < 1 {
-			w = 1
-		}
-		if h < 1 {
-			h = 1
-		}
-		out = append(out, tileLayoutRect{X: left, Y: top, W: w, H: h})
+		// Cell origin; margin expands equally so neighbors share an overlap band.
+		x := originX + col*cellW - marginX
+		y := originY + row*cellH - marginY
+		out = append(out, tileLayoutRect{X: x, Y: y, W: winW, H: winH})
 	}
 	return out
 }
