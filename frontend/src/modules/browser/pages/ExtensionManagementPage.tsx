@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, FileDown, KeyRound, MoreHorizontal, PackagePlus, Puzzle, Search, ShieldCheck, UploadCloud, Wallet, X } from 'lucide-react'
-import { Button, Card, FormItem, Input, Modal, Select, Textarea, toast } from '../../../shared/components'
+import { AlertTriangle, FileDown, KeyRound, PackagePlus, Puzzle, Search, ShieldCheck, Trash2, UploadCloud, Wallet } from 'lucide-react'
+import { Button, Card, ConfirmModal, FormItem, Input, Modal, Select, Textarea, toast } from '../../../shared/components'
 import { EventsOn } from '../../../wailsjs/runtime/runtime'
 import {
   cancelWalletImport,
@@ -129,6 +129,8 @@ export function ExtensionManagementPage() {
   const [rabbyResult, setRabbyResult] = useState<WalletImportResult | null>(null)
   const [currentId, setCurrentId] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  /** Pending remove target — requires ConfirmModal before real remove. */
+  const [removeConfirmItem, setRemoveConfirmItem] = useState<ManagedExtension | null>(null)
   const initializedRef = useRef(false)
   const [form, setForm] = useState({
     name: '',
@@ -325,7 +327,15 @@ export function ExtensionManagementPage() {
     }
   }
 
-  const removeExtension = async (item: ManagedExtension) => {
+  const requestRemoveExtension = (item: ManagedExtension) => {
+    if (submitting) return
+    setRemoveConfirmItem(item)
+  }
+
+  const confirmRemoveExtension = async () => {
+    const item = removeConfirmItem
+    if (!item) return
+    setRemoveConfirmItem(null)
     const targetIds = item.distributionMode === 'global'
       ? profiles.map(profile => profile.profileId)
       : item.profileIds
@@ -554,9 +564,17 @@ export function ExtensionManagementPage() {
                       <div className="flex items-center justify-end gap-2">
                         <Button size="sm" variant="secondary" onClick={() => openConfig(item)}>配置</Button>
                         <Button size="sm" onClick={() => distributeExtension(item)} disabled={submitting}>分配</Button>
-                        <button onClick={() => removeExtension(item)} className="p-2 rounded-lg text-[var(--color-text-muted)] hover:bg-red-50 hover:text-red-600" title="移除" disabled={submitting}>
-                          <MoreHorizontal className="w-4 h-4" />
-                        </button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => requestRemoveExtension(item)}
+                          disabled={submitting}
+                          title="移除扩展（需二次确认）"
+                          className="text-red-600 border-red-200 hover:bg-red-50 hover:border-red-300 dark:text-red-400 dark:border-red-900/50 dark:hover:bg-red-950/40"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          移除
+                        </Button>
                       </div>
                     </td>
                   </tr>
@@ -664,13 +682,48 @@ export function ExtensionManagementPage() {
           {currentExtension && (
             <div className="flex items-center justify-between rounded-lg bg-[var(--color-bg-muted)] px-3 py-2 text-xs text-[var(--color-text-muted)]">
               <span>上次更新：{new Date(currentExtension.updatedAt).toLocaleString()}</span>
-              <button onClick={() => removeExtension(currentExtension)} className="inline-flex items-center gap-1 text-red-500 hover:text-red-600" disabled={submitting}>
-                <X className="w-3 h-3" />移除扩展
-              </button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => requestRemoveExtension(currentExtension)}
+                disabled={submitting}
+                className="text-red-600 border-red-200 hover:bg-red-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                移除扩展
+              </Button>
             </div>
           )}
         </div>
       </Modal>
+
+      <ConfirmModal
+        open={!!removeConfirmItem}
+        onClose={() => setRemoveConfirmItem(null)}
+        onConfirm={() => { void confirmRemoveExtension() }}
+        title="确认移除扩展"
+        content={
+          removeConfirmItem ? (
+            <div className="space-y-2 text-sm">
+              <p>
+                确定要移除扩展「
+                <span className="font-medium text-[var(--color-text-primary)]">{removeConfirmItem.name}</span>
+                」吗？
+              </p>
+              <p className="text-xs text-[var(--color-text-muted)]">
+                {removeConfirmItem.distributionMode === 'global'
+                  ? '全局扩展将从策略中移除，并尝试从当前环境解绑；已启动的浏览器需重启后完全生效。'
+                  : '将从已分配环境解绑该扩展，并从管理列表删除。此操作不可撤销。'}
+              </p>
+            </div>
+          ) : (
+            '确定要移除该扩展吗？'
+          )
+        }
+        confirmText="确认移除"
+        cancelText="取消"
+        danger
+      />
 
       <Modal
         open={rabbyOpen}
