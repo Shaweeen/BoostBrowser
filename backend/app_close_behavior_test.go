@@ -97,7 +97,7 @@ func TestSyncPanelShutdownNeverStopsSharedBrowserRuntimes(t *testing.T) {
 
 func TestSyncPanelNeverRunsTabHandoffCollapse(t *testing.T) {
 	// Prevent panel process from racing main's Target.closeTarget handoff.
-	environmentTabsUserHandoffDone.Store(false)
+	armEnvironmentTabsUserHandoffForProfile("env-a")
 	app := NewApp(t.TempDir(), true)
 	if !app.panelMode {
 		t.Fatal("expected panel-mode app")
@@ -109,7 +109,39 @@ func TestSyncPanelNeverRunsTabHandoffCollapse(t *testing.T) {
 	if result["reason"] != "panel_never_owns_tab_handoff" {
 		t.Fatalf("unexpected skip reason: %#v", result)
 	}
-	if environmentTabsUserHandoffDone.Load() {
-		t.Fatal("panel skip must not consume the main-process handoff latch")
+	if !profilePendingTabHandoff("env-a") {
+		t.Fatal("panel skip must not consume pending handoff for main process")
+	}
+	clearEnvironmentTabsUserHandoffForProfile("env-a")
+}
+
+func TestTabHandoffIsPerProfileNotGlobal(t *testing.T) {
+	// Working env A already handed off; starting env B must not re-arm A.
+	clearEnvironmentTabsUserHandoffForProfile("work-a")
+	clearEnvironmentTabsUserHandoffForProfile("new-b")
+	// Simulate A finished handoff (not pending).
+	if profilePendingTabHandoff("work-a") {
+		t.Fatal("work-a should not be pending")
+	}
+	armEnvironmentTabsUserHandoffForProfile("new-b")
+	if profilePendingTabHandoff("work-a") {
+		t.Fatal("arming new-b must not mark work-a pending")
+	}
+	if !profilePendingTabHandoff("new-b") {
+		t.Fatal("new-b must be pending handoff")
+	}
+	// take only pending
+	ids := takePendingTabHandoffProfiles()
+	if len(ids) != 1 || ids[0] != "new-b" {
+		t.Fatalf("handoff must only target new-b, got %v", ids)
+	}
+	if pendingTabHandoffCount() != 0 {
+		t.Fatal("pending set must be empty after take")
+	}
+	// Second finalize is a no-op (no pending).
+	app := NewApp(t.TempDir(), false)
+	result := app.FinalizeEnvironmentTabsForUserHandoff()
+	if result["skipped"] != true {
+		t.Fatalf("empty pending must skip: %#v", result)
 	}
 }

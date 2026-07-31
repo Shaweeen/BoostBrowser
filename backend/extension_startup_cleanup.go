@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 )
 
@@ -187,26 +187,80 @@ const (
 	startupPageCloseTargetTimeout = 800 * time.Millisecond
 )
 
-// environmentTabsUserHandoffDone is set after the user-triggered final tab
-// check. While true, no further tab management runs until new environments start.
-var environmentTabsUserHandoffDone atomic.Bool
+// pendingTabHandoffProfiles holds environments that still need the one-shot
+// user-handoff collapse (sole about:blank). Keyed by profile ID so starting a
+// *new* environment never re-arms collapse for already-working environments.
+var (
+	pendingTabHandoffMu       sync.Mutex
+	pendingTabHandoffProfiles = map[string]struct{}{}
+)
 
-// armEnvironmentTabsUserHandoff re-enables the one final user-triggered tab
-// check after new environments are started.
-func armEnvironmentTabsUserHandoff() {
-	environmentTabsUserHandoffDone.Store(false)
+// armEnvironmentTabsUserHandoffForProfile marks only this profile for the next
+// user-handoff click. Other running environments keep their open work tabs.
+func armEnvironmentTabsUserHandoffForProfile(profileId string) {
+	profileId = strings.TrimSpace(profileId)
+	if profileId == "" {
+		return
+	}
+	pendingTabHandoffMu.Lock()
+	pendingTabHandoffProfiles[profileId] = struct{}{}
+	pendingTabHandoffMu.Unlock()
+}
+
+// clearEnvironmentTabsUserHandoffForProfile drops handoff state when an
+// environment stops (next start re-arms that profile only).
+func clearEnvironmentTabsUserHandoffForProfile(profileId string) {
+	profileId = strings.TrimSpace(profileId)
+	if profileId == "" {
+		return
+	}
+	pendingTabHandoffMu.Lock()
+	delete(pendingTabHandoffProfiles, profileId)
+	pendingTabHandoffMu.Unlock()
+}
+
+func takePendingTabHandoffProfiles() []string {
+	pendingTabHandoffMu.Lock()
+	defer pendingTabHandoffMu.Unlock()
+	if len(pendingTabHandoffProfiles) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(pendingTabHandoffProfiles))
+	for id := range pendingTabHandoffProfiles {
+		ids = append(ids, id)
+	}
+	pendingTabHandoffProfiles = make(map[string]struct{})
+	return ids
+}
+
+func pendingTabHandoffCount() int {
+	pendingTabHandoffMu.Lock()
+	defer pendingTabHandoffMu.Unlock()
+	return len(pendingTabHandoffProfiles)
+}
+
+func profilePendingTabHandoff(profileId string) bool {
+	profileId = strings.TrimSpace(profileId)
+	if profileId == "" {
+		return false
+	}
+	pendingTabHandoffMu.Lock()
+	defer pendingTabHandoffMu.Unlock()
+	_, ok := pendingTabHandoffProfiles[profileId]
+	return ok
 }
 
 // finalizeBrowserStartupTabs is phase-1 of tab management for every environment
 // start (including stop → open again). Foundation prefs pin about:blank; this
-// closes extension auto-pages present at debug-ready. Phase-2 (sole about:blank
-// + permanent user control) is FinalizeEnvironmentTabsForUserHandoff on user click.
+// closes extension auto-pages present at debug-ready on THIS port only.
+// Phase-2 (sole about:blank) runs only for profiles still pending handoff.
 func finalizeBrowserStartupTabs(debugPort int, profileId string) {
 	if debugPort <= 0 {
 		return
 	}
-	// Every start re-arms handoff so stop→restart runs the full cycle again.
-	armEnvironmentTabsUserHandoff()
+	// Only this newly started profile waits for user handoff. Do not re-arm a
+	// global latch that would later collapse every already-open work session.
+	armEnvironmentTabsUserHandoffForProfile(profileId)
 	if n := runStartupTabCleanupOnce(debugPort); n > 0 {
 		logger.New("Browser").Info("启动时已关闭扩展自动页（等待用户点击完成最终接管）",
 			logger.F("profile_id", profileId),
@@ -215,26 +269,24 @@ func finalizeBrowserStartupTabs(debugPort int, profileId string) {
 	}
 }
 
-// FinalizeEnvironmentTabsForUserHandoff is the LAST tab-management action of the
-// current start cycle: user clicks sync tool / main client / list. Collapse every
-// running environment to exactly one about:blank, then stop all tab management
-// until the next environment start or stop re-arms the cycle.
+// FinalizeEnvironmentTabsForUserHandoff collapses ONLY environments that were
+// started since the last handoff and are still pending. Already-open working
+// environments are never touched when the user starts additional ones.
 func (a *App) FinalizeEnvironmentTabsForUserHandoff() map[string]interface{} {
 	result := map[string]interface{}{
 		"skipped":    false,
 		"profiles":   0,
 		"closedTabs": 0,
 	}
-	// Sync assistant is a separate process with its own handoff flag. Main
-	// already collapses tabs when opening the panel; running it again from the
-	// panel races Target.closeTarget and can close the last page → Chromium
-	// destroys the whole environment window ("突然关闭").
+	// Sync assistant is a separate process; main already owns handoff. Panel
+	// must not race Target.closeTarget on shared environments.
 	if a != nil && a.panelMode {
 		result["skipped"] = true
 		result["reason"] = "panel_never_owns_tab_handoff"
 		return result
 	}
-	if !environmentTabsUserHandoffDone.CompareAndSwap(false, true) {
+	pendingIDs := takePendingTabHandoffProfiles()
+	if len(pendingIDs) == 0 {
 		result["skipped"] = true
 		result["reason"] = "already_handed_off"
 		return result
@@ -246,9 +298,14 @@ func (a *App) FinalizeEnvironmentTabsForUserHandoff() map[string]interface{} {
 		id   string
 		port int
 	}
+	want := make(map[string]struct{}, len(pendingIDs))
+	for _, id := range pendingIDs {
+		want[id] = struct{}{}
+	}
 	a.browserMgr.Mutex.Lock()
-	items := make([]item, 0)
-	for id, p := range a.browserMgr.Profiles {
+	items := make([]item, 0, len(pendingIDs))
+	for id := range want {
+		p := a.browserMgr.Profiles[id]
 		if p == nil || !p.Running || p.DebugPort <= 0 {
 			continue
 		}
@@ -262,8 +319,9 @@ func (a *App) FinalizeEnvironmentTabsForUserHandoff() map[string]interface{} {
 	}
 	result["profiles"] = len(items)
 	result["closedTabs"] = closedTotal
-	logger.New("Browser").Info("用户触发最终标签检查：仅保留 about:blank，此后完全由用户接管",
+	logger.New("Browser").Info("用户触发最终标签检查：仅收拢待接管的新启动环境，不触碰已办公环境",
 		logger.F("profiles", len(items)),
+		logger.F("pending_requested", len(pendingIDs)),
 		logger.F("closed_tabs", closedTotal),
 	)
 	return result

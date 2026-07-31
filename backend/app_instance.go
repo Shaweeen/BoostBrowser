@@ -115,15 +115,15 @@ func resolveBadgeDisplayNumber(profileId, profileName string, profiles map[strin
 }
 
 func (a *App) BrowserInstanceStart(profileId string) (*BrowserProfile, error) {
-	// Every start (including stop→open again) re-arms the full tab-management
-	// cycle until the next user handoff click.
-	armEnvironmentTabsUserHandoff()
+	// Only this profile enters the tab-management cycle. Already-running
+	// environments keep their work tabs (no global re-arm).
+	armEnvironmentTabsUserHandoffForProfile(profileId)
 	return a.browserInstanceStartInternal(profileId, nil, nil, false, false, false)
 }
 
 // BrowserInstanceStartWithParams 通过额外参数启动实例（仅本次启动生效，不落库）
 func (a *App) BrowserInstanceStartWithParams(profileId string, extraLaunchArgs []string, startURLs []string, skipDefaultStartURLs bool) (*BrowserProfile, error) {
-	armEnvironmentTabsUserHandoff()
+	armEnvironmentTabsUserHandoffForProfile(profileId)
 	return a.browserInstanceStartInternal(profileId, extraLaunchArgs, startURLs, skipDefaultStartURLs, true, false)
 }
 
@@ -1328,8 +1328,9 @@ func (a *App) markProfileStoppedLocked(profileId string, profile *BrowserProfile
 		a.launchServer.ClearActiveProfile(profileId)
 	}
 	a.persistBrowserRuntimeSnapshotLocked()
-	// Stop ends this cycle; next open must run the full tab-management flow again.
-	armEnvironmentTabsUserHandoff()
+	// Drop pending handoff for this profile only; other open envs are untouched.
+	// Next start of this profile re-arms it alone via BrowserInstanceStart.
+	clearEnvironmentTabsUserHandoffForProfile(profileId)
 	// Async: this helper may already hold browserMgr.Mutex.
 	a.scheduleEnvironmentPopupConfinementRefresh()
 }

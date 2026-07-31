@@ -258,7 +258,8 @@ export function BrowserListPage() {
   const [loading, setLoading] = useState(true)
   const [proxies, setProxies] = useState<BrowserProxy[]>([])
   const [groups, setGroups] = useState<BrowserGroupWithCount[]>([])
-  // Final handoff: backend enforces once per arm cycle (re-armed on every start/stop).
+  // Final handoff: backend only collapses *newly started* environments still
+  // pending takeover. Already-open working envs keep their tabs when more start.
   const requestUserTabHandoff = useCallback(() => {
     if (!profiles.some(p => p.running)) return
     void FinalizeEnvironmentTabsForUserHandoff().catch(() => {})
