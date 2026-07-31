@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Button, FormItem, Input, Modal, Select, Switch, toast } from '../../../shared/components'
 import { Loader2 } from 'lucide-react'
 import type { BrowserProfile, BrowserProxy, BrowserGroup } from '../types'
-import { fetchBrowserProfiles, fetchGroups, updateBrowserProfile } from '../api'
+import { applyTimezoneToFingerprintArgs, fetchBrowserProfiles, fetchGroups, suggestTimezoneFromProxy, updateBrowserProfile } from '../api'
 
 const ALL_GROUPS = '__all__'
 const NO_GROUP = '__none__'
@@ -72,6 +72,8 @@ export function SmartAssignProxyModal({
   const [groupId, setGroupId] = useState<string>(ALL_GROUPS)
   const [skipAlreadyAssigned, setSkipAlreadyAssigned] = useState(true)
   const [includeBuiltin, setIncludeBuiltin] = useState(false)
+  /** Optional: write fingerprint --timezone from proxy exit country after bind. */
+  const [alignTimezoneToProxy, setAlignTimezoneToProxy] = useState(false)
 
   const [profiles, setProfiles] = useState<BrowserProfile[]>([])
   const [groups, setGroups] = useState<BrowserGroup[]>([])
@@ -209,6 +211,7 @@ export function SmartAssignProxyModal({
     setGroupId(ALL_GROUPS)
     setSkipAlreadyAssigned(true)
     setIncludeBuiltin(false)
+    setAlignTimezoneToProxy(false)
     setProgress(null)
   }
 
@@ -227,15 +230,30 @@ export function SmartAssignProxyModal({
     setProgress({ done: 0, total: assignments.length })
     let okCount = 0
     let failCount = 0
+    let tzApplied = 0
+    // Cache timezone hints per proxy to avoid repeated network health calls.
+    const tzByProxy = new Map<string, string>()
     try {
       for (let i = 0; i < assignments.length; i += 1) {
         const { profile, proxy } = assignments[i]
         try {
+          let fingerprintArgs = profile.fingerprintArgs || []
+          if (alignTimezoneToProxy && proxy.proxyId !== '__direct__' && proxy.proxyId !== '__local__') {
+            let tz = tzByProxy.get(proxy.proxyId)
+            if (tz === undefined) {
+              tz = (await suggestTimezoneFromProxy(proxy.proxyId)) || ''
+              tzByProxy.set(proxy.proxyId, tz)
+            }
+            if (tz) {
+              fingerprintArgs = applyTimezoneToFingerprintArgs(fingerprintArgs, tz)
+              tzApplied += 1
+            }
+          }
           await updateBrowserProfile(profile.profileId, {
             profileName: profile.profileName,
             userDataDir: profile.userDataDir,
             coreId: profile.coreId,
-            fingerprintArgs: profile.fingerprintArgs || [],
+            fingerprintArgs,
             proxyId: proxy.proxyId,
             proxyConfig: proxy.proxyConfig,
             launchArgs: profile.launchArgs || [],
@@ -250,9 +268,13 @@ export function SmartAssignProxyModal({
         setProgress({ done: i + 1, total: assignments.length })
       }
       if (failCount === 0) {
-        toast.success(`已为 ${okCount} 个实例分配代理`)
+        toast.success(
+          tzApplied > 0
+            ? `已为 ${okCount} 个实例分配代理，其中 ${tzApplied} 个已写入出口时区`
+            : `已为 ${okCount} 个实例分配代理`,
+        )
       } else {
-        toast.success(`完成：成功 ${okCount} 个，失败 ${failCount} 个`)
+        toast.success(`完成：成功 ${okCount} 个，失败 ${failCount} 个${tzApplied > 0 ? `，时区 ${tzApplied}` : ''}`)
       }
       onDone?.()
       reset()
@@ -344,7 +366,7 @@ export function SmartAssignProxyModal({
           )}
         </div>
 
-        <div className="flex items-center gap-6 text-sm">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
           <label className="flex items-center gap-2 cursor-pointer">
             <Switch checked={skipAlreadyAssigned} onChange={setSkipAlreadyAssigned} />
             <span className="text-[var(--color-text-muted)]">跳过已设置代理的实例</span>
@@ -353,7 +375,18 @@ export function SmartAssignProxyModal({
             <Switch checked={includeBuiltin} onChange={setIncludeBuiltin} />
             <span className="text-[var(--color-text-muted)]">包含内置代理（直连/本地）</span>
           </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <Switch checked={alignTimezoneToProxy} onChange={setAlignTimezoneToProxy} />
+            <span className="text-[var(--color-text-muted)]" title="根据代理出口国家写入指纹 --timezone，默认关闭">
+              按出口自动写时区
+            </span>
+          </label>
         </div>
+        {alignTimezoneToProxy && (
+          <p className="text-[11px] text-[var(--color-text-muted)] -mt-2">
+            开启后会查询出口国家并写入环境指纹时区；同一代理只查询一次。未识别国家时跳过，不改动原时区。
+          </p>
+        )}
 
         {/* 未分配 IP 列表 */}
         <div className="border border-[var(--color-border)] rounded overflow-hidden">

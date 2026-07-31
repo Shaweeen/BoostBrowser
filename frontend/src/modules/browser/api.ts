@@ -602,7 +602,7 @@ export async function browserProxyTestSpeed(proxyId: string): Promise<ProxyConne
   return { proxyId, ok: false, latencyMs: 0, error: 'Wails 绑定不可用，请重新打包客户端' }
 }
 
-/** One-click check: latency + protocol + exit IP/geo (AdsPower/MoreLogin-style summary). */
+/** One-click check: latency + protocol + exit IP/geo summary. */
 export async function browserProxyFullCheck(proxyId: string): Promise<ProxyFullCheckResult> {
   const bindings: any = await getBindings()
   if (bindings?.BrowserProxyFullCheck) {
@@ -614,6 +614,26 @@ export async function browserProxyFullCheck(proxyId: string): Promise<ProxyFullC
   }
   // Fallback: speed only when binding not regenerated yet.
   return browserProxyTestSpeed(proxyId)
+}
+
+/** IANA timezone hint from proxy exit country (for fingerprint alignment). */
+export async function suggestTimezoneFromProxy(proxyId: string): Promise<string> {
+  const bindings: any = await getBindings()
+  if (bindings?.SuggestTimezoneFromProxy) {
+    return String((await bindings.SuggestTimezoneFromProxy(proxyId)) || '')
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.SuggestTimezoneFromProxy) {
+    return String((await goApp.SuggestTimezoneFromProxy(proxyId)) || '')
+  }
+  return ''
+}
+
+export function applyTimezoneToFingerprintArgs(args: string[] | undefined, timezone: string): string[] {
+  const tz = timezone.trim()
+  const base = Array.isArray(args) ? args.filter(a => !/^--timezone=/i.test(String(a).trim())) : []
+  if (!tz) return base
+  return [...base, `--timezone=${tz}`]
 }
 
 export async function browserProxyBatchTestSpeed(proxyIds: string[], concurrency: number = 8): Promise<ProxyConnectivityTestResult[]> {

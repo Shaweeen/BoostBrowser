@@ -1498,22 +1498,22 @@ export function ProxyPoolPage() {
     }
   }
 
-  const handleTestAll = async () => {
-    const testable = filteredList.filter(p => p.proxyConfig !== 'direct://')
-    if (testable.length === 0) return
+  const runBatchSpeedTest = async (proxyIds: string[], label: string) => {
+    if (proxyIds.length === 0) {
+      toast.info(label)
+      return
+    }
     setTestingAll(true)
     const init: Record<string, number> = {}
-    testable.forEach(p => { init[p.proxyId] = -1 })
+    proxyIds.forEach(id => { init[id] = -1 })
     setLatencyMap(prev => ({ ...prev, ...init }))
 
-    // 监听后端实时推送的单个测速结果
     const off = EventsOn('proxy:speed:result', (data: { proxyId: string; ok: boolean; latencyMs: number; error: string }) => {
       const val = toLatencyValue(data.ok, data.latencyMs, data.error)
       setLatencyMap(prev => ({ ...prev, [data.proxyId]: val }))
     })
 
     try {
-      const proxyIds = testable.map(p => p.proxyId)
       const results = await browserProxyBatchTestSpeed(proxyIds, 4)
       applyResolvedProxyConfigs(results)
       setLatencyMap(prev => {
@@ -1523,10 +1523,36 @@ export function ProxyPoolPage() {
         })
         return next
       })
+      const failed = results.filter(r => !r.ok).length
+      const ok = results.length - failed
+      toast.success(`测速完成：可用 ${ok}，失败 ${failed}`)
     } finally {
       off()
       setTestingAll(false)
     }
+  }
+
+  const handleTestAll = async () => {
+    const testable = filteredList.filter(p => p.proxyConfig !== 'direct://')
+    if (testable.length === 0) return
+    await runBatchSpeedTest(testable.map(p => p.proxyId), '没有可测速的代理')
+  }
+
+  /** Only retest nodes already marked failed / unreachable (not pending, not OK). */
+  const handleTestFailedOnly = async () => {
+    const failed = filteredList.filter(p => {
+      if (p.proxyConfig === 'direct://') return false
+      const v = latencyMap[p.proxyId]
+      if (v === -2 || v === -3) return true
+      if (typeof v === 'number' && v >= 0) return false
+      if (v === -1) return false
+      return p.lastTestOk === false
+    })
+    if (failed.length === 0) {
+      toast.info('当前筛选列表中没有失败节点')
+      return
+    }
+    await runBatchSpeedTest(failed.map(p => p.proxyId), '没有失败节点')
   }
 
   const handleCheckOneIPHealth = async (record: ProxyDisplayInfo) => {
@@ -1713,9 +1739,48 @@ export function ProxyPoolPage() {
         )
       },
     },
-    { key: 'type', title: '类型', width: '90px', sortable: true },
-    { key: 'server', title: '服务器', width: '180px', sortable: true },
-    { key: 'port', title: '端口', width: '80px', sortable: true, render: (val) => val || '-' },
+    {
+      key: 'type',
+      title: '协议',
+      width: '100px',
+      sortable: true,
+      render: (val, record) => {
+        const proto = String(val || parseProxyInfo(record.proxyConfig).type || '-').toUpperCase()
+        const tone =
+          proto.includes('SOCKS') ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300' :
+          proto.includes('HTTP') ? 'bg-sky-500/15 text-sky-700 dark:text-sky-300' :
+          'bg-[var(--color-bg-secondary)] text-[var(--color-text-muted)]'
+        return (
+          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-semibold whitespace-nowrap ${tone}`}>
+            {proto === '-' ? '—' : proto}
+          </span>
+        )
+      },
+    },
+    {
+      key: 'exitCountry',
+      title: '出口',
+      width: '110px',
+      render: (_, record) => {
+        const health = ipHealthMap[record.proxyId]
+        const country = (health?.country || '').trim()
+        const city = (health?.city || '').trim()
+        if (!country && !city) {
+          return <span className="text-xs text-[var(--color-text-muted)]">—</span>
+        }
+        const label = city ? `${country || '—'} · ${city}` : country
+        return (
+          <span
+            className="inline-flex max-w-[100px] truncate items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-violet-500/12 text-violet-700 dark:text-violet-300"
+            title={label}
+          >
+            {country || city}
+          </span>
+        )
+      },
+    },
+    { key: 'server', title: '服务器', width: '160px', sortable: true },
+    { key: 'port', title: '端口', width: '70px', sortable: true, render: (val) => val || '-' },
     {
       key: 'latency',
       title: '延迟',
@@ -1732,7 +1797,7 @@ export function ProxyPoolPage() {
     {
       key: 'ipHealth',
       title: 'IP健康',
-      width: '280px',
+      width: '240px',
       render: (_, record) => renderIPHealth(record),
     },
     {
@@ -2123,7 +2188,17 @@ export function ProxyPoolPage() {
             刷新订阅
           </Button>
           <Button size="sm" variant="secondary" onClick={handleCheckAllIPHealth} loading={checkingAllIPHealth} disabled={filteredList.length === 0}>检测IP健康</Button>
-          <Button size="sm" variant="secondary" onClick={handleTestAll} loading={testingAll} disabled={filteredList.length === 0}>测试全部</Button>
+          <Button size="sm" variant="secondary" onClick={() => void handleTestAll()} loading={testingAll} disabled={filteredList.length === 0}>测试全部</Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => void handleTestFailedOnly()}
+            loading={testingAll}
+            disabled={filteredList.length === 0}
+            title="仅重测延迟为失败或上次检测不通的节点"
+          >
+            重测失败
+          </Button>
           <Button size="sm" variant="secondary" onClick={() => setSmartAssignOpen(true)} disabled={proxies.length === 0}>智能分配</Button>
           <Button size="sm" onClick={() => setImportModalOpen(true)}>导入代理</Button>
         </div>
