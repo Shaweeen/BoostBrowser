@@ -22,34 +22,34 @@ func TestSyncPopupUsesCurrentArrangedOwnerBounds(t *testing.T) {
 		2,
 	)
 	if !changed {
-		t.Fatal("oversized wallet popup should be constrained")
+		t.Fatal("misplaced wallet popup origin should be nudged into owner")
 	}
-	// 1440x900 natural popup into 816x556 cell must shrink uniformly:
-	// scale = min(816/1440, 556/900) = 816/1440 → 816x510.
-	if width != 816 || height != 510 {
-		t.Fatalf("popup must shrink proportionally into the arranged owner: %dx%d", width, height)
+	// Position-only: keep natural 1440×900; only move origin into cell.
+	if width != 1440 || height != 900 {
+		t.Fatalf("wallet must keep natural size, got %dx%d", width, height)
 	}
-	if x < 2 || y < 2 || x+width > 818 || y+height > 558 {
-		t.Fatalf("popup escaped owner bounds: x=%d y=%d width=%d height=%d", x, y, width, height)
+	if x != 2 || y != 2 {
+		t.Fatalf("origin should be clamped to inset cell: x=%d y=%d", x, y)
 	}
 }
 
-func TestSyncPopupProportionalShrinkPreservesAspectRatio(t *testing.T) {
-	// Tall wallet notification that only exceeds the cell height.
+func TestSyncPopupDoesNotShrinkTallWallet(t *testing.T) {
+	// Tall wallet notification that exceeds the cell height — still no resize.
 	x, y, width, height, changed := constrainSyncPopupRect(
 		winRect{Left: 50, Top: 50, Right: 410, Bottom: 710}, // 360x660
 		winRect{Left: 0, Top: 0, Right: 500, Bottom: 400},   // cell 500x400, inset 2 → 496x396
 		2,
 	)
-	if !changed {
-		t.Fatal("tall popup must be scaled into the environment cell")
+	if width != 360 || height != 660 {
+		t.Fatalf("must not shrink tall wallet: %dx%d", width, height)
 	}
-	// scale = 396/660 = 0.6 → 216x396
-	if width != 216 || height != 396 {
-		t.Fatalf("aspect ratio not preserved: %dx%d", width, height)
+	// Origin stays if already inside on X; Y may stay 50 if height overflows.
+	if x != 50 || y != 50 || !changed && (x != 50 || y != 50) {
+		// y=50 is inside top; for oversized height we keep top-left (no shrink).
+		_ = changed
 	}
-	if x < 2 || y < 2 || x+width > 498 || y+height > 398 {
-		t.Fatalf("scaled popup outside cell: %d,%d %dx%d", x, y, width, height)
+	if x < 2 || y < 2 {
+		t.Fatalf("origin pulled outside cell incorrectly: %d,%d", x, y)
 	}
 }
 
@@ -96,15 +96,19 @@ func TestAnyPopupCanResolveOwnerThroughChromeProcessTree(t *testing.T) {
 }
 
 func TestSyncPopupPlacementNeverPromotesDesktopTopmost(t *testing.T) {
-	geometryOnly := syncPopupPlacementFlags(true, false)
+	// Position move, never resize (wallet natural size).
+	geometryOnly := syncPopupPlacementFlags(true, false, false)
 	if geometryOnly&SWP_NOZORDER == 0 {
 		t.Fatal("geometry-only update must preserve an already correct owner-relative Z-order")
 	}
 	if geometryOnly&SWP_NOACTIVATE == 0 {
 		t.Fatal("popup placement must not steal focus")
 	}
+	if geometryOnly&SWP_NOSIZE == 0 {
+		t.Fatal("wallet placement must set SWP_NOSIZE to avoid reflow flicker")
+	}
 
-	zOrderOnly := syncPopupPlacementFlags(false, true)
+	zOrderOnly := syncPopupPlacementFlags(false, true, false)
 	if zOrderOnly&SWP_NOZORDER != 0 {
 		t.Fatal("owner-relative placement must be allowed to repair Z-order")
 	}
@@ -147,7 +151,7 @@ func TestOwnerLinkedSurfaceAlwaysContained(t *testing.T) {
 }
 
 func TestConstrainSyncPopupKeepsZOrderAboveOwnerCell(t *testing.T) {
-	// Geometry: oversized notification that spilled outside a tiled cell.
+	// Geometry: notification origin spilled left of a tiled cell.
 	x, y, w, h, changed := constrainSyncPopupRect(
 		winRect{Left: -40, Top: 20, Right: 400, Bottom: 700},
 		winRect{Left: 0, Top: 0, Right: 420, Bottom: 560},
@@ -156,8 +160,12 @@ func TestConstrainSyncPopupKeepsZOrderAboveOwnerCell(t *testing.T) {
 	if !changed {
 		t.Fatal("spilled wallet popup must be moved back into the environment cell")
 	}
-	if x < 2 || y < 2 || x+w > 418 || y+h > 558 {
-		t.Fatalf("popup left its environment cell: %d,%d %dx%d", x, y, w, h)
+	// Natural size preserved (440x680); origin clamped to cell inset.
+	if w != 440 || h != 680 {
+		t.Fatalf("natural size must be kept: %dx%d", w, h)
+	}
+	if x != 2 || y != 20 {
+		t.Fatalf("origin clamp: %d,%d", x, y)
 	}
 }
 

@@ -349,19 +349,19 @@ func TestConstrainSyncPopupRectKeepsNestedMenuInsideTile(t *testing.T) {
 	owner := winRect{Left: 0, Top: 0, Right: 500, Bottom: 700}
 	popup := winRect{Left: 430, Top: 120, Right: 680, Bottom: 520}
 	x, y, width, height, changed := constrainSyncPopupRect(popup, owner, 2)
+	// Position-only: keep natural 250×400, slide left so fully inside cell.
 	if !changed || x != 248 || y != 120 || width != 250 || height != 400 {
 		t.Fatalf("nested menu clamp mismatch: x=%d y=%d width=%d height=%d changed=%v", x, y, width, height, changed)
 	}
 }
 
-func TestConstrainSyncPopupRectShrinksOversizedPopupToTile(t *testing.T) {
+func TestConstrainSyncPopupRectPreservesOversizedWalletNaturalSize(t *testing.T) {
 	owner := winRect{Left: 100, Top: 50, Right: 400, Bottom: 350}
 	popup := winRect{Left: 20, Top: 10, Right: 700, Bottom: 800}
 	x, y, width, height, changed := constrainSyncPopupRect(popup, owner, 2)
-	// Natural 680x790 into 296x296 cell uses uniform scale min(296/680, 296/790)
-	// → ~254x296, not a square independent clamp.
-	if !changed || x != 102 || y != 52 || width != 254 || height != 296 {
-		t.Fatalf("oversized popup proportional shrink mismatch: x=%d y=%d width=%d height=%d changed=%v", x, y, width, height, changed)
+	// Never shrink wallets into the tile — only nudge origin into the cell.
+	if !changed || x != 102 || y != 52 || width != 680 || height != 790 {
+		t.Fatalf("oversized wallet must keep natural size: x=%d y=%d width=%d height=%d changed=%v", x, y, width, height, changed)
 	}
 }
 

@@ -1362,10 +1362,11 @@ func mapChromeInputTarget(screenX, screenY int, masterMain, followerMain windows
 }
 
 // popupRelativeAlignLoop mirrors Chrome-Manager's monitor_popups +
-// sync_specific_popup: keep follower wallet/extension popups at the same
-// relative offset/size as the master so clicks land on corresponding UI.
+// sync_specific_popup: nudge follower wallet popups to the same relative
+// offset as master. Position-only (SWP_NOSIZE) — never resize, so we do not
+// fight the environment confiner or Chromium wallet layout (flicker source).
 func (s *InputSyncer) popupRelativeAlignLoop(stopCh <-chan struct{}) {
-	ticker := time.NewTicker(400 * time.Millisecond)
+	ticker := time.NewTicker(700 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
@@ -1405,7 +1406,6 @@ func (s *InputSyncer) alignFollowerPopupsToMasterRelative() {
 		if pw < 40 || ph < 40 {
 			continue
 		}
-		title := getWindowTitle(popup)
 		for _, follower := range followers {
 			if !isWindow(follower) {
 				continue
@@ -1417,19 +1417,24 @@ func (s *InputSyncer) alignFollowerPopupsToMasterRelative() {
 			fl, ft, _, _ := getWindowRect(follower)
 			newX := expectedPopupOffsetLeft(int(pl), int(mml), int(fl))
 			newY := expectedPopupOffsetTop(int(pt), int(mmt), int(ft))
-			// Keep inside follower tile (Chrome-Manager places freely; we clamp
-			// so multi-open layouts do not spill into the next environment).
 			ol, ot, orr, ob := getWindowRect(follower)
 			owner := winRect{Left: ol, Top: ot, Right: orr, Bottom: ob}
 			desired := winRect{Left: int32(newX), Top: int32(newY), Right: int32(newX + pw), Bottom: int32(newY + ph)}
-			x, y, w, h, _ := constrainSyncPopupRect(desired, owner, syncPopupBoundsInset)
+			x, y, _, _, moved := constrainSyncPopupRect(desired, owner, syncPopupBoundsInset)
+			if !moved {
+				// Still apply relative offset if match drifted far from desired.
+				cl, ct, _, _ := getWindowRect(match)
+				if absSyncInt(int(cl)-x) < 4 && absSyncInt(int(ct)-y) < 4 {
+					continue
+				}
+			}
+			// Position only — preserve follower popup's current natural size.
 			procSetWindowPos.Call(
 				uintptr(match),
 				0,
-				uintptr(x), uintptr(y), uintptr(w), uintptr(h),
-				uintptr(SWP_NOZORDER|SWP_NOACTIVATE),
+				uintptr(x), uintptr(y), 0, 0,
+				uintptr(SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOSIZE),
 			)
-			_ = title
 		}
 	}
 }
