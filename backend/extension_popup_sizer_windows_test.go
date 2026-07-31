@@ -16,15 +16,29 @@ func TestIsMainEnvironmentBrowserFrameRejectsPopupsAndZero(t *testing.T) {
 }
 
 func TestSyncPopupUsesCurrentArrangedOwnerBounds(t *testing.T) {
+	// Oversized wallet whose top-left is already inside the arranged cell:
+	// keep natural size and origin (position-only; never thrash/shrink).
 	x, y, width, height, changed := constrainSyncPopupRect(
 		winRect{Left: 20, Top: 20, Right: 1460, Bottom: 920},
+		winRect{Left: 0, Top: 0, Right: 820, Bottom: 560},
+		2,
+	)
+	if width != 1440 || height != 900 {
+		t.Fatalf("wallet must keep natural size, got %dx%d", width, height)
+	}
+	if changed || x != 20 || y != 20 {
+		t.Fatalf("origin already inside cell must not thrash: x=%d y=%d changed=%v", x, y, changed)
+	}
+
+	// Origin fully outside the arranged cell → pull into inset; still no resize.
+	x, y, width, height, changed = constrainSyncPopupRect(
+		winRect{Left: -200, Top: -80, Right: 1240, Bottom: 820},
 		winRect{Left: 0, Top: 0, Right: 820, Bottom: 560},
 		2,
 	)
 	if !changed {
 		t.Fatal("misplaced wallet popup origin should be nudged into owner")
 	}
-	// Position-only: keep natural 1440×900; only move origin into cell.
 	if width != 1440 || height != 900 {
 		t.Fatalf("wallet must keep natural size, got %dx%d", width, height)
 	}
