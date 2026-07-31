@@ -53,6 +53,12 @@ func NewStandardRelayManager() *StandardRelayManager {
 	}
 }
 
+// detectedProxyCacheTTL keeps a successful scheme/auth detection sticky across
+// multi-environment launches. Re-probing every start wastes time and can flip
+// dual-protocol ports between http/socks5. Cache is invalidated on relay start
+// failure so dead endpoints re-detect promptly.
+const detectedProxyCacheTTL = 30 * time.Minute
+
 func (m *StandardRelayManager) Acquire(profileID, src string, routeOptions ...StandardProxyRouteOptions) (string, string, error) {
 	profileID = strings.TrimSpace(profileID)
 	src = strings.TrimSpace(src)
@@ -70,10 +76,28 @@ func (m *StandardRelayManager) Acquire(profileID, src string, routeOptions ...St
 	options.Mode = NormalizeProxyNetworkMode(options.Mode)
 	options.LocalGatewayURL = strings.TrimSpace(options.LocalGatewayURL)
 	detectionKey := src + "\x00" + options.Mode + "\x00" + options.LocalGatewayURL
+
+	localURL, working, err := m.acquireOnce(profileID, src, detectionKey, options, false)
+	if err == nil {
+		return localURL, working, nil
+	}
+	// One automatic recovery: drop sticky detection and re-probe. Required so a
+	// cached dead endpoint does not brick environment starts until TTL expires.
+	return m.acquireOnce(profileID, src, detectionKey, options, true)
+}
+
+func (m *StandardRelayManager) acquireOnce(
+	profileID, src, detectionKey string,
+	options StandardProxyRouteOptions,
+	forceRedetect bool,
+) (string, string, error) {
 	working := ""
 	gateway := ""
 	now := time.Now()
 	m.mu.Lock()
+	if forceRedetect {
+		delete(m.detected, detectionKey)
+	}
 	if cached, ok := m.detected[detectionKey]; ok {
 		if now.Before(cached.expiresAt) {
 			working = cached.working
@@ -92,9 +116,9 @@ func (m *StandardRelayManager) Acquire(profileID, src string, routeOptions ...St
 	m.mu.Unlock()
 
 	if working == "" {
-		// Protocol-labelled provider lists are frequently wrong. Probe the
-		// three standard protocols concurrently with a short bounded timeout;
-		// serial 30-second probes multiplied startup time across 20 profiles.
+		// Protocol-labelled provider lists are frequently wrong. Probe declared
+		// scheme first, then alternates under a short bounded timeout (kept on
+		// every start for connectivity — not a disposable check).
 		var upstreamDialer C.Dialer
 		if options.Mode == ProxyNetworkModeAuto || options.Mode == ProxyNetworkModeLocalGateway {
 			gateway = m.discoverLocalGatewayCached(options.LocalGatewayURL)
@@ -107,7 +131,7 @@ func (m *StandardRelayManager) Acquire(profileID, src string, routeOptions ...St
 		}
 		var err error
 		working, err = detectWorkingStandardProxyConfigWithDialer(src, &SpeedTestConfig{
-			Timeout:    5 * time.Second,
+			Timeout:    6 * time.Second,
 			TCPTimeout: 3 * time.Second,
 			URLs:       []string{defaultTestURL},
 		}, upstreamDialer)
@@ -116,7 +140,7 @@ func (m *StandardRelayManager) Acquire(profileID, src string, routeOptions ...St
 			// provider endpoint. Auto mode falls back to direct/TUN routing.
 			gateway = ""
 			working, err = DetectWorkingStandardProxyConfig(src, &SpeedTestConfig{
-				Timeout:    5 * time.Second,
+				Timeout:    6 * time.Second,
 				TCPTimeout: 3 * time.Second,
 				URLs:       []string{defaultTestURL},
 			})
@@ -127,7 +151,7 @@ func (m *StandardRelayManager) Acquire(profileID, src string, routeOptions ...St
 		working = strings.TrimSpace(working)
 		relayKey = standardRelayKey(working, gateway)
 		m.mu.Lock()
-		m.detected[detectionKey] = detectedStandardProxy{working: working, gateway: gateway, expiresAt: now.Add(10 * time.Minute)}
+		m.detected[detectionKey] = detectedStandardProxy{working: working, gateway: gateway, expiresAt: now.Add(detectedProxyCacheTTL)}
 		if localURL, ok := m.acquireExistingLocked(profileID, relayKey); ok {
 			m.mu.Unlock()
 			return localURL, working, nil
@@ -137,6 +161,9 @@ func (m *StandardRelayManager) Acquire(profileID, src string, routeOptions ...St
 
 	r, err := startStandardRelay(working, gateway)
 	if err != nil {
+		m.mu.Lock()
+		delete(m.detected, detectionKey)
+		m.mu.Unlock()
 		return "", "", err
 	}
 
@@ -296,7 +323,10 @@ func startStandardRelay(src string, gateway string) (*standardRelay, error) {
 	}
 	server := &http.Server{
 		Handler:           http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { r.handle(px, w, req) }),
-		ReadHeaderTimeout: 15 * time.Second,
+		ReadHeaderTimeout: 20 * time.Second,
+		// IdleTimeout keeps Chromium long-lived CONNECT tunnels healthy under
+		// multi-tab loads without cutting residential sessions early.
+		IdleTimeout: 90 * time.Second,
 	}
 	r.server = server
 	go func() { _ = server.Serve(ln) }()
@@ -333,7 +363,9 @@ func (r *standardRelay) handleConnect(px C.Proxy, w http.ResponseWriter, req *ht
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	ctx, cancel := context.WithTimeout(req.Context(), 30*time.Second)
+	// Residential/mobile exits are slower to dial; 45s matches common sticky
+	// session warm-up without hanging the browser indefinitely.
+	ctx, cancel := context.WithTimeout(req.Context(), 45*time.Second)
 	defer cancel()
 	upstream, err := px.DialContext(ctx, &meta)
 	if err != nil {
@@ -366,7 +398,11 @@ func (r *standardRelay) handleHTTP(px C.Proxy, w http.ResponseWriter, req *http.
 			}
 			return px.DialContext(ctx, &meta)
 		},
-		DisableKeepAlives:     true,
+		// Keep-alives cut latency for multi-request pages through the same exit.
+		DisableKeepAlives:     false,
+		MaxIdleConns:          32,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: 45 * time.Second,
 		TLSHandshakeTimeout:   30 * time.Second,
 	}
@@ -417,7 +453,12 @@ func removeHopHeaders(h http.Header) {
 
 func IsStandardProxyURL(src string) bool {
 	l := strings.ToLower(strings.TrimSpace(src))
-	return strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://") || strings.HasPrefix(l, "socks5://") || strings.HasPrefix(l, "socks://")
+	return strings.HasPrefix(l, "http://") ||
+		strings.HasPrefix(l, "https://") ||
+		strings.HasPrefix(l, "socks5://") ||
+		strings.HasPrefix(l, "socks5h://") ||
+		strings.HasPrefix(l, "socks://") ||
+		strings.HasPrefix(l, "socket://")
 }
 
 func standardProxyNeedsRelay(src string) bool {

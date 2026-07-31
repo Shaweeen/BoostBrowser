@@ -66,6 +66,10 @@ func NormalizeStandardProxyConfig(raw, defaultScheme string) (string, error) {
 
 	// Colon form keeps every colon after the username as part of the password.
 	// Bracketed IPv6 without credentials is handled by net/url below.
+	//
+	// Two common provider layouts:
+	//   host:port:user:pass     (port is field 1; password may contain '@')
+	//   user:pass:host:port     (exactly 4 fields; no '@' — avoids IPv6 auth URLs)
 	if !strings.HasPrefix(remainder, "[") {
 		parts := strings.Split(remainder, ":")
 		if len(parts) >= 2 && validProxyPort(parts[1]) {
@@ -74,6 +78,11 @@ func NormalizeStandardProxyConfig(raw, defaultScheme string) (string, error) {
 				password = strings.Join(parts[3:], ":")
 			}
 			return buildStandardProxyURL(scheme, parts[0], parts[1], valueAt(parts, 2), password)
+		}
+		if !strings.Contains(remainder, "@") && len(parts) == 4 {
+			if validProxyPort(parts[3]) && !validProxyPort(parts[1]) && parts[2] != "" {
+				return buildStandardProxyURL(scheme, parts[2], parts[3], parts[0], parts[1])
+			}
 		}
 	}
 
@@ -94,7 +103,7 @@ func LooksLikeStandardProxyConfig(raw string) bool {
 		return false
 	}
 	lower := strings.ToLower(input)
-	for _, prefix := range []string{"http://", "https://", "socks://", "socks5://", "socket://"} {
+	for _, prefix := range []string{"http://", "https://", "socks://", "socks5://", "socks5h://", "socket://"} {
 		if strings.HasPrefix(lower, prefix) {
 			return true
 		}
@@ -113,9 +122,15 @@ func LooksLikeStandardProxyConfig(raw string) bool {
 			return true
 		}
 	}
-	if !strings.HasPrefix(input, "[") {
+	if !strings.HasPrefix(input, "[") && !strings.Contains(input, "@") {
 		parts := strings.Split(input, ":")
-		return len(parts) >= 2 && validProxyPort(parts[1])
+		if len(parts) >= 2 && validProxyPort(parts[1]) {
+			return true
+		}
+		// user:pass:host:port
+		if len(parts) == 4 && validProxyPort(parts[3]) && !validProxyPort(parts[1]) {
+			return true
+		}
 	}
 	return false
 }
@@ -126,9 +141,37 @@ func normalizeStandardProxyScheme(raw string) string {
 		return "http"
 	case "https":
 		return "https"
-	case "socks", "socks5", "socket":
+	// socks5h = SOCKS5 with remote DNS (Firefox naming). Chromium has no
+	// separate socks5h flag; we normalize to socks5 and always dial hostnames
+	// through the local relay so DNS leaves via the proxy (same end effect).
+	case "socks", "socks5", "socks5h", "socket":
 		return "socks5"
 	default:
+		return ""
+	}
+}
+
+// PreferredSchemeFromProxySource picks a normalize default from explicit labels.
+// Bare host:port lines still default to the caller's preference (usually http).
+func PreferredSchemeFromProxySource(raw string) string {
+	lower := strings.ToLower(strings.TrimSpace(raw))
+	switch {
+	case strings.HasPrefix(lower, "socks5h://"),
+		strings.HasPrefix(lower, "socks5://"),
+		strings.HasPrefix(lower, "socks://"),
+		strings.HasPrefix(lower, "socket://"):
+		return "socks5"
+	case strings.HasPrefix(lower, "https://"):
+		return "https"
+	case strings.HasPrefix(lower, "http://"):
+		return "http"
+	default:
+		fields := splitLooseProxyFields(raw)
+		if len(fields) > 0 {
+			if s := normalizeStandardProxyScheme(fields[0]); s != "" {
+				return s
+			}
+		}
 		return ""
 	}
 }

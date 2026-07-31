@@ -298,7 +298,12 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		}
 	}
 	if proxy.LooksLikeStandardProxyConfig(resolvedProxyConfig) {
-		normalizedProxy, normalizeErr := proxy.NormalizeStandardProxyConfig(resolvedProxyConfig, "http")
+		// Prefer declared scheme (socks5/socks5h/http); bare host:port stays http.
+		defaultScheme := proxy.PreferredSchemeFromProxySource(resolvedProxyConfig)
+		if defaultScheme == "" {
+			defaultScheme = "http"
+		}
+		normalizedProxy, normalizeErr := proxy.NormalizeStandardProxyConfig(resolvedProxyConfig, defaultScheme)
 		if normalizeErr != nil {
 			startErr := fmt.Errorf("实例启动失败：代理格式无效。原因：%v", normalizeErr)
 			profile.LastError = startErr.Error()

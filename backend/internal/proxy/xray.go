@@ -78,15 +78,21 @@ func ValidateProxyConfig(proxyConfig string, proxies []config.BrowserProxy, prox
 		return true, ""
 	}
 	if LooksLikeStandardProxyConfig(src) {
-		normalized, err := NormalizeStandardProxyConfig(src, "http")
+		// Honour declared socks5/socks5h/socket labels so validation does not
+		// rewrite provider lines to http:// before launch.
+		defaultScheme := PreferredSchemeFromProxySource(src)
+		if defaultScheme == "" {
+			defaultScheme = "http"
+		}
+		normalized, err := NormalizeStandardProxyConfig(src, defaultScheme)
 		if err != nil {
 			return false, fmt.Sprintf("代理配置解析失败: %v", err)
 		}
 		src = normalized
 	}
 	l := strings.ToLower(src)
-	// 标准代理格式，支持
-	if strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://") || strings.HasPrefix(l, "socks5://") {
+	// 标准代理格式，支持（含 socks5h 规范化后的 socks5）
+	if strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://") || strings.HasPrefix(l, "socks5://") || strings.HasPrefix(l, "socks://") {
 		return true, ""
 	}
 	// hysteria2/tuic 通过 sing-box 支持，先做可解析性校验

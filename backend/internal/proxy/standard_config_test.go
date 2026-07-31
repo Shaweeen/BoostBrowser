@@ -18,6 +18,8 @@ func TestNormalizeStandardProxyConfigLooseFormats(t *testing.T) {
 		{"unescaped url password", "http://username:p@ss#word/1@127.0.0.1:8080", "http", "http://username:p%40ss%23word%2F1@127.0.0.1:8080"},
 		{"scheme token", "socks5 127.0.0.1 1080 user pass", "http", "socks5://user:pass@127.0.0.1:1080"},
 		{"scheme alias", "socket://127.0.0.1:1080", "http", "socks5://127.0.0.1:1080"},
+		{"socks5h remote dns alias", "socks5h://user:pass@127.0.0.1:1080", "http", "socks5://user:pass@127.0.0.1:1080"},
+		{"user pass host port", "buyer:s3cret:198.51.100.10:1080", "socks5", "socks5://buyer:s3cret@198.51.100.10:1080"},
 		{"ipv6", "http://user:pass@[2001:db8::10]:8080", "http", "http://user:pass@[2001:db8::10]:8080"},
 	}
 	for _, tt := range tests {
@@ -98,11 +100,24 @@ func TestAcquireExistingRelayDoesNotDoubleCountSameProfile(t *testing.T) {
 	}
 }
 
+func TestPreferredSchemeFromProxySource(t *testing.T) {
+	if PreferredSchemeFromProxySource("socks5h://x:1") != "socks5" {
+		t.Fatal("socks5h should map to socks5 preference")
+	}
+	if PreferredSchemeFromProxySource("socket 1.2.3.4 1080 a b") != "socks5" {
+		t.Fatal("leading scheme token should prefer socks5")
+	}
+	if PreferredSchemeFromProxySource("1.2.3.4:1080:u:p") != "" {
+		t.Fatal("bare host:port must not invent a scheme preference")
+	}
+}
+
 func TestExternalStandardProxiesAlwaysUseCompatibleRelay(t *testing.T) {
 	for _, src := range []string{
 		"http://198.51.100.10:8080",
 		"https://198.51.100.10:8443",
 		"socks5://198.51.100.10:1080",
+		"socks5h://198.51.100.10:1080",
 		"http://user:pass@198.51.100.10:8080",
 	} {
 		if !standardProxyNeedsRelay(src) {
