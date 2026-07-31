@@ -124,10 +124,13 @@ var syncPopupBoundsEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lP
 		return 1
 	}
 
-	// Chrome/extension own natural size. We only nudge origin so the popup is
-	// associated with its environment cell — never shrink wallets into the tile
-	// (that reflowed Rabby/MetaMask UI and flickered against extension layout).
+	// Force popup into the environment cell (Chrome-Manager-style placement):
+	// scale down oversized wallet/extension surfaces so they stay with the
+	// tiled main page; keep natural size when it already fits.
 	x, y, width, height, shouldMove := constrainSyncPopupRect(popupRect, owner.rect, syncPopupBoundsInset)
+	natW := int(popupRect.Right - popupRect.Left)
+	natH := int(popupRect.Bottom - popupRect.Top)
+	sizeChanged := width != natW || height != natH
 	search.placements = append(search.placements, syncPopupPlacement{
 		hwnd:            hwnd,
 		owner:           owner,
@@ -136,7 +139,7 @@ var syncPopupBoundsEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lP
 		width:           width,
 		height:          height,
 		geometryChanged: shouldMove,
-		sizeChanged:     false, // always preserve natural size
+		sizeChanged:     sizeChanged,
 	})
 	return 1
 })
@@ -337,46 +340,57 @@ func constrainSyncPopupRect(popup, owner winRect, inset int) (x, y, width, heigh
 	if naturalWidth <= 0 || naturalHeight <= 0 {
 		return int(popup.Left), int(popup.Top), naturalWidth, naturalHeight, false
 	}
-	// Position-only policy: never resize wallet/extension popups to the tile.
-	// Shrinking forced Rabby/MetaMask to reflow (broken title wrap, clipped
-	// unlock UI) and fought Chromium's natural size every confinement tick →
-	// flicker. Overflow outside the cell is acceptable; origin stays near owner.
+	// Force-fit into the environment main cell (user + Chrome-Manager behavior):
+	// when the wallet/extension popup is larger than the tiled owner, shrink it
+	// so it scales with the main page instead of spilling into other environments.
+	// When it already fits, keep natural size (no stretch).
 	width, height = naturalWidth, naturalHeight
 	if availableWidth <= 0 || availableHeight <= 0 {
 		return int(popup.Left), int(popup.Top), width, height, false
 	}
+	if width > availableWidth {
+		width = availableWidth
+	}
+	if height > availableHeight {
+		height = availableHeight
+	}
+	// Minimum readable surface — avoid 1×1 thrash if owner is degenerate.
+	if width < 80 && availableWidth >= 80 {
+		width = 80
+		if width > availableWidth {
+			width = availableWidth
+		}
+	}
+	if height < 80 && availableHeight >= 80 {
+		height = 80
+		if height > availableHeight {
+			height = availableHeight
+		}
+	}
 
 	x = int(popup.Left)
 	y = int(popup.Top)
-	// Keep top-left inside the owner cell when possible.
 	if x < left {
 		x = left
 	}
 	if y < top {
 		y = top
 	}
-	// If the natural size is smaller than the cell, also keep bottom-right in.
-	// If larger, do NOT shrink — only shift origin so as much of the popup as
-	// possible overlaps the owner (prefer top-left anchor for extension UI).
-	if width <= availableWidth && x+width > right {
+	if x+width > right {
 		x = right - width
 		if x < left {
 			x = left
 		}
 	}
-	if height <= availableHeight && y+height > bottom {
+	if y+height > bottom {
 		y = bottom - height
 		if y < top {
 			y = top
 		}
 	}
-	// Large wallet: if completely outside horizontally/vertically, pull origin in.
-	if x >= right {
-		x = left
-	}
-	if y >= bottom {
-		y = top
-	}
-	changed = x != int(popup.Left) || y != int(popup.Top)
+	// Ignore 1px jitter so continuous confinement does not fight Chromium layout.
+	posChanged := absSyncInt(x-int(popup.Left)) > 1 || absSyncInt(y-int(popup.Top)) > 1
+	sizeChanged := absSyncInt(width-naturalWidth) > 2 || absSyncInt(height-naturalHeight) > 2
+	changed = posChanged || sizeChanged
 	return x, y, width, height, changed
 }

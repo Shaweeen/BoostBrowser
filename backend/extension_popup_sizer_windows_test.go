@@ -16,54 +16,44 @@ func TestIsMainEnvironmentBrowserFrameRejectsPopupsAndZero(t *testing.T) {
 }
 
 func TestSyncPopupUsesCurrentArrangedOwnerBounds(t *testing.T) {
-	// Oversized wallet whose top-left is already inside the arranged cell:
-	// keep natural size and origin (position-only; never thrash/shrink).
+	// Oversized wallet inside cell → force-fit to available (816×556 after inset).
 	x, y, width, height, changed := constrainSyncPopupRect(
 		winRect{Left: 20, Top: 20, Right: 1460, Bottom: 920},
 		winRect{Left: 0, Top: 0, Right: 820, Bottom: 560},
 		2,
 	)
-	if width != 1440 || height != 900 {
-		t.Fatalf("wallet must keep natural size, got %dx%d", width, height)
+	if !changed || width != 816 || height != 556 {
+		t.Fatalf("oversized wallet must force-fit cell: x=%d y=%d %dx%d changed=%v", x, y, width, height, changed)
 	}
-	if changed || x != 20 || y != 20 {
-		t.Fatalf("origin already inside cell must not thrash: x=%d y=%d changed=%v", x, y, changed)
+	if x != 2 || y != 2 {
+		// After shrink, origin must sit inside inset cell.
+		t.Fatalf("origin after force-fit: x=%d y=%d", x, y)
 	}
 
-	// Origin fully outside the arranged cell → pull into inset; still no resize.
+	// Origin outside + oversized → pull into inset and shrink to cell.
 	x, y, width, height, changed = constrainSyncPopupRect(
 		winRect{Left: -200, Top: -80, Right: 1240, Bottom: 820},
 		winRect{Left: 0, Top: 0, Right: 820, Bottom: 560},
 		2,
 	)
-	if !changed {
-		t.Fatal("misplaced wallet popup origin should be nudged into owner")
-	}
-	if width != 1440 || height != 900 {
-		t.Fatalf("wallet must keep natural size, got %dx%d", width, height)
-	}
-	if x != 2 || y != 2 {
-		t.Fatalf("origin should be clamped to inset cell: x=%d y=%d", x, y)
+	if !changed || x != 2 || y != 2 || width != 816 || height != 556 {
+		t.Fatalf("outside oversized must fit cell: x=%d y=%d %dx%d changed=%v", x, y, width, height, changed)
 	}
 }
 
-func TestSyncPopupDoesNotShrinkTallWallet(t *testing.T) {
-	// Tall wallet notification that exceeds the cell height — still no resize.
+func TestSyncPopupShrinksTallWalletIntoCell(t *testing.T) {
+	// Tall wallet exceeds cell height → force scale height to available.
 	x, y, width, height, changed := constrainSyncPopupRect(
 		winRect{Left: 50, Top: 50, Right: 410, Bottom: 710}, // 360x660
-		winRect{Left: 0, Top: 0, Right: 500, Bottom: 400},   // cell 500x400, inset 2 → 496x396
+		winRect{Left: 0, Top: 0, Right: 500, Bottom: 400},   // available 496x396
 		2,
 	)
-	if width != 360 || height != 660 {
-		t.Fatalf("must not shrink tall wallet: %dx%d", width, height)
+	if width != 360 || height != 396 {
+		t.Fatalf("tall wallet must shrink height into cell: %dx%d", width, height)
 	}
-	// Origin stays if already inside on X; Y may stay 50 if height overflows.
-	if x != 50 || y != 50 || !changed && (x != 50 || y != 50) {
-		// y=50 is inside top; for oversized height we keep top-left (no shrink).
-		_ = changed
-	}
-	if x < 2 || y < 2 {
-		t.Fatalf("origin pulled outside cell incorrectly: %d,%d", x, y)
+	if x != 50 || y != 2 {
+		// Y pulled so height fits; X stays if still inside.
+		t.Fatalf("origin after tall shrink: %d,%d changed=%v", x, y, changed)
 	}
 }
 
@@ -110,7 +100,7 @@ func TestAnyPopupCanResolveOwnerThroughChromeProcessTree(t *testing.T) {
 }
 
 func TestSyncPopupPlacementNeverPromotesDesktopTopmost(t *testing.T) {
-	// Position move, never resize (wallet natural size).
+	// Position-only move keeps NOSIZE.
 	geometryOnly := syncPopupPlacementFlags(true, false, false)
 	if geometryOnly&SWP_NOZORDER == 0 {
 		t.Fatal("geometry-only update must preserve an already correct owner-relative Z-order")
@@ -119,7 +109,12 @@ func TestSyncPopupPlacementNeverPromotesDesktopTopmost(t *testing.T) {
 		t.Fatal("popup placement must not steal focus")
 	}
 	if geometryOnly&SWP_NOSIZE == 0 {
-		t.Fatal("wallet placement must set SWP_NOSIZE to avoid reflow flicker")
+		t.Fatal("position-only move must keep SWP_NOSIZE")
+	}
+	// Force-fit resize: sizeChanged clears NOSIZE.
+	withSize := syncPopupPlacementFlags(true, false, true)
+	if withSize&SWP_NOSIZE != 0 {
+		t.Fatal("force-fit resize must allow size change (no SWP_NOSIZE)")
 	}
 
 	zOrderOnly := syncPopupPlacementFlags(false, true, false)
@@ -165,21 +160,21 @@ func TestOwnerLinkedSurfaceAlwaysContained(t *testing.T) {
 }
 
 func TestConstrainSyncPopupKeepsZOrderAboveOwnerCell(t *testing.T) {
-	// Geometry: notification origin spilled left of a tiled cell.
+	// Geometry: notification origin spilled left of a tiled cell; taller than cell.
 	x, y, w, h, changed := constrainSyncPopupRect(
-		winRect{Left: -40, Top: 20, Right: 400, Bottom: 700},
-		winRect{Left: 0, Top: 0, Right: 420, Bottom: 560},
+		winRect{Left: -40, Top: 20, Right: 400, Bottom: 700}, // 440x680
+		winRect{Left: 0, Top: 0, Right: 420, Bottom: 560},    // available 416x556
 		2,
 	)
 	if !changed {
 		t.Fatal("spilled wallet popup must be moved back into the environment cell")
 	}
-	// Natural size preserved (440x680); origin clamped to cell inset.
-	if w != 440 || h != 680 {
-		t.Fatalf("natural size must be kept: %dx%d", w, h)
+	// Force-fit: width may keep 416 if 440>416; height 556.
+	if w != 416 || h != 556 {
+		t.Fatalf("force-fit size: %dx%d", w, h)
 	}
-	if x != 2 || y != 20 {
-		t.Fatalf("origin clamp: %d,%d", x, y)
+	if x != 2 || y != 2 {
+		t.Fatalf("origin clamp after fit: %d,%d", x, y)
 	}
 }
 

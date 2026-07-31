@@ -24,6 +24,14 @@ import (
 //	5 = open the New Tab Page (chrome://new-tab-page) — NOT what we want
 //
 // We pin restore_on_startup=4 and startup_urls=["about:blank"].
+//
+// Root cause of "extra extension tabs" (why Chrome-Manager has less of this):
+// BrowserStudio launches with --load-extension=… which activates unpacked
+// extensions at process start; wallets then open chrome-extension:// onboarding
+// pages. Chrome-Manager does not inject extensions — it only attaches to
+// already-running windows — so it never pays this cost. Tab cleanup after
+// debug-ready is mitigation; the prefs below reduce session restore of those
+// pages across restarts.
 func sanitizeChromeStartupPreferences(userDataDir string) {
 	if strings.TrimSpace(userDataDir) == "" {
 		return
@@ -126,6 +134,17 @@ func patchChromePreferencesFile(path string) error {
 		syncPrefs["suppress_start"] = true
 		changed = true
 	}
+
+	// Developer mode for unpacked --load-extension packages. Does not open tabs
+	// by itself; avoids Chrome re-prompting "disable developer mode extensions".
+	extRoot := ensureJSONMap(prefs, "extensions")
+	extUI := ensureJSONMap(extRoot, "ui")
+	if extUI["developer_mode"] != true {
+		extUI["developer_mode"] = true
+		changed = true
+	}
+	// Do not invent extensions.settings[*] rows here — that is Chrome's job after
+	// first load. Inventing rows can fight real wallet vault state.
 
 	// 默认搜索引擎由 seedDefaultSearchEngine（chrome_search_engine_seed.go）处理，
 	// 那条路径会同时写 Web Data + Preferences 的 mirrored_template_url_data，
