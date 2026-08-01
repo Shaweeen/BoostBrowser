@@ -851,7 +851,9 @@ export function BrowserListPage() {
   const handleBatchStart = async () => {
     const rawIds = Array.from(visibleSelectedIds)
     if (rawIds.length === 0) return
-    // Natural numeric order so launch + tile follow 编号.
+    // Natural numeric order: 1,2,3… so windows appear on the taskbar in the same
+    // sequence as user 编号. Concurrent starts finish out of order and scramble
+    // taskbar positions even when badge numbers themselves are correct.
     const ids = [...rawIds].sort((idA, idB) => {
       const pa = profiles.find(p => p.profileId === idA)
       const pb = profiles.find(p => p.profileId === idB)
@@ -862,44 +864,37 @@ export function BrowserListPage() {
     const pendingMessages: string[] = []
     const failureMessages: string[] = []
     const startedOrderedIds: string[] = []
-    // Fixed pool of 5 concurrent starts; queue is already natural-sorted so
-    // lower numbers begin first (FIFO workers).
-    const concurrency = Math.min(ids.length, 5)
-    let cursor = 0
-    const launchNext = async () => {
-      while (cursor < ids.length) {
-        const id = ids[cursor++]
-        const profile = profiles.find(p => p.profileId === id)
-        if (!profile || profile.running) continue
-        updatePendingIds(setStartingIds, id, true)
-        try {
-          const startedProfile = await startBrowserInstance(id)
-          mergeProfileState(startedProfile)
+    // Strictly serial: one environment fully started before the next begins.
+    for (const id of ids) {
+      const profile = profiles.find(p => p.profileId === id)
+      if (!profile || profile.running) continue
+      updatePendingIds(setStartingIds, id, true)
+      try {
+        const startedProfile = await startBrowserInstance(id)
+        mergeProfileState(startedProfile)
+        startedOrderedIds.push(id)
+        success++
+      } catch (error: any) {
+        const feedback = resolveActionFeedback(error, '环境启动失败')
+        if (feedback.pendingAttach) {
+          pending++
           startedOrderedIds.push(id)
-          success++
-        } catch (error: any) {
-          const feedback = resolveActionFeedback(error, '环境启动失败')
-          if (feedback.pendingAttach) {
-            pending++
-            startedOrderedIds.push(id)
-            pendingMessages.push(`${profile.profileName}：${feedback.message}`)
-          } else {
-            failed++
-            failureMessages.push(`${profile.profileName}：${feedback.message}`)
-          }
-        } finally {
-          updatePendingIds(setStartingIds, id, false)
+          pendingMessages.push(`${profile.profileName}：${feedback.message}`)
+        } else {
+          failed++
+          failureMessages.push(`${profile.profileName}：${feedback.message}`)
         }
+      } finally {
+        updatePendingIds(setStartingIds, id, false)
       }
     }
-    await Promise.all(Array.from({ length: concurrency }, () => launchNext()))
     // Tile ALL running windows (including already-open work envs) by natural order.
     await arrangeRunningByNaturalOrder(startedOrderedIds)
     setBatchLoading(false)
     const summary = [`成功 ${success}`]
     if (pending > 0) summary.push(`待接管 ${pending}`)
     if (failed > 0) summary.push(`失败 ${failed}`)
-    toast.success(`批量启动完成：${summary.join('，')}${startedOrderedIds.length >= 1 ? '（已按编号自然序平铺）' : ''}`)
+    toast.success(`批量启动完成：${summary.join('，')}${startedOrderedIds.length >= 1 ? '（已按编号顺序串行启动并平铺）' : ''}`)
     if (pendingMessages.length > 0) {
       const preview = pendingMessages.slice(0, 3)
       const more = pendingMessages.length > preview.length ? `\n另有 ${pendingMessages.length - preview.length} 个实例已打开窗口，仍在后台接管。` : ''
