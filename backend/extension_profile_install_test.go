@@ -8,13 +8,13 @@ import (
 	"testing"
 )
 
-func TestInstallUnpackedExtensionIntoProfileMaterializesFilesAndPrefs(t *testing.T) {
+func TestInstallUnpackedExtensionIntoProfileRegistersPrefsNoCopy(t *testing.T) {
 	root := t.TempDir()
 	pkg := filepath.Join(root, "pkg", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	if err := os.MkdirAll(pkg, 0755); err != nil {
 		t.Fatal(err)
 	}
-	manifest := `{"name":"Wallet","version":"1.2.3","manifest_version":3}`
+	manifest := `{"name":"Wallet","version":"1.2.3","manifest_version":3,"permissions":["storage"],"host_permissions":["<all_urls>"]}`
 	if err := os.WriteFile(filepath.Join(pkg, "manifest.json"), []byte(manifest), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -25,28 +25,35 @@ func TestInstallUnpackedExtensionIntoProfileMaterializesFilesAndPrefs(t *testing
 	if err := installUnpackedExtensionIntoProfile(userData, pkg); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	dest := filepath.Join(userData, "Default", "Extensions", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "1.2.3", "manifest.json")
-	if _, err := os.Stat(dest); err != nil {
-		t.Fatalf("package files missing: %v", err)
+	// Must NOT copy into Default/Extensions (slow + wrong for shared packages).
+	copied := filepath.Join(userData, "Default", "Extensions", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if _, err := os.Stat(copied); err == nil {
+		t.Fatal("must not copy package into profile Extensions tree")
 	}
 	if !isExtensionInstalledInProfile(userData, pkg) {
-		t.Fatal("expected profile install to report installed")
+		t.Fatal("expected prefs registration")
 	}
-	// Preferences must list the id.
 	prefIDs := preferenceExtensionIDs(userData)
 	if _, ok := prefIDs["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]; !ok {
 		t.Fatalf("Preferences missing extension id: %#v", prefIDs)
 	}
-	// Second install is idempotent and must not wipe prefs.
-	if err := installUnpackedExtensionIntoProfile(userData, pkg); err != nil {
-		t.Fatalf("reinstall: %v", err)
+	entry, _ := readPreferencesExtensionEntry(userData, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if entry["location"] != float64(chromeExtLocationUnpacked) {
+		t.Fatalf("location must be UNPACKED(4): %#v", entry["location"])
+	}
+	path, _ := entry["path"].(string)
+	abs, _ := filepath.Abs(pkg)
+	if normalizeExtensionPath(path) != normalizeExtensionPath(abs) {
+		t.Fatalf("path must point at shared package: %q vs %q", path, abs)
+	}
+	active, _ := entry["active_permissions"].(map[string]any)
+	if active == nil {
+		t.Fatal("active_permissions required")
 	}
 }
 
 func TestInstallIntoProfileDoesNotTouchLocalExtensionSettings(t *testing.T) {
 	root := t.TempDir()
-	// Use a custom folder name; ID falls back to basename (not 32-char).
-	// For vault protection we use a web-store style folder id.
 	extID := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	pkg := filepath.Join(root, "pkg", extID)
 	if err := os.MkdirAll(pkg, 0755); err != nil {
@@ -73,30 +80,56 @@ func TestInstallIntoProfileDoesNotTouchLocalExtensionSettings(t *testing.T) {
 	}
 }
 
-func TestApplyProfileNativeExtensionLaunchArgsStripsCLIWhenInstalled(t *testing.T) {
+func TestApplyProfileNativeKeepsCLIUntilChromeDataExists(t *testing.T) {
 	root := t.TempDir()
 	extID := "cccccccccccccccccccccccccccccccc"
 	pkg := filepath.Join(root, "pkg", extID)
 	if err := os.MkdirAll(pkg, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(pkg, "manifest.json"), []byte(`{"name":"W","version":"2.0","manifest_version":3}`), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(pkg, "manifest.json"), []byte(`{"name":"W","version":"2.0","manifest_version":3,"permissions":["storage"]}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	userData := filepath.Join(root, "user")
 	args := []string{"--no-first-run", "--load-extension=" + pkg}
-	next, installed, cli := applyProfileNativeExtensionLaunchArgs(args, userData)
-	if installed != 1 || cli != 0 {
-		t.Fatalf("installed=%d cli=%d next=%#v", installed, cli, next)
+	// First open: no LES → must keep --load-extension so toolbar is not empty.
+	next, registered, cli := applyProfileNativeExtensionLaunchArgs(args, userData)
+	if registered < 1 || cli != 1 {
+		t.Fatalf("first open: registered=%d cli=%d next=%#v", registered, cli, next)
 	}
-	for _, a := range next {
+	if !hasExtensionDirInLaunchArgs(next, pkg) {
+		t.Fatalf("first open must inject CLI: %#v", next)
+	}
+	// Simulate Chrome adapt: durable LES for this id.
+	les := filepath.Join(userData, "Default", "Local Extension Settings", extID)
+	if err := os.MkdirAll(les, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(les, "000003.log"), []byte("vault"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	next2, _, cli2 := applyProfileNativeExtensionLaunchArgs(args, userData)
+	if cli2 != 0 {
+		t.Fatalf("after LES, CLI must be skipped: cli=%d next=%#v", cli2, next2)
+	}
+	for _, a := range next2 {
 		if strings.Contains(strings.ToLower(a), "--load-extension=") {
-			t.Fatalf("CLI inject must be stripped after profile install: %#v", next)
+			t.Fatalf("CLI must be stripped after chrome data exists: %#v", next2)
 		}
 	}
-	// Assignment bookkeeping path is gone from argv but package is in profile.
-	if !isExtensionInstalledInProfile(userData, pkg) {
-		t.Fatal("profile must hold the package")
+}
+
+func TestPermissionsFromManifest(t *testing.T) {
+	m := map[string]any{
+		"permissions":      []any{"storage", "tabs", "https://*/*"},
+		"host_permissions": []any{"<all_urls>"},
+	}
+	api, hosts := permissionsFromManifest(m)
+	if len(api) != 2 {
+		t.Fatalf("api=%#v", api)
+	}
+	if len(hosts) < 2 {
+		t.Fatalf("hosts=%#v", hosts)
 	}
 }
 
@@ -125,14 +158,15 @@ func TestEnsurePreferencesExtensionInstalledPreservesExistingEntry(t *testing.T)
 	if err := os.WriteFile(filepath.Join(prefDir, "Preferences"), raw, 0644); err != nil {
 		t.Fatal(err)
 	}
-	installPath := filepath.Join(prefDir, "Extensions", extID, "1.0")
-	if err := os.MkdirAll(installPath, 0755); err != nil {
+	pkg := filepath.Join(root, "pkg", extID)
+	if err := os.MkdirAll(pkg, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(installPath, "manifest.json"), []byte(`{"name":"W","version":"1.0","manifest_version":3}`), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(pkg, "manifest.json"), []byte(`{"name":"W","version":"1.0","manifest_version":3,"permissions":["storage"]}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensurePreferencesExtensionInstalled(userData, extID, installPath, "1.0"); err != nil {
+	abs, _ := filepath.Abs(pkg)
+	if err := ensurePreferencesUnpackedExtension(userData, extID, abs, "1.0"); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(prefDir, "Preferences"))
@@ -148,12 +182,11 @@ func TestEnsurePreferencesExtensionInstalledPreservesExistingEntry(t *testing.T)
 	if entry["account"] != "keep-me" {
 		t.Fatalf("existing prefs fields must be preserved: %#v", entry)
 	}
-	// Re-assign must re-enable and point at the current package path.
 	if entry["state"] != float64(1) {
 		t.Fatalf("re-assign must re-enable extension: %#v", entry["state"])
 	}
-	if entry["path"] != installPath {
-		t.Fatalf("path must update to current install: %#v", entry["path"])
+	if normalizeExtensionPath(entry["path"].(string)) != normalizeExtensionPath(abs) {
+		t.Fatalf("path must update to shared package: %#v", entry["path"])
 	}
 }
 

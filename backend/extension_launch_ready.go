@@ -177,18 +177,11 @@ func loadExtensionDirsNeedingInject(userDataDir string, launchArgs []string) []s
 		return list[i].path < list[j].path
 	})
 	for _, it := range list {
-		// Scheme A: fully materialised in profile Extensions/ + Preferences.
-		if isExtensionInstalledInProfile(userDataDir, it.path) {
+		// Only skip when Chrome left durable runtime files (not prefs-only).
+		if canSkipLoadExtensionCLI(userDataDir, it.path) {
 			continue
 		}
-		if it.id != "" && profileHasExtensionData(userDataDir, it.id, prefIDs) {
-			continue
-		}
-		// Folder basename may differ from Chrome ID; Preferences.path still
-		// points at the package when already adapted.
-		if preferenceReferencesExtensionPath(userDataDir, it.path) {
-			continue
-		}
+		_ = prefIDs
 		need = append(need, it.path)
 	}
 	return need
@@ -232,27 +225,16 @@ func profileHasAnyDurableExtensionStorage(userDataDir string) bool {
 	return len(preferenceExtensionIDs(userDataDir)) > 0
 }
 
-// isEnvironmentHotStartSettled means the environment already holds validated
-// user extension/wallet data and nothing needs first-time CLI inject. Hot start
-// skips heavy prep goroutines. Scheme A: settled when every assigned package is
-// already profile-installed (or durable vault data exists and no CLI needed).
+// isEnvironmentHotStartSettled means every assigned package already has durable
+// Chrome runtime files (LES/etc.) so start can skip first-adapt work and CLI
+// reinject. Preferences-only registration does NOT count as settled.
 func isEnvironmentHotStartSettled(userDataDir string, launchArgs []string) bool {
 	dirs := activeLoadExtensionDirs(launchArgs)
 	if len(dirs) == 0 {
 		return isStartPrepDone(userDataDir) || profileHasAnyDurableExtensionStorage(userDataDir)
 	}
 	for _, packageDir := range dirs {
-		if isExtensionInstalledInProfile(userDataDir, packageDir) {
-			continue
-		}
-		// Not profile-installed yet: also accept legacy vault/prefs presence
-		// without full Scheme A files (migration path).
-		id := resolveExtensionPackageID(packageDir)
-		prefIDs := preferenceExtensionIDs(userDataDir)
-		if id != "" && profileHasExtensionData(userDataDir, id, prefIDs) {
-			continue
-		}
-		if preferenceReferencesExtensionPath(userDataDir, packageDir) {
+		if canSkipLoadExtensionCLI(userDataDir, packageDir) {
 			continue
 		}
 		return false

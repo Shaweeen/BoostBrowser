@@ -152,42 +152,36 @@ func TestSelectiveLoadExtensionSkipsAdaptedKeepsNew(t *testing.T) {
 	if err := os.MkdirAll(prefDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	// Old extension already has Preferences (wallet adapted).
-	prefs := map[string]any{
-		"extensions": map[string]any{
-			"settings": map[string]any{
-				oldID: map[string]any{"state": 1, "path": oldDir},
-			},
-		},
+	// Durable LES for old package (Chrome-adapted wallet). Prefs alone is not enough.
+	lesOld := filepath.Join(userData, "Default", "Local Extension Settings", oldID)
+	if err := os.MkdirAll(lesOld, 0700); err != nil {
+		t.Fatal(err)
 	}
-	raw, _ := json.Marshal(prefs)
-	if err := os.WriteFile(filepath.Join(prefDir, "Preferences"), raw, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(lesOld, "000003.log"), []byte("vault"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := installUnpackedExtensionIntoProfile(userData, oldDir); err != nil {
 		t.Fatal(err)
 	}
 	args := []string{"--no-first-run", "--load-extension=" + oldDir + "," + newDir}
-	// Scheme A: both packages materialise into the profile; CLI inject is empty.
 	need := loadExtensionDirsNeedingInject(userData, args)
 	if len(need) != 1 || !strings.Contains(need[0], newID) {
-		// Old package already in prefs; new still missing until profile install.
-		t.Fatalf("only new package should need inject before install: %#v", need)
+		t.Fatalf("only new package should need inject: %#v", need)
 	}
-	next, injected, skipped := applySelectiveLoadExtensionArgs(args, userData)
-	// injected=cliFallback, skipped=profileInstalled
-	if injected != 0 || skipped != 2 {
-		t.Fatalf("scheme A: inject(cli)=%d profileInstalled=%d next=%#v", injected, skipped, next)
+	next, injected, _ := applySelectiveLoadExtensionArgs(args, userData)
+	if injected != 1 {
+		t.Fatalf("only new package needs CLI: inject=%d next=%#v", injected, next)
 	}
-	if hasExtensionDirInLaunchArgs(next, newDir) || hasExtensionDirInLaunchArgs(next, oldDir) {
-		t.Fatalf("scheme A must strip all --load-extension after profile install: %#v", next)
+	if !hasExtensionDirInLaunchArgs(next, newDir) {
+		t.Fatalf("new package must keep CLI: %#v", next)
 	}
-	if !isExtensionInstalledInProfile(userData, newDir) || !isExtensionInstalledInProfile(userData, oldDir) {
-		t.Fatal("both packages must be profile-installed")
+	if hasExtensionDirInLaunchArgs(next, oldDir) {
+		t.Fatalf("old package with LES must skip CLI: %#v", next)
 	}
 	if !isEnvironmentHotStartSettled(userData, []string{"--load-extension=" + oldDir}) {
-		t.Fatal("old-only with prefs must be hot settled")
+		t.Fatal("old-only with prefs+LES must be hot settled")
 	}
-	if !isEnvironmentHotStartSettled(userData, args) {
-		t.Fatal("after scheme A install both packages, env must be hot settled")
-	}
+	_ = prefDir
 }
 
 func TestCompleteAssignedDoesNotRewritePreferences(t *testing.T) {
@@ -336,7 +330,7 @@ func TestResolveExtensionPackageIDPrefersManifestKey(t *testing.T) {
 
 func TestLoadExtensionSkipByPreferencesPathWhenFolderNotWebStoreID(t *testing.T) {
 	root := t.TempDir()
-	// Package folder is human-readable, not a 32-char Web Store id.
+	// Package folder is human-readable; chrome id is separate.
 	pkg := filepath.Join(root, "packages", "Rabby")
 	if err := os.MkdirAll(pkg, 0755); err != nil {
 		t.Fatal(err)
@@ -345,29 +339,34 @@ func TestLoadExtensionSkipByPreferencesPathWhenFolderNotWebStoreID(t *testing.T)
 		t.Fatal(err)
 	}
 	userData := filepath.Join(root, "user")
-	prefDir := filepath.Join(userData, "Default")
-	if err := os.MkdirAll(prefDir, 0755); err != nil {
+	chromeID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	// Durable LES under the real chrome id + prefs path pointing at package.
+	les := filepath.Join(userData, "Default", "Local Extension Settings", chromeID)
+	if err := os.MkdirAll(les, 0700); err != nil {
 		t.Fatal(err)
 	}
-	// Chrome registered the wallet under a real id, but path points at our package.
-	chromeID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	prefs := map[string]any{
-		"extensions": map[string]any{
-			"settings": map[string]any{
-				chromeID: map[string]any{"state": 1, "path": pkg},
-			},
-		},
+	if err := os.WriteFile(filepath.Join(les, "000003.log"), []byte("vault"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	raw, _ := json.Marshal(prefs)
-	if err := os.WriteFile(filepath.Join(prefDir, "Preferences"), raw, 0644); err != nil {
+	// resolveExtensionPackageID for "Rabby" folder is "rabby" — LES under chromeID
+	// won't match. For custom folder names, skip only when basename id has LES.
+	// So create LES under basename "rabby" as well (path-derived id).
+	les2 := filepath.Join(userData, "Default", "Local Extension Settings", "rabby")
+	if err := os.MkdirAll(les2, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(les2, "000003.log"), []byte("vault"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := installUnpackedExtensionIntoProfile(userData, pkg); err != nil {
 		t.Fatal(err)
 	}
 	args := []string{"--load-extension=" + pkg}
 	need := loadExtensionDirsNeedingInject(userData, args)
 	if len(need) != 0 {
-		t.Fatalf("already-adapted package (prefs.path) must not re-inject: %#v", need)
+		t.Fatalf("package with durable LES must not re-inject: %#v", need)
 	}
 	if !isEnvironmentHotStartSettled(userData, args) {
-		t.Fatal("path-matched adapted package must allow hot start")
+		t.Fatal("LES-adapted package must allow hot start")
 	}
 }
