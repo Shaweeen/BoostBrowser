@@ -82,6 +82,50 @@ func TestSanitizeChromeStartupPreferencesDoesNotCreateSearchProvider(t *testing.
 	}
 }
 
+func TestDiscardChromeRestorableTabSessionsRemovesExtensionTabSnapshotsOnly(t *testing.T) {
+	root := t.TempDir()
+	def := filepath.Join(root, "Default")
+	if err := os.MkdirAll(filepath.Join(def, "Sessions"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Tab session files that would restore chrome-extension:// pages.
+	mustWrite := func(path, body string) {
+		if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite(filepath.Join(def, "Current Session"), "session-snss")
+	mustWrite(filepath.Join(def, "Last Tabs"), "tabs-snss")
+	mustWrite(filepath.Join(def, "Sessions", "Tabs_123"), "tabs")
+	// Wallet / extension durable data must survive.
+	les := filepath.Join(def, "Local Extension Settings", "nkbihfbeogaeaoehlefnkodbefgpgknn")
+	if err := os.MkdirAll(les, 0755); err != nil {
+		t.Fatal(err)
+	}
+	vault := filepath.Join(les, "000003.log")
+	mustWrite(vault, "wallet-vault")
+	cookie := filepath.Join(def, "Cookies")
+	mustWrite(cookie, "cookie-db")
+
+	discardChromeRestorableTabSessions(root)
+
+	if _, err := os.Stat(filepath.Join(def, "Current Session")); !os.IsNotExist(err) {
+		t.Fatal("Current Session snapshot must be removed")
+	}
+	if _, err := os.Stat(filepath.Join(def, "Last Tabs")); !os.IsNotExist(err) {
+		t.Fatal("Last Tabs snapshot must be removed")
+	}
+	if _, err := os.Stat(filepath.Join(def, "Sessions", "Tabs_123")); !os.IsNotExist(err) {
+		t.Fatal("Sessions/* tab payload must be removed")
+	}
+	if _, err := os.Stat(vault); err != nil {
+		t.Fatalf("wallet LES must be kept: %v", err)
+	}
+	if _, err := os.Stat(cookie); err != nil {
+		t.Fatalf("Cookies must be kept: %v", err)
+	}
+}
+
 func TestPatchChromePreferencesFileKeepsExistingSearchProvider(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "Preferences")

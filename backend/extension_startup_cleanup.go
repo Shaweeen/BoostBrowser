@@ -23,10 +23,17 @@ import (
 //
 // We pin restore_on_startup=4 and startup_urls=["about:blank"].
 //
-// Session foundation only. Post-start CDP tab cleanup / handoff was removed:
-// selective --load-extension + hot-settled starts stop extension auto-pages at
-// the source (see extension_launch_ready.go). Do not reintroduce Target.close
-// sweeps after launch.
+// Why MetaMask / Rabby / any extension can show *two* tabs after reopen:
+//  1. Previous run left chrome-extension://… unlock/options tabs open;
+//     Chrome persisted them in Session/Tabs files under user-data.
+//  2. Next start restores those tabs from data, AND --load-extension (if
+//     reinjected) opens a fresh extension page again → duplicate labels.
+// This function pins prefs AND discards restorable tab snapshots only
+// (wallet vaults / Cookies / LES / Extensions install dirs are never touched).
+//
+// Post-start CDP tab cleanup / handoff was removed: selective --load-extension
+// + hot-settled start stop extension auto-pages at the source
+// (see extension_launch_ready.go). Do not reintroduce Target.close sweeps.
 func sanitizeChromeStartupPreferences(userDataDir string) {
 	if strings.TrimSpace(userDataDir) == "" {
 		return
@@ -39,6 +46,70 @@ func sanitizeChromeStartupPreferences(userDataDir string) {
 	} {
 		path := filepath.Join(userDataDir, rel)
 		_ = patchChromePreferencesFile(path)
+	}
+	// Drop previous open-tab snapshots so restored extension pages cannot stack
+	// with a new --load-extension activation (all extensions, not only MetaMask).
+	discardChromeRestorableTabSessions(userDataDir)
+}
+
+// discardChromeRestorableTabSessions removes Chromium session tab files that
+// re-open whatever tabs the user left open last time (including
+// chrome-extension:// unlock / notification full pages).
+//
+// Safe scope: only Session / Tabs / Sessions* under profile roots.
+// Does NOT delete: Local Extension Settings, Cookies, IndexedDB, History,
+// Preferences extension settings, or the shared extension package dirs.
+func discardChromeRestorableTabSessions(userDataDir string) {
+	userDataDir = strings.TrimSpace(userDataDir)
+	if userDataDir == "" {
+		return
+	}
+	// Profile roots that may hold tab snapshots.
+	roots := []string{
+		userDataDir,
+		filepath.Join(userDataDir, "Default"),
+	}
+	if entries, err := os.ReadDir(userDataDir); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if name == "Default" || strings.HasPrefix(name, "Profile ") || name == "Guest Profile" {
+				roots = append(roots, filepath.Join(userDataDir, name))
+			}
+		}
+	}
+	// File names Chrome uses for restorable browsing sessions (versioned SNSS).
+	fileNames := []string{
+		"Current Session",
+		"Last Session",
+		"Current Tabs",
+		"Last Tabs",
+	}
+	seen := map[string]struct{}{}
+	for _, root := range roots {
+		root = filepath.Clean(root)
+		if _, dup := seen[root]; dup {
+			continue
+		}
+		seen[root] = struct{}{}
+		for _, name := range fileNames {
+			_ = os.Remove(filepath.Join(root, name))
+		}
+		// Newer Chromium also keeps numbered files under Sessions/.
+		sessionsDir := filepath.Join(root, "Sessions")
+		entries, err := os.ReadDir(sessionsDir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			// Keep directory structure; only drop session payloads.
+			_ = os.Remove(filepath.Join(sessionsDir, entry.Name()))
+		}
 	}
 }
 
