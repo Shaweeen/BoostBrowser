@@ -527,9 +527,9 @@ func extensionSourceKey(value string) string {
 
 func extensionInstallMessage(previousVersion, extensionVersion string, count int) string {
 	if previousVersion != "" && previousVersion != extensionVersion {
-		return fmt.Sprintf("扩展已从 %s 更新到 %s，并绑定到选中的实例；各环境钱包/Cookies 数据未改动，重启实例后生效", previousVersion, extensionVersion)
+		return fmt.Sprintf("扩展已从 %s 更新到 %s，并写入环境 Profile（方案 A，日常启动不再 --load-extension）；钱包/Cookies 未改动，重启后生效", previousVersion, extensionVersion)
 	}
-	return fmt.Sprintf("扩展 %s 已绑定到 %d 个实例；各环境钱包/Cookies 数据未改动，重启实例后生效", extensionVersion, count)
+	return fmt.Sprintf("扩展 %s 已绑定到 %d 个实例并写入 Profile；日常启动不再命令行加载扩展，钱包/Cookies 未改动", extensionVersion, count)
 }
 
 func (a *App) filterProfilesMissingEquivalentExtension(profileIDs []string, extensionID string, manifestName string) []string {
@@ -1203,6 +1203,14 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) ([]
 	}
 	previous := make(map[string]previousProfileState, len(profileIds))
 	updated := make([]string, 0, len(profileIds))
+	// Scheme A: install into stopped profiles' user-data immediately so the
+	// next start does not need --load-extension. Running profiles install on
+	// the next cold start (Chrome must not own Preferences concurrently).
+	type pendingInstall struct {
+		profileID   string
+		userDataDir string
+	}
+	pending := make([]pendingInstall, 0, len(profileIds))
 	for _, id := range profileIds {
 		profile, ok := a.browserMgr.Profiles[id]
 		if !ok || profile == nil {
@@ -1212,9 +1220,17 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) ([]
 			launchArgs: append([]string{}, profile.LaunchArgs...),
 			updatedAt:  profile.UpdatedAt,
 		}
+		// Keep path in LaunchArgs as the assignment record (which packages are
+		// bound). Runtime strips --load-extension after profile materialize.
 		profile.LaunchArgs = addExtensionDirToLaunchArgs(profile.LaunchArgs, extDir)
 		profile.UpdatedAt = time.Now().Format(time.RFC3339)
 		updated = append(updated, id)
+		if !profile.Running {
+			pending = append(pending, pendingInstall{
+				profileID:   id,
+				userDataDir: a.browserMgr.ResolveUserDataDir(profile),
+			})
+		}
 	}
 	if len(updated) == 0 {
 		return nil, fmt.Errorf("未找到可更新的实例")
@@ -1230,6 +1246,28 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) ([]
 	}
 	// Force next start to re-verify extension packages ↔ profile data.
 	a.clearExtensionLaunchReadyForProfilesLocked(updated)
+	// Materialize while mutex held but Chrome is stopped for these profiles.
+	log := logger.New("Extension")
+	for _, item := range pending {
+		if err := os.MkdirAll(item.userDataDir, 0755); err != nil {
+			log.Warn("扩展 Profile 安装跳过：无法创建用户目录",
+				logger.F("profile_id", item.profileID),
+				logger.F("error", err.Error()),
+			)
+			continue
+		}
+		if err := installUnpackedExtensionIntoProfile(item.userDataDir, extDir); err != nil {
+			log.Warn("分配时 Profile 安装失败，将在下次启动重试",
+				logger.F("profile_id", item.profileID),
+				logger.F("error", err.Error()),
+			)
+			continue
+		}
+		log.Info("分配时已将扩展写入环境 Profile（方案 A）",
+			logger.F("profile_id", item.profileID),
+			logger.F("extension_id", resolveExtensionPackageID(extDir)),
+		)
+	}
 	return updated, nil
 }
 

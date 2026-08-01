@@ -511,16 +511,17 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
-	// Selective inject: never re-activate packages that already have vault/settings
-	// under this environment's data dir (protects imported wallets). New packages
-	// still get a single adapt inject.
-	var injectedN, skippedN int
-	args, injectedN, skippedN = applySelectiveLoadExtensionArgs(args, userDataDir)
-	if injectedN > 0 || skippedN > 0 {
-		log.Info("扩展启动策略",
+	// Scheme A (AdsPower/MoreLogin style): materialize assigned packages into
+	// profile Extensions/ + Preferences, then strip --load-extension so Chrome
+	// does not re-activate extensions every open (which opens unlock/home tabs).
+	// CLI inject remains only as a rare fallback when profile install fails.
+	var profileInstalledN, cliFallbackN int
+	args, profileInstalledN, cliFallbackN = applyProfileNativeExtensionLaunchArgs(args, userDataDir)
+	if profileInstalledN > 0 || cliFallbackN > 0 {
+		log.Info("扩展启动策略（方案 A：Profile 安装）",
 			logger.F("profile_id", profileId),
-			logger.F("inject_now", injectedN),
-			logger.F("skip_reinject", skippedN),
+			logger.F("profile_installed", profileInstalledN),
+			logger.F("cli_fallback", cliFallbackN),
 			logger.F("hot_settled", hotSettled),
 		)
 	}
@@ -675,9 +676,9 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				}
 			}()
 
-			// Only when this start injected something: wait for Chrome to write
-			// profile state, then mark ready. Hot-settled / no inject → no work.
-			if injectedN > 0 && assignmentFP != "" {
+			// CLI fallback only: wait for Chrome to write state after --load-extension.
+			// Scheme A profile-install path needs no post-start adapt wait.
+			if cliFallbackN > 0 && assignmentFP != "" {
 				launchArgsSnapshot := append([]string{}, sanitizedProfileLaunchArgs...)
 				go func() {
 					defer func() { _ = recover() }()
@@ -685,8 +686,12 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 					time.Sleep(1500 * time.Millisecond)
 					a.maybeMarkExtensionLaunchReady(profileId, userDataDir, assignmentFP, launchArgsSnapshot, assignmentExtIDs)
 				}()
-			} else if hotSettled {
+			} else if profileInstalledN > 0 || hotSettled {
 				markStartPrepDone(userDataDir)
+				if assignmentFP != "" {
+					// Profile already holds packages — mark ready without CLI adapt.
+					a.maybeMarkExtensionLaunchReady(profileId, userDataDir, assignmentFP, sanitizedProfileLaunchArgs, assignmentExtIDs)
+				}
 			}
 
 			a.emitBrowserInstanceStarted(profile, false)

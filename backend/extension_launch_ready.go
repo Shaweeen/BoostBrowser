@@ -177,6 +177,10 @@ func loadExtensionDirsNeedingInject(userDataDir string, launchArgs []string) []s
 		return list[i].path < list[j].path
 	})
 	for _, it := range list {
+		// Scheme A: fully materialised in profile Extensions/ + Preferences.
+		if isExtensionInstalledInProfile(userDataDir, it.path) {
+			continue
+		}
 		if it.id != "" && profileHasExtensionData(userDataDir, it.id, prefIDs) {
 			continue
 		}
@@ -190,22 +194,12 @@ func loadExtensionDirsNeedingInject(userDataDir string, launchArgs []string) []s
 	return need
 }
 
-// applySelectiveLoadExtensionArgs keeps assignment records in launchArgs for
-// bookkeeping but only CLI-injects packages that still lack profile data.
-// Returns injected count and skipped (already-adapted) count.
+// applySelectiveLoadExtensionArgs is the legacy name kept for tests. Runtime
+// uses applyProfileNativeExtensionLaunchArgs (Scheme A: profile install first).
+// Returns injected=cliFallback, skipped=profileInstalled for compatibility.
 func applySelectiveLoadExtensionArgs(args []string, userDataDir string) (next []string, injected, skipped int) {
-	args = normalizeLoadExtensionArgs(args)
-	all := activeLoadExtensionDirs(args)
-	if len(all) == 0 {
-		return args, 0, 0
-	}
-	need := loadExtensionDirsNeedingInject(userDataDir, args)
-	skipped = len(all) - len(need)
-	base := stripLoadExtensionArgs(args)
-	if len(need) == 0 {
-		return base, 0, skipped
-	}
-	return normalizeLoadExtensionArgs(append(base, "--load-extension="+strings.Join(need, ","))), len(need), skipped
+	next, profileInstalled, cliFallback := applyProfileNativeExtensionLaunchArgs(args, userDataDir)
+	return next, cliFallback, profileInstalled
 }
 
 // profileHasAnyDurableExtensionStorage reports real Chrome-written extension
@@ -239,23 +233,31 @@ func profileHasAnyDurableExtensionStorage(userDataDir string) bool {
 }
 
 // isEnvironmentHotStartSettled means the environment already holds validated
-// user extension/wallet data and nothing needs first-time inject. Hot start
-// skips: --load-extension reinject, prefs rewrite, sole-blank tab wipe,
-// extension prep goroutines, and other one-time adapt work.
+// user extension/wallet data and nothing needs first-time CLI inject. Hot start
+// skips heavy prep goroutines. Scheme A: settled when every assigned package is
+// already profile-installed (or durable vault data exists and no CLI needed).
 func isEnvironmentHotStartSettled(userDataDir string, launchArgs []string) bool {
-	if len(loadExtensionDirsNeedingInject(userDataDir, launchArgs)) > 0 {
-		// New or incomplete packages still need one adapt pass (only those).
+	dirs := activeLoadExtensionDirs(launchArgs)
+	if len(dirs) == 0 {
+		return isStartPrepDone(userDataDir) || profileHasAnyDurableExtensionStorage(userDataDir)
+	}
+	for _, packageDir := range dirs {
+		if isExtensionInstalledInProfile(userDataDir, packageDir) {
+			continue
+		}
+		// Not profile-installed yet: also accept legacy vault/prefs presence
+		// without full Scheme A files (migration path).
+		id := resolveExtensionPackageID(packageDir)
+		prefIDs := preferenceExtensionIDs(userDataDir)
+		if id != "" && profileHasExtensionData(userDataDir, id, prefIDs) {
+			continue
+		}
+		if preferenceReferencesExtensionPath(userDataDir, packageDir) {
+			continue
+		}
 		return false
 	}
-	if profileHasAnyDurableExtensionStorage(userDataDir) {
-		return true
-	}
-	// No extensions: settled after first start-prep (blank prefs foundation).
-	if len(activeLoadExtensionDirs(launchArgs)) == 0 {
-		return isStartPrepDone(userDataDir)
-	}
-	// Assignment listed but no durable data yet — not settled.
-	return false
+	return true
 }
 
 // Lightweight one-time start prep marker (session restore sanitization etc.).

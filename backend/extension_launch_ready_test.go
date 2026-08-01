@@ -165,22 +165,28 @@ func TestSelectiveLoadExtensionSkipsAdaptedKeepsNew(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := []string{"--no-first-run", "--load-extension=" + oldDir + "," + newDir}
+	// Scheme A: both packages materialise into the profile; CLI inject is empty.
 	need := loadExtensionDirsNeedingInject(userData, args)
 	if len(need) != 1 || !strings.Contains(need[0], newID) {
-		t.Fatalf("only new package should need inject: %#v", need)
+		// Old package already in prefs; new still missing until profile install.
+		t.Fatalf("only new package should need inject before install: %#v", need)
 	}
 	next, injected, skipped := applySelectiveLoadExtensionArgs(args, userData)
-	if injected != 1 || skipped != 1 {
-		t.Fatalf("inject=%d skipped=%d next=%#v", injected, skipped, next)
+	// injected=cliFallback, skipped=profileInstalled
+	if injected != 0 || skipped != 2 {
+		t.Fatalf("scheme A: inject(cli)=%d profileInstalled=%d next=%#v", injected, skipped, next)
 	}
-	if !hasExtensionDirInLaunchArgs(next, newDir) || hasExtensionDirInLaunchArgs(next, oldDir) {
-		t.Fatalf("selective argv wrong: %#v", next)
+	if hasExtensionDirInLaunchArgs(next, newDir) || hasExtensionDirInLaunchArgs(next, oldDir) {
+		t.Fatalf("scheme A must strip all --load-extension after profile install: %#v", next)
+	}
+	if !isExtensionInstalledInProfile(userData, newDir) || !isExtensionInstalledInProfile(userData, oldDir) {
+		t.Fatal("both packages must be profile-installed")
 	}
 	if !isEnvironmentHotStartSettled(userData, []string{"--load-extension=" + oldDir}) {
 		t.Fatal("old-only with prefs must be hot settled")
 	}
-	if isEnvironmentHotStartSettled(userData, args) {
-		t.Fatal("with new package still needing inject must not be settled")
+	if !isEnvironmentHotStartSettled(userData, args) {
+		t.Fatal("after scheme A install both packages, env must be hot settled")
 	}
 }
 
