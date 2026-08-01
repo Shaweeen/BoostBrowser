@@ -125,7 +125,7 @@ func TestLargeFollowerSchedulingUsesStableCadence(t *testing.T) {
 	if got := syncMouseDragThrottle(20); got >= syncMouseMoveThrottle(20) {
 		t.Fatalf("drag throttle must stay denser under large follower counts")
 	}
-	if got := syncPopupBoundsIntervalForFollowers(20); got != 700*time.Millisecond {
+	if got := syncPopupBoundsIntervalForFollowers(20); got != 900*time.Millisecond {
 		t.Fatalf("20 follower popup interval=%v", got)
 	}
 	if got := syncPopupBoundsIntervalForFollowers(2); got != 450*time.Millisecond {

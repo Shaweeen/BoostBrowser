@@ -5,24 +5,80 @@ package backend
 import (
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// Tight inset when nudging popup origin into the owner cell. Wallet/extension
-// surfaces keep their natural size (never forced to tile dimensions).
+// Tight inset when nudging popup origin into the owner cell.
 const syncPopupBoundsInset = 1
 
+// Wallet/extension first paint is fragile under multi-open: SetWindowPos size
+// thrash during open leaves Rabby/MetaMask Notification hosts permanently white
+// (user must restart the environment). Skip force-fit resize for this grace,
+// and never resize titled *Notification* hosts.
+const popupForceFitGrace = 2 * time.Second
+
+var (
+	popupFirstSeenMu sync.Mutex
+	popupFirstSeen   = map[windows.HWND]time.Time{}
+)
+
+func notePopupFirstSeen(hwnd windows.HWND) time.Time {
+	if hwnd == 0 {
+		return time.Time{}
+	}
+	now := time.Now()
+	popupFirstSeenMu.Lock()
+	defer popupFirstSeenMu.Unlock()
+	if t, ok := popupFirstSeen[hwnd]; ok {
+		return t
+	}
+	popupFirstSeen[hwnd] = now
+	// Opportunistic prune of dead windows so the map cannot grow forever under
+	// multi-batch open (200 envs × many short-lived extension shells).
+	if len(popupFirstSeen) > 256 {
+		for h, seen := range popupFirstSeen {
+			if now.Sub(seen) > 2*time.Minute || !isWindow(h) {
+				delete(popupFirstSeen, h)
+			}
+		}
+	}
+	return now
+}
+
+// isWalletNotificationHostTitle matches MV3 wallet notification windows that
+// blank permanently when resized mid-load (Rabby Wallet Notification, etc.).
+func isWalletNotificationHostTitle(title string) bool {
+	lower := strings.ToLower(strings.TrimSpace(title))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "notification") ||
+		strings.Contains(lower, "通知")
+}
+
+// popupAllowForceFitResize: true only after grace and never for notification hosts.
+func popupAllowForceFitResize(hwnd windows.HWND, title string) bool {
+	if isWalletNotificationHostTitle(title) {
+		return false
+	}
+	first := notePopupFirstSeen(hwnd)
+	if first.IsZero() {
+		return false
+	}
+	return time.Since(first) >= popupForceFitGrace
+}
+
 func syncPopupBoundsIntervalForFollowers(followerCount int) time.Duration {
-	// Position-only confinement; slower ticks avoid fighting Chromium's own
-	// wallet re-layout (which caused visible flicker when we resized every 280ms).
+	// Slower ticks under multi-open: less SetWindowPos fighting Chromium paint.
 	switch {
 	case followerCount >= 20:
-		return 700 * time.Millisecond
+		return 900 * time.Millisecond
 	case followerCount >= 8:
-		return 550 * time.Millisecond
+		return 650 * time.Millisecond
 	default:
 		return 450 * time.Millisecond
 	}
@@ -124,13 +180,17 @@ var syncPopupBoundsEnumCallback = windows.NewCallback(func(hwnd windows.HWND, lP
 		return 1
 	}
 
-	// Force popup into the environment cell (Chrome-Manager-style placement):
-	// scale down oversized wallet/extension surfaces so they stay with the
-	// tiled main page; keep natural size when it already fits.
-	x, y, width, height, shouldMove := constrainSyncPopupRect(popupRect, owner.rect, syncPopupBoundsInset)
+	// Placement policy:
+	//  - always nudge origin into the owner cell;
+	//  - force-fit size only after open grace, and never for *Notification* hosts
+	//    (resize mid-paint → permanent white Rabby/MetaMask notification).
+	allowResize := popupAllowForceFitResize(hwnd, title)
+	x, y, width, height, shouldMove := constrainSyncPopupRectOptions(popupRect, owner.rect, syncPopupBoundsInset, allowResize)
 	natW := int(popupRect.Right - popupRect.Left)
 	natH := int(popupRect.Bottom - popupRect.Top)
-	sizeChanged := width != natW || height != natH
+	sizeChanged := allowResize && (width != natW || height != natH)
+	// geometryChanged must include size for SetWindowPos flag selection when we
+	// intentionally shrink; position-only moves keep sizeChanged false.
 	search.placements = append(search.placements, syncPopupPlacement{
 		hwnd:            hwnd,
 		owner:           owner,
@@ -265,12 +325,19 @@ func (search *syncPopupBoundsSearch) applyPlacements() {
 		expectedAbove := boundary
 		for _, placement := range group {
 			zOrderChanged := windowImmediatelyAbove(placement.hwnd) != expectedAbove
+			// Skip pure z-order reshuffles. Under 20× batch multi-open, continuous
+			// SetWindowPos z-order alone interrupts extension first paint and can
+			// leave Rabby Notification permanently white. Geometry/size moves still
+			// re-stack; Chromium keeps relative order for untouched surfaces.
+			if !placement.geometryChanged && !placement.sizeChanged {
+				expectedAbove = placement.hwnd
+				continue
+			}
 			if placement.geometryChanged || zOrderChanged {
 				insertAfter := HWND_TOP
 				if expectedAbove != 0 {
 					insertAfter = uintptr(expectedAbove)
 				}
-				// When only z-order changes, pass 0 size with NOSIZE.
 				w, h := placement.width, placement.height
 				procSetWindowPos.Call(
 					uintptr(placement.hwnd),
@@ -324,7 +391,14 @@ func isSyncPopupSurfaceCandidate(title string, popupRect, ownerRect winRect, own
 	return isDefinitiveExtensionPopupTitle(lowerTitle) || width < ownerWidth || height < ownerHeight
 }
 
+// constrainSyncPopupRect force-fits oversized popups into the owner cell.
+// Production path uses constrainSyncPopupRectOptions with grace/notification
+// policy; tests and delayed force-fit keep this full-fit behavior.
 func constrainSyncPopupRect(popup, owner winRect, inset int) (x, y, width, height int, changed bool) {
+	return constrainSyncPopupRectOptions(popup, owner, inset, true)
+}
+
+func constrainSyncPopupRectOptions(popup, owner winRect, inset int, allowResize bool) (x, y, width, height int, changed bool) {
 	if inset < 0 {
 		inset = 0
 	}
@@ -340,31 +414,32 @@ func constrainSyncPopupRect(popup, owner winRect, inset int) (x, y, width, heigh
 	if naturalWidth <= 0 || naturalHeight <= 0 {
 		return int(popup.Left), int(popup.Top), naturalWidth, naturalHeight, false
 	}
-	// Force-fit into the environment main cell (user + Chrome-Manager behavior):
-	// when the wallet/extension popup is larger than the tiled owner, shrink it
-	// so it scales with the main page instead of spilling into other environments.
-	// When it already fits, keep natural size (no stretch).
+	// Force-fit into the environment main cell when allowed:
+	// shrink only if larger than the tiled owner; never stretch.
+	// Notification hosts / open-grace use allowResize=false (position only).
 	width, height = naturalWidth, naturalHeight
 	if availableWidth <= 0 || availableHeight <= 0 {
 		return int(popup.Left), int(popup.Top), width, height, false
 	}
-	if width > availableWidth {
-		width = availableWidth
-	}
-	if height > availableHeight {
-		height = availableHeight
-	}
-	// Minimum readable surface — avoid 1×1 thrash if owner is degenerate.
-	if width < 80 && availableWidth >= 80 {
-		width = 80
+	if allowResize {
 		if width > availableWidth {
 			width = availableWidth
 		}
-	}
-	if height < 80 && availableHeight >= 80 {
-		height = 80
 		if height > availableHeight {
 			height = availableHeight
+		}
+		// Minimum readable surface — avoid 1×1 thrash if owner is degenerate.
+		if width < 80 && availableWidth >= 80 {
+			width = 80
+			if width > availableWidth {
+				width = availableWidth
+			}
+		}
+		if height < 80 && availableHeight >= 80 {
+			height = 80
+			if height > availableHeight {
+				height = availableHeight
+			}
 		}
 	}
 
@@ -376,21 +451,44 @@ func constrainSyncPopupRect(popup, owner winRect, inset int) (x, y, width, heigh
 	if y < top {
 		y = top
 	}
-	if x+width > right {
-		x = right - width
-		if x < left {
-			x = left
+	// When not resizing, still pin top-left into the cell so the visible chrome
+	// stays with its environment (may spill bottom/right — better than blank).
+	if allowResize {
+		if x+width > right {
+			x = right - width
+			if x < left {
+				x = left
+			}
 		}
-	}
-	if y+height > bottom {
-		y = bottom - height
-		if y < top {
+		if y+height > bottom {
+			y = bottom - height
+			if y < top {
+				y = top
+			}
+		}
+	} else {
+		// Position-only: if the whole popup is larger than the cell, keep the
+		// origin at the cell top-left so title/controls remain clickable.
+		if width > availableWidth {
+			x = left
+		} else if x+width > right {
+			x = right - width
+			if x < left {
+				x = left
+			}
+		}
+		if height > availableHeight {
 			y = top
+		} else if y+height > bottom {
+			y = bottom - height
+			if y < top {
+				y = top
+			}
 		}
 	}
 	// Ignore 1px jitter so continuous confinement does not fight Chromium layout.
 	posChanged := absSyncInt(x-int(popup.Left)) > 1 || absSyncInt(y-int(popup.Top)) > 1
-	sizeChanged := absSyncInt(width-naturalWidth) > 2 || absSyncInt(height-naturalHeight) > 2
+	sizeChanged := allowResize && (absSyncInt(width-naturalWidth) > 2 || absSyncInt(height-naturalHeight) > 2)
 	changed = posChanged || sizeChanged
 	return x, y, width, height, changed
 }

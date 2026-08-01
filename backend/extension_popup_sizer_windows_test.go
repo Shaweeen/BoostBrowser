@@ -2,7 +2,12 @@
 
 package backend
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"golang.org/x/sys/windows"
+)
 
 func TestIsMainEnvironmentBrowserFrameRejectsPopupsAndZero(t *testing.T) {
 	if isMainEnvironmentBrowserFrame(0, "anything") {
@@ -13,6 +18,63 @@ func TestIsMainEnvironmentBrowserFrameRejectsPopupsAndZero(t *testing.T) {
 	if !isCompactExtensionPopupTitle("MetaMask") {
 		t.Fatal("precondition: MetaMask is a popup title")
 	}
+}
+
+func TestWalletNotificationNeverForceFitsSize(t *testing.T) {
+	// Rabby/MetaMask Notification hosts blank permanently if resized mid-paint.
+	if !isWalletNotificationHostTitle("Rabby Wallet Notification") {
+		t.Fatal("Rabby Wallet Notification must be classified as notification host")
+	}
+	if !isWalletNotificationHostTitle("MetaMask Notification") {
+		t.Fatal("MetaMask Notification must be classified as notification host")
+	}
+	if isWalletNotificationHostTitle("MetaMask") {
+		t.Fatal("plain wallet product title is not a notification host")
+	}
+	// Position-only: natural size kept even when larger than cell.
+	x, y, width, height, changed := constrainSyncPopupRectOptions(
+		winRect{Left: -40, Top: 20, Right: 400, Bottom: 700}, // 440x680
+		winRect{Left: 0, Top: 0, Right: 420, Bottom: 560},    // available 416x556
+		2,
+		false,
+	)
+	if width != 440 || height != 680 {
+		t.Fatalf("notification must keep natural size: %dx%d", width, height)
+	}
+	if x != 2 || y != 2 {
+		t.Fatalf("notification origin should pin into cell: %d,%d changed=%v", x, y, changed)
+	}
+	if !changed {
+		t.Fatal("spilled notification origin must still move into cell")
+	}
+}
+
+func TestPopupForceFitGraceBlocksImmediateResize(t *testing.T) {
+	// Fresh hwnd → grace → no force-fit (popupAllowForceFitResize false until 2s).
+	// Use a fake hwnd value that is not a real window; notePopupFirstSeen still records it.
+	hwnd := windows.HWND(0xBEEF)
+	popupFirstSeenMu.Lock()
+	delete(popupFirstSeen, hwnd)
+	popupFirstSeenMu.Unlock()
+	if popupAllowForceFitResize(hwnd, "MetaMask") {
+		t.Fatal("new popup must not force-fit during open grace")
+	}
+	if popupAllowForceFitResize(hwnd, "Rabby Wallet Notification") {
+		t.Fatal("notification host must never allow force-fit")
+	}
+	// After grace: product title may force-fit; notification still blocked.
+	popupFirstSeenMu.Lock()
+	popupFirstSeen[hwnd] = time.Now().Add(-popupForceFitGrace - time.Second)
+	popupFirstSeenMu.Unlock()
+	if !popupAllowForceFitResize(hwnd, "MetaMask") {
+		t.Fatal("after grace, non-notification popup may force-fit")
+	}
+	if popupAllowForceFitResize(hwnd, "Rabby Wallet Notification") {
+		t.Fatal("notification host stays position-only after grace")
+	}
+	popupFirstSeenMu.Lock()
+	delete(popupFirstSeen, hwnd)
+	popupFirstSeenMu.Unlock()
 }
 
 func TestSyncPopupUsesCurrentArrangedOwnerBounds(t *testing.T) {

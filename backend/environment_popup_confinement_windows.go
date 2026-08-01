@@ -31,8 +31,8 @@ var layoutHoldRoot atomic.Value // string
 // Policy:
 //   - one geometry writer (this confiner on main);
 //   - action/lifecycle driven start/stop from environment start/stop;
-//   - force-fit popup into owner cell (scale down when larger than tile;
-//     keep natural size when it already fits) so wallets track main-page tiles;
+//   - force-fit oversized popups into the owner cell after open grace;
+//   - never resize wallet *Notification* hosts (mid-paint resize → permanent white);
 //   - layout hold (local + shared flag) while tiles move.
 type environmentPopupConfiner struct {
 	mu       sync.Mutex
