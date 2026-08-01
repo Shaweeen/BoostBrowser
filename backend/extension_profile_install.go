@@ -496,28 +496,65 @@ func chromeExtensionInstallTime() string {
 	return strconv.FormatInt(us, 10)
 }
 
-// canSkipLoadExtensionCLI is true only when Chrome has already left durable
-// per-extension runtime files (LES LevelDB / IndexedDB under the extension id).
-// Hand-written Preferences alone is NOT enough — Chromium often ignores those
-// rows, which left users with zero toolbar extensions after we stripped CLI.
-func canSkipLoadExtensionCLI(userDataDir, packageDir string) bool {
+// extensionAlreadyPresentInProfileReadOnly is a READ-ONLY check: does this
+// environment already hold the assigned package as a usable extension?
+// Never creates/updates/deletes Preferences, LES, Cookies, or package files.
+//
+// True when any of:
+//   - Local Extension Settings / Extension State / extension IndexedDB has files
+//   - Preferences.settings[id] is ENABLED and path still has a valid manifest
+//   - Preferences.path points at the package (or its abs path) and is ENABLED
+func extensionAlreadyPresentInProfileReadOnly(userDataDir, packageDir string) bool {
+	userDataDir = strings.TrimSpace(userDataDir)
+	packageDir = strings.TrimSpace(packageDir)
+	if userDataDir == "" || packageDir == "" {
+		return false
+	}
+	absPkg, err := filepath.Abs(packageDir)
+	if err != nil {
+		absPkg = packageDir
+	}
 	extID := resolveExtensionPackageID(packageDir)
 	if extID == "" {
 		extID = strings.ToLower(filepath.Base(packageDir))
 	}
-	if extID == "" {
-		return false
-	}
-	// Must have real on-disk chrome state, not just our Preferences registration.
-	if !extensionHasDurableRuntimeFiles(userDataDir, extID) {
-		return false
-	}
-	// And package path should still resolve / be registered when possible.
-	if isExtensionInstalledInProfile(userDataDir, packageDir) {
+	if extID != "" && extensionHasDurableRuntimeFiles(userDataDir, extID) {
 		return true
 	}
-	// LES exists from a prior --load-extension session even if path drifted.
-	return true
+	// Preferences-only (Chrome wrote after a prior load) — read only.
+	entry, ok := readPreferencesExtensionEntry(userDataDir, extID)
+	if !ok || entry == nil {
+		entry, ok = findPreferencesExtensionByPackagePath(userDataDir, absPkg)
+	}
+	if !ok || entry == nil {
+		return false
+	}
+	state, _ := entry["state"].(float64)
+	if state != 1 {
+		return false // disabled / unbound — do not treat as present
+	}
+	path, _ := entry["path"].(string)
+	path = strings.TrimSpace(path)
+	if path == "" {
+		// Enabled row without path still means Chrome knows the extension id;
+		// durable LES already handled above. Without path or LES, keep CLI.
+		return false
+	}
+	// Prefer package path still loadable (shared import dir or profile copy).
+	if validateUnpackedExtensionManifest(path) == nil {
+		return true
+	}
+	if validateUnpackedExtensionManifest(absPkg) == nil &&
+		normalizeExtensionPath(path) == normalizeExtensionPath(absPkg) {
+		return true
+	}
+	return false
+}
+
+// canSkipLoadExtensionCLI is the start-path gate: READ-ONLY presence detection.
+// Does not write disk. Alias for extensionAlreadyPresentInProfileReadOnly.
+func canSkipLoadExtensionCLI(userDataDir, packageDir string) bool {
+	return extensionAlreadyPresentInProfileReadOnly(userDataDir, packageDir)
 }
 
 // extensionHasDurableRuntimeFiles reports Chrome-written storage under LES or
@@ -553,13 +590,11 @@ func extensionHasDurableRuntimeFiles(userDataDir, extID string) bool {
 	return false
 }
 
-// ensureAssignedExtensionsInProfile registers packages in Preferences (fast) and
-// decides which still need --load-extension. First opens always keep CLI until
-// Chrome has written durable extension data.
-func ensureAssignedExtensionsInProfile(userDataDir string, launchArgs []string) (registered int, needCLI []string) {
+// selectLoadExtensionCLIReadOnly decides which assigned packages still need
+// --load-extension. READ-ONLY: never writes Preferences / LES / files.
+// Returns (alreadyPresentCount, needCLIPaths).
+func selectLoadExtensionCLIReadOnly(userDataDir string, launchArgs []string) (present int, needCLI []string) {
 	dirs := activeLoadExtensionDirs(launchArgs)
-	disableUnassignedProfileExtensions(userDataDir, dirs)
-
 	if len(dirs) == 0 {
 		return 0, nil
 	}
@@ -576,17 +611,9 @@ func ensureAssignedExtensionsInProfile(userDataDir string, launchArgs []string) 
 	}
 	log := logger.New("Extension")
 	for _, packageDir := range paths {
-		// Best-effort prefs registration (unpacked path + permissions). Fast.
-		if err := installUnpackedExtensionIntoProfile(userDataDir, packageDir); err != nil {
-			log.Warn("扩展 Preferences 注册失败",
-				logger.F("package", packageDir),
-				logger.F("error", err.Error()),
-			)
-		} else {
-			registered++
-		}
-		if canSkipLoadExtensionCLI(userDataDir, packageDir) {
-			log.Info("扩展已有环境 data，跳过 --load-extension",
+		if extensionAlreadyPresentInProfileReadOnly(userDataDir, packageDir) {
+			present++
+			log.Info("只读检测：环境已有扩展，取消该包 CLI load",
 				logger.F("package", packageDir),
 				logger.F("extension_id", resolveExtensionPackageID(packageDir)),
 			)
@@ -594,7 +621,14 @@ func ensureAssignedExtensionsInProfile(userDataDir string, launchArgs []string) 
 		}
 		needCLI = append(needCLI, packageDir)
 	}
-	return registered, needCLI
+	return present, needCLI
+}
+
+// ensureAssignedExtensionsInProfile is for explicit user assign actions only
+// (writes prefs registration). Start path must use selectLoadExtensionCLIReadOnly.
+func ensureAssignedExtensionsInProfile(userDataDir string, launchArgs []string) (registered int, needCLI []string) {
+	// Start-critical path must NOT call this. Kept for assign-time optional use.
+	return selectLoadExtensionCLIReadOnly(userDataDir, launchArgs)
 }
 
 // disableUnassignedProfileExtensions turns off extensions no longer assigned.
@@ -680,22 +714,20 @@ func disableUnassignedProfileExtensions(userDataDir string, assignedDirs map[str
 	_ = fsutil.WriteFileAtomic(prefPath, out, 0644)
 }
 
-// applyProfileNativeExtensionLaunchArgs:
-//  1. Registers assigned packages in Preferences (unpacked path, no copy);
-//  2. Injects --load-extension for packages Chrome has not adapted yet (has no
-//     LES/vault). This guarantees the toolbar is never empty after upgrade;
-//  3. Skips CLI only when durable profile data proves Chrome already owns the
-//     extension — avoiding daily reinject tab spam once wallets exist.
-func applyProfileNativeExtensionLaunchArgs(args []string, userDataDir string) (next []string, profileInstalled, cliFallback int) {
+// applyProfileNativeExtensionLaunchArgs is the START-PATH policy (read-only):
+//   - if the environment already has the extension → cancel CLI for that package
+//   - otherwise keep --load-extension for first adapt only
+// Never writes Preferences, LES, Cookies, or package files.
+func applyProfileNativeExtensionLaunchArgs(args []string, userDataDir string) (next []string, present, needCLI int) {
 	args = normalizeLoadExtensionArgs(args)
 	all := activeLoadExtensionDirs(args)
 	if len(all) == 0 {
 		return args, 0, 0
 	}
 	base := stripLoadExtensionArgs(args)
-	registered, needCLI := ensureAssignedExtensionsInProfile(userDataDir, args)
-	if len(needCLI) == 0 {
-		return base, registered, 0
+	presentN, need := selectLoadExtensionCLIReadOnly(userDataDir, args)
+	if len(need) == 0 {
+		return base, presentN, 0
 	}
-	return normalizeLoadExtensionArgs(append(base, "--load-extension="+strings.Join(needCLI, ","))), registered, len(needCLI)
+	return normalizeLoadExtensionArgs(append(base, "--load-extension="+strings.Join(need, ","))), presentN, len(need)
 }

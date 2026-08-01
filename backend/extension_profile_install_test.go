@@ -92,15 +92,15 @@ func TestApplyProfileNativeKeepsCLIUntilChromeDataExists(t *testing.T) {
 	}
 	userData := filepath.Join(root, "user")
 	args := []string{"--no-first-run", "--load-extension=" + pkg}
-	// First open: no LES → must keep --load-extension so toolbar is not empty.
-	next, registered, cli := applyProfileNativeExtensionLaunchArgs(args, userData)
-	if registered < 1 || cli != 1 {
-		t.Fatalf("first open: registered=%d cli=%d next=%#v", registered, cli, next)
+	// First open: no profile evidence → must keep --load-extension.
+	next, present, cli := applyProfileNativeExtensionLaunchArgs(args, userData)
+	if present != 0 || cli != 1 {
+		t.Fatalf("first open: present=%d cli=%d next=%#v", present, cli, next)
 	}
 	if !hasExtensionDirInLaunchArgs(next, pkg) {
 		t.Fatalf("first open must inject CLI: %#v", next)
 	}
-	// Simulate Chrome adapt: durable LES for this id.
+	// Simulate Chrome already has extension: LES vault (read-only detect).
 	les := filepath.Join(userData, "Default", "Local Extension Settings", extID)
 	if err := os.MkdirAll(les, 0700); err != nil {
 		t.Fatal(err)
@@ -108,14 +108,61 @@ func TestApplyProfileNativeKeepsCLIUntilChromeDataExists(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(les, "000003.log"), []byte("vault"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	next2, _, cli2 := applyProfileNativeExtensionLaunchArgs(args, userData)
-	if cli2 != 0 {
-		t.Fatalf("after LES, CLI must be skipped: cli=%d next=%#v", cli2, next2)
+	next2, present2, cli2 := applyProfileNativeExtensionLaunchArgs(args, userData)
+	if present2 != 1 || cli2 != 0 {
+		t.Fatalf("after LES, CLI must be cancelled: present=%d cli=%d next=%#v", present2, cli2, next2)
 	}
 	for _, a := range next2 {
 		if strings.Contains(strings.ToLower(a), "--load-extension=") {
-			t.Fatalf("CLI must be stripped after chrome data exists: %#v", next2)
+			t.Fatalf("CLI must be stripped when extension already present: %#v", next2)
 		}
+	}
+}
+
+func TestReadOnlyDetectUsesEnabledPreferencesWithoutWriting(t *testing.T) {
+	root := t.TempDir()
+	extID := "dddddddddddddddddddddddddddddddd"
+	pkg := filepath.Join(root, "pkg", extID)
+	if err := os.MkdirAll(pkg, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "manifest.json"), []byte(`{"name":"W","version":"1","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	abs, _ := filepath.Abs(pkg)
+	userData := filepath.Join(root, "user")
+	prefDir := filepath.Join(userData, "Default")
+	if err := os.MkdirAll(prefDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Chrome-style enabled entry pointing at package (simulate after prior load).
+	prefs := map[string]any{
+		"extensions": map[string]any{
+			"settings": map[string]any{
+				extID: map[string]any{
+					"state": float64(1),
+					"path":  abs,
+				},
+			},
+		},
+	}
+	raw, _ := json.Marshal(prefs)
+	prefPath := filepath.Join(prefDir, "Preferences")
+	if err := os.WriteFile(prefPath, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(prefPath)
+	if !extensionAlreadyPresentInProfileReadOnly(userData, pkg) {
+		t.Fatal("enabled prefs+path must count as present")
+	}
+	// Read-only path must not mutate Preferences.
+	_, need := selectLoadExtensionCLIReadOnly(userData, []string{"--load-extension=" + pkg})
+	if len(need) != 0 {
+		t.Fatalf("CLI must be cancelled: %#v", need)
+	}
+	after, _ := os.ReadFile(prefPath)
+	if string(before) != string(after) {
+		t.Fatal("read-only detect must not rewrite Preferences")
 	}
 }
 

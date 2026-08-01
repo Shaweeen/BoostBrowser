@@ -511,27 +511,24 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
-	// Scheme A integrity gate: when assignment data is complete under user-data,
-	// strip CLI and skip all install/verify — normal start only.
+	// Scheme A start path — READ-ONLY presence detection only.
+	// If the environment already has the assigned extension(s) in user-data,
+	// cancel --load-extension for those packages. Never rewrite Preferences,
+	// LES, Cookies, or package files here (respect user data).
 	var profileInstalledN, cliFallbackN int
-	if isExtensionAssignmentComplete(userDataDir, sanitizedProfileLaunchArgs) {
-		args = stripLoadExtensionArgs(args)
-		log.Info("扩展完整性已确认：跳过安装/CLI/验证，正常启动",
+	args, profileInstalledN, cliFallbackN = applyProfileNativeExtensionLaunchArgs(args, userDataDir)
+	if cliFallbackN == 0 && profileInstalledN > 0 {
+		log.Info("只读检测：环境已有扩展，已取消 CLI load",
 			logger.F("profile_id", profileId),
-			logger.F("assigned", len(assignmentExtIDs)),
+			logger.F("present", profileInstalledN),
 		)
-		profileInstalledN = len(assignmentExtIDs)
-	} else {
-		// Incomplete: register prefs + CLI only for packages without durable data.
-		args, profileInstalledN, cliFallbackN = applyProfileNativeExtensionLaunchArgs(args, userDataDir)
-		if profileInstalledN > 0 || cliFallbackN > 0 {
-			log.Info("扩展启动策略（方案 A：未完整则适配）",
-				logger.F("profile_id", profileId),
-				logger.F("profile_registered", profileInstalledN),
-				logger.F("cli_fallback", cliFallbackN),
-				logger.F("hot_settled", hotSettled),
-			)
-		}
+	} else if cliFallbackN > 0 {
+		log.Info("只读检测：部分扩展尚无环境 data，保留 CLI 首次适配",
+			logger.F("profile_id", profileId),
+			logger.F("present", profileInstalledN),
+			logger.F("cli_load", cliFallbackN),
+			logger.F("hot_settled", hotSettled),
+		)
 	}
 	// Extension package repair runs off the critical path after first start
 	// (async). Avoid blocking multi-open on CRX/key network work.

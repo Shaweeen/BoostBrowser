@@ -53,10 +53,13 @@ func TestIntegrityMarkerFastPathAndClearOnStaleData(t *testing.T) {
 		t.Fatal("marker path must stay complete")
 	}
 
-	// Wipe LES → marker invalidated.
+	// Wipe LES + disable prefs entry → must be incomplete.
 	_ = os.RemoveAll(les)
+	clearExtensionIntegrityMarker(userData)
+	// Remove Preferences settings so read-only detect has nothing left.
+	_ = os.Remove(filepath.Join(userData, "Default", "Preferences"))
 	if isExtensionAssignmentComplete(userData, args) {
-		t.Fatal("after LES wipe must be incomplete")
+		t.Fatal("after wiping LES and prefs must be incomplete")
 	}
 }
 

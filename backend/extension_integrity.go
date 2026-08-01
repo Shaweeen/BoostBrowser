@@ -149,7 +149,8 @@ func everyAssignedHasDurableRuntime(userDataDir string, launchArgs []string) boo
 		return true
 	}
 	for _, dir := range dirs {
-		if !canSkipLoadExtensionCLI(userDataDir, dir) {
+		// Read-only presence (LES or enabled Preferences with valid path).
+		if !extensionAlreadyPresentInProfileReadOnly(userDataDir, dir) {
 			return false
 		}
 	}
@@ -251,13 +252,13 @@ func (a *App) BrowserExtensionIntegrityScanAll(force bool) *ExtensionIntegritySc
 			result.Complete++
 			continue
 		}
-		// Lightweight repair: prefs registration only (no package copy).
-		before := everyAssignedHasDurableRuntime(ud, p.LaunchArgs)
-		_, _ = ensureAssignedExtensionsInProfile(ud, p.LaunchArgs)
-		if markExtensionIntegrityIfComplete(ud, p.ProfileId, p.LaunchArgs) {
+		// READ-ONLY scan: never rewrite Preferences / LES / package files.
+		// Only refresh integrity marker when live detection already proves complete.
+		beforeComplete := isExtensionAssignmentComplete(ud, p.LaunchArgs)
+		if beforeComplete || markExtensionIntegrityIfComplete(ud, p.ProfileId, p.LaunchArgs) {
 			result.Complete++
-			if !before {
-				result.Repaired++
+			if !beforeComplete {
+				result.Repaired++ // marker refreshed only; no user data touched
 			}
 			continue
 		}
