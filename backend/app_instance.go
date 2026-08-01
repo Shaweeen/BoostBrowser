@@ -255,11 +255,10 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		)
 	}
 
-	// Foundation prefs: only when not yet settled (avoid rewriting Preferences
-	// every open while Chrome vaults exist).
-	if !hotSettled {
-		sanitizeChromeStartupPreferences(userDataDir)
-	}
+	// Always pin session foundation (idempotent when already about:blank).
+	// Skipping this on hot start let restore_on_startup drift to "continue" and
+	// reopened chrome-extension unlock tabs — stacked with any inject = two pages.
+	sanitizeChromeStartupPreferences(userDataDir)
 	if !hotSettled && assignmentFP == "" {
 		markStartPrepDone(userDataDir)
 	}

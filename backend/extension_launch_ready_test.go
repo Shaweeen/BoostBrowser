@@ -311,3 +311,57 @@ func TestCompleteAssignedExtensionProfileDataCreatesScaffoldOnlyWhenMissing(t *t
 		t.Fatalf("scaffold must stay empty (no fake vault writes): %d entries", len(entries))
 	}
 }
+
+func TestResolveExtensionPackageIDPrefersManifestKey(t *testing.T) {
+	// Real-ish SPKI-derived ID: use a known test key from import tests if available.
+	// Minimal: folder name "MetaMask" + no key → basename.
+	dir := t.TempDir()
+	pkg := filepath.Join(dir, "MetaMask")
+	if err := os.MkdirAll(pkg, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "manifest.json"), []byte(`{"name":"MetaMask","version":"1","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveExtensionPackageID(pkg); got != "metamask" {
+		t.Fatalf("no-key package id: got %q", got)
+	}
+}
+
+func TestLoadExtensionSkipByPreferencesPathWhenFolderNotWebStoreID(t *testing.T) {
+	root := t.TempDir()
+	// Package folder is human-readable, not a 32-char Web Store id.
+	pkg := filepath.Join(root, "packages", "Rabby")
+	if err := os.MkdirAll(pkg, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "manifest.json"), []byte(`{"name":"Rabby","version":"1","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	userData := filepath.Join(root, "user")
+	prefDir := filepath.Join(userData, "Default")
+	if err := os.MkdirAll(prefDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Chrome registered the wallet under a real id, but path points at our package.
+	chromeID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	prefs := map[string]any{
+		"extensions": map[string]any{
+			"settings": map[string]any{
+				chromeID: map[string]any{"state": 1, "path": pkg},
+			},
+		},
+	}
+	raw, _ := json.Marshal(prefs)
+	if err := os.WriteFile(filepath.Join(prefDir, "Preferences"), raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--load-extension=" + pkg}
+	need := loadExtensionDirsNeedingInject(userData, args)
+	if len(need) != 0 {
+		t.Fatalf("already-adapted package (prefs.path) must not re-inject: %#v", need)
+	}
+	if !isEnvironmentHotStartSettled(userData, args) {
+		t.Fatal("path-matched adapted package must allow hot start")
+	}
+}

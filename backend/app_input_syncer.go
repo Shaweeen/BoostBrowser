@@ -604,7 +604,13 @@ func (s *InputSyncer) StartWithURLSync(masterHwnd windows.HWND, followerHwnds []
 	s.mu.Lock()
 	s.masterDebug = masterDebugPort
 	s.followerDebug = followerDebugPorts
+	// Baseline only on first tick — do not Page.navigate every follower to the
+	// master URL when sync starts/stops (that reloads dapps and drops wallet
+	// connections; user then needs to clear cookies to reconnect).
+	s.lastSyncURL = ""
+	s.lastFocusedEditableState = ""
 	s.mu.Unlock()
+	atomic.StoreInt32(&s.urlSyncReseed, 1)
 
 	if !syncURLSyncEnabled() {
 		log := logger.New("InputSyncer")
@@ -3266,9 +3272,44 @@ func (s *InputSyncer) applyFollowerFocusedEditableStateOnTarget(debugPort int, m
 }
 
 func (s *InputSyncer) navigateFollower(debugPort int, url string) {
+	url = strings.TrimSpace(url)
+	if url == "" || isAboutBlank(url) {
+		return
+	}
+	// Same document → skip. Unconditional Page.navigate reloads the dapp, drops
+	// injected providers / wallet sessions, and looks like "sync start/stop
+	// refreshed every page".
+	if current := strings.TrimSpace(s.getMasterURL(debugPort)); urlsMatchForSync(current, url) {
+		return
+	}
 	_, _ = cdpCall(debugPort, "Page.navigate", map[string]any{
 		"url": url,
 	})
+}
+
+// urlsMatchForSync treats equivalent locations as the same navigation target so
+// we never force-reload an already-open dapp (wallet connect stays alive).
+func urlsMatchForSync(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	// Ignore trailing slash and trailing hash-only differences.
+	strip := func(u string) string {
+		u = strings.TrimSpace(u)
+		if i := strings.IndexByte(u, '#'); i >= 0 {
+			// Keep non-empty hash (SPA routes); drop bare "#"
+			if i+1 == len(u) {
+				u = u[:i]
+			}
+		}
+		return strings.TrimRight(u, "/")
+	}
+	return strip(a) == strip(b)
 }
 
 func isAboutBlank(url string) bool {

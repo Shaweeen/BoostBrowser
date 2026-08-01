@@ -134,6 +134,24 @@ func stripLoadExtensionArgs(args []string) []string {
 	return out
 }
 
+// resolveExtensionPackageID returns the Chrome extension ID under the profile.
+// Prefer the manifest public-key derived Web Store ID; fall back to folder name.
+// Using only filepath.Base mis-identifies packages stored as "MetaMask"/"Rabby"
+// and forces --load-extension on every start → duplicate toolbar icons and a
+// second full-page unlock tab when last session left the first one open.
+func resolveExtensionPackageID(extDir string) string {
+	extDir = strings.TrimSpace(extDir)
+	if extDir == "" {
+		return ""
+	}
+	if key := readManifestPublicKey(extDir); len(key) > 0 {
+		if id := extensionIDFromPublicKey(key); isWebStoreExtensionID(id) {
+			return id
+		}
+	}
+	return strings.ToLower(filepath.Base(extDir))
+}
+
 // loadExtensionDirsNeedingInject returns only packages that do NOT yet have
 // durable profile state (Preferences/LES). Packages with wallet/account data
 // are never re-injected — including when the user later assigns additional
@@ -149,7 +167,7 @@ func loadExtensionDirsNeedingInject(userDataDir string, launchArgs []string) []s
 	type item struct{ id, path string }
 	list := make([]item, 0, len(dirs))
 	for _, original := range dirs {
-		id := strings.ToLower(filepath.Base(strings.TrimSpace(original)))
+		id := resolveExtensionPackageID(original)
 		list = append(list, item{id: id, path: original})
 	}
 	sort.Slice(list, func(i, j int) bool {
@@ -160,6 +178,11 @@ func loadExtensionDirsNeedingInject(userDataDir string, launchArgs []string) []s
 	})
 	for _, it := range list {
 		if it.id != "" && profileHasExtensionData(userDataDir, it.id, prefIDs) {
+			continue
+		}
+		// Folder basename may differ from Chrome ID; Preferences.path still
+		// points at the package when already adapted.
+		if preferenceReferencesExtensionPath(userDataDir, it.path) {
 			continue
 		}
 		need = append(need, it.path)
@@ -472,6 +495,48 @@ func preferenceExtensionIDs(userDataDir string) map[string]struct{} {
 		}
 	}
 	return out
+}
+
+// preferenceReferencesExtensionPath reports that Chrome already registered this
+// unpacked package (extensions.settings[*].path). Used when the package folder
+// name is not the Web Store ID but the profile already adapted the wallet.
+func preferenceReferencesExtensionPath(userDataDir, extDir string) bool {
+	target := normalizeExtensionPath(extDir)
+	if target == "" {
+		return false
+	}
+	targetLower := strings.ToLower(target)
+	for _, path := range chromeProfilePreferencePaths(userDataDir) {
+		data, err := os.ReadFile(path)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		var prefs map[string]any
+		if json.Unmarshal(data, &prefs) != nil {
+			continue
+		}
+		extRoot, _ := prefs["extensions"].(map[string]any)
+		if extRoot == nil {
+			continue
+		}
+		settings, _ := extRoot["settings"].(map[string]any)
+		for _, raw := range settings {
+			entry, _ := raw.(map[string]any)
+			if entry == nil {
+				continue
+			}
+			p, _ := entry["path"].(string)
+			p = normalizeExtensionPath(p)
+			if p == "" {
+				continue
+			}
+			pl := strings.ToLower(p)
+			if pl == targetLower || strings.HasPrefix(pl, targetLower+string(os.PathSeparator)) || strings.HasPrefix(targetLower, pl+string(os.PathSeparator)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func profileHasExtensionData(userDataDir, extensionID string, prefIDs map[string]struct{}) bool {

@@ -76,6 +76,24 @@ func TestEscapePauseKeepsSessionAndTogglesImmediately(t *testing.T) {
 	}
 }
 
+func TestUrlsMatchForSyncSkipsEquivalentLocations(t *testing.T) {
+	if !urlsMatchForSync("https://a.test/path", "https://a.test/path") {
+		t.Fatal("identical URLs must match")
+	}
+	if !urlsMatchForSync("https://a.test/path/", "https://a.test/path") {
+		t.Fatal("trailing slash must not force navigate")
+	}
+	if !urlsMatchForSync("https://a.test/path#", "https://a.test/path") {
+		t.Fatal("bare hash must not force navigate")
+	}
+	if urlsMatchForSync("https://a.test/one", "https://a.test/two") {
+		t.Fatal("different paths must not match")
+	}
+	if urlsMatchForSync("", "https://a.test/") {
+		t.Fatal("empty URL must not match")
+	}
+}
+
 func TestEscapeResumeReseedsURLBaselineWithoutStaleNavigate(t *testing.T) {
 	// Pause/resume must only freeze and restore *input* sync. URL/editable
 	// mirrors are re-baselined so resume cannot Page.navigate followers back to
