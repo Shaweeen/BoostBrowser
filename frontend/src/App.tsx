@@ -115,8 +115,37 @@ async function saveMainWindowBoundsSnapshot() {
   return true
 }
 
+function useExtensionIntegrityScanOnOpen() {
+  useEffect(() => {
+    let cancelled = false
+    const run = async () => {
+      try {
+        const { scanExtensionIntegrityAll } = await import('./modules/browser/api')
+        const result = await scanExtensionIntegrityAll(false)
+        if (cancelled || result?.alreadyScanned) return
+        if (result?.message && (result.incomplete > 0 || result.repaired > 0)) {
+          const { toast } = await import('./shared/components')
+          if (result.incomplete > 0) {
+            toast.warning(result.message)
+          } else {
+            toast.success(result.message)
+          }
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+    const t = window.setTimeout(run, 1200)
+    return () => {
+      cancelled = true
+      window.clearTimeout(t)
+    }
+  }, [])
+}
+
 function useWailsNotifications() {
   const addNotification = useNotificationStore((s) => s.addNotification)
+  useExtensionIntegrityScanOnOpen()
 
   useEffect(() => {
     const runtime = (window as any).runtime

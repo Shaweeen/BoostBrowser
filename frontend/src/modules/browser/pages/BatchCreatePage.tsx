@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Layers } from 'lucide-react'
 import { Button, Card, ConfirmModal, FormItem, Input, Modal, Select, Textarea, toast } from '../../../shared/components'
 import type { BrowserCore, BrowserProfileInput, BrowserProxy, BrowserGroup } from '../types'
-import { batchCreateBrowserProfiles, fetchAllTags, fetchBrowserCores, fetchBrowserProxies, fetchBrowserSettings, fetchGroups } from '../api'
+import { batchCreateBrowserProfiles, fetchAllTags, fetchBrowserCores, fetchBrowserProxies, fetchBrowserSettings, fetchGroups, listKnownExtensionPackages, syncKnownExtensionsToProfiles } from '../api'
 import { FingerprintPanel } from '../components/FingerprintPanel'
 import { TagInput } from '../components/TagInput'
 import { GroupSelector } from '../components/GroupSelector'
@@ -95,6 +95,21 @@ export function BatchCreatePage() {
       const lastName = created[created.length - 1]?.profileName
       const range = firstName && lastName ? `（${firstName} 至 ${lastName}）` : ''
       toast.success(`成功创建 ${created.length} 个实例${range}`)
+      const packages = await listKnownExtensionPackages().catch(() => [])
+      const ids = (created || []).map((p: { profileId?: string }) => p.profileId).filter(Boolean) as string[]
+      if (packages.length > 0 && ids.length > 0) {
+        const ok = window.confirm(
+          `当前已有 ${packages.length} 个扩展包。\n是否同步到本次新建的 ${ids.length} 个环境？\n\n同步后各环境首次打开完成适配即可；完整后不再重复验证。`,
+        )
+        if (ok) {
+          try {
+            const result = await syncKnownExtensionsToProfiles(ids)
+            toast.success(result?.message || '扩展已同步到新环境')
+          } catch (syncErr: any) {
+            toast.error(syncErr?.message || '同步扩展失败')
+          }
+        }
+      }
       setIsDirty(false)
       navigate('/browser/list')
     } catch (error: any) {

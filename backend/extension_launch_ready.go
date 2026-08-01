@@ -605,6 +605,7 @@ func (a *App) clearExtensionLaunchReadyForProfilesLocked(profileIDs []string) {
 			continue
 		}
 		clearExtensionLaunchReadyMarker(userDataDir)
+		clearExtensionIntegrityMarker(userDataDir)
 		logger.New("Extension").Info("扩展分配已变更，下次启动将重新校验环境扩展数据",
 			logger.F("profile_id", id),
 		)
@@ -654,6 +655,8 @@ func (a *App) maybeMarkExtensionLaunchReady(profileID, userDataDir, assignmentFi
 		)
 		return
 	}
+	// Hard stop: integrity marker freezes further install/CLI/verify on start.
+	_ = markExtensionIntegrityIfComplete(userDataDir, profileID, launchArgs)
 	logger.New("Extension").Info("扩展已完成首次适配：后续启动将跳过 --load-extension 注入与扫描，保留钱包/账号状态",
 		logger.F("profile_id", profileID),
 		logger.F("extension_count", len(extensionIDs)),

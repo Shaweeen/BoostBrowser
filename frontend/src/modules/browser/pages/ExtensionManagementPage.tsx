@@ -308,12 +308,30 @@ export function ExtensionManagementPage() {
   }
 
   const distributeExtension = async (item: ManagedExtension) => {
-    const targetIds = item.distributionMode === 'global'
+    let targetIds = item.distributionMode === 'global'
       ? profiles.map(profile => profile.profileId)
-      : item.profileIds
+      : [...item.profileIds]
     if (item.distributionMode === 'manual' && targetIds.length === 0) {
       toast.warning('请先在配置里选择要分配的实例')
       return
+    }
+    // 方案 A：添加/分配扩展时询问是否同步到所有环境
+    if (item.distributionMode === 'manual' && profiles.length > 0) {
+      const allIds = profiles.map(p => p.profileId)
+      const missing = allIds.filter(id => !targetIds.includes(id))
+      if (missing.length > 0) {
+        const ok = window.confirm(
+          `是否将扩展「${item.name}」同步到全部 ${allIds.length} 个环境？\n\n选「确定」= 全部环境；选「取消」= 仅已勾选的 ${targetIds.length} 个环境。\n完整适配后将停止重复验证。`,
+        )
+        if (ok) {
+          targetIds = allIds
+        }
+      }
+    } else if (item.distributionMode === 'global') {
+      const ok = window.confirm(
+        `将把扩展「${item.name}」安装到全部 ${targetIds.length} 个环境。\n是否继续？\n\n各环境首次打开完成适配后，数据完整则不再重复写入/验证。`,
+      )
+      if (!ok) return
     }
     setSubmitting(true)
     try {
@@ -321,8 +339,8 @@ export function ExtensionManagementPage() {
         ? await importGlobalExtension(item.downloadAddress)
         : await importExtensionToBrowserProfiles(targetIds, item.downloadAddress)
       const baseMsg = result?.message || `已分配到 ${targetIds.length} 个实例`
-      toast.success(`${baseMsg}。请打开一次环境完成新扩展适配；环境 data 中已有钱包/扩展数据的包不会再注入。之后热启动跳过重复检测与收标签。`)
-      if (item.distributionMode === 'global') {
+      toast.success(`${baseMsg}。请打开一次环境完成适配；已有钱包/扩展 data 的包不再重复注入。完整后停止验证。`)
+      if (item.distributionMode === 'global' || targetIds.length === profiles.length) {
         setAppliedGlobalProfiles(prev => {
           const next = new Map(prev)
           next.set(extensionAddressKey(item.downloadAddress), new Set(targetIds))

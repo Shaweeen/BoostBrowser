@@ -276,6 +276,69 @@ export async function removeExtensionFromBrowserProfiles(profileIds: string[], d
   }
 }
 
+export interface ExtensionIntegrityScanResult {
+  totalProfiles: number
+  complete: number
+  incomplete: number
+  repaired: number
+  skippedRunning: number
+  incompleteIds: string[]
+  message: string
+  alreadyScanned: boolean
+}
+
+/** One-shot integrity scan on client open (backend de-dupes per session). */
+export async function scanExtensionIntegrityAll(force = false): Promise<ExtensionIntegrityScanResult> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserExtensionIntegrityScanAll) {
+    return await bindings.BrowserExtensionIntegrityScanAll(force)
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.BrowserExtensionIntegrityScanAll) {
+    return await goApp.BrowserExtensionIntegrityScanAll(force)
+  }
+  return {
+    totalProfiles: 0,
+    complete: 0,
+    incomplete: 0,
+    repaired: 0,
+    skippedRunning: 0,
+    incompleteIds: [],
+    message: '扩展巡检不可用（开发预览）',
+    alreadyScanned: true,
+  }
+}
+
+/** Sync all known managed packages onto the given environments. */
+export async function syncKnownExtensionsToProfiles(profileIds: string[]): Promise<ExtensionImportResult> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserExtensionSyncKnownToProfiles) {
+    return await bindings.BrowserExtensionSyncKnownToProfiles(profileIds)
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.BrowserExtensionSyncKnownToProfiles) {
+    return await goApp.BrowserExtensionSyncKnownToProfiles(profileIds)
+  }
+  return {
+    extensionDir: '',
+    extensionId: '',
+    updatedProfiles: profileIds,
+    message: '当前没有可同步的扩展（开发预览）',
+  }
+}
+
+export async function listKnownExtensionPackages(): Promise<Array<{ extensionId: string; name: string; packagePath: string }>> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserExtensionListKnownPackages) {
+    return (await bindings.BrowserExtensionListKnownPackages()) || []
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.BrowserExtensionListKnownPackages) {
+    return (await goApp.BrowserExtensionListKnownPackages()) || []
+  }
+  return []
+}
+
 // ============================================================================
 // Instance API
 // ============================================================================

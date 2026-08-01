@@ -1078,7 +1078,7 @@ export function BrowserListPage() {
   }
 
   const handleImportExtension = async () => {
-    const ids = Array.from(visibleSelectedIds)
+    let ids = Array.from(visibleSelectedIds)
     const url = extensionUrl.trim()
     if (ids.length === 0) {
       toast.warning('请先勾选要导入扩展的环境')
@@ -1087,6 +1087,13 @@ export function BrowserListPage() {
     if (!url) {
       toast.warning('请输入扩展程序下载地址')
       return
+    }
+    const allIds = profiles.map(p => p.profileId)
+    if (allIds.length > ids.length) {
+      const ok = window.confirm(
+        `是否将该扩展同步到全部 ${allIds.length} 个环境？\n\n选「确定」= 全部环境；选「取消」= 仅已勾选的 ${ids.length} 个。\n适配完整后将停止重复验证。`,
+      )
+      if (ok) ids = allIds
     }
     setImportingExtension(true)
     try {

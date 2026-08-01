@@ -511,19 +511,27 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
-	// Scheme A (AdsPower/MoreLogin style): materialize assigned packages into
-	// profile Extensions/ + Preferences, then strip --load-extension so Chrome
-	// does not re-activate extensions every open (which opens unlock/home tabs).
-	// CLI inject remains only as a rare fallback when profile install fails.
+	// Scheme A integrity gate: when assignment data is complete under user-data,
+	// strip CLI and skip all install/verify — normal start only.
 	var profileInstalledN, cliFallbackN int
-	args, profileInstalledN, cliFallbackN = applyProfileNativeExtensionLaunchArgs(args, userDataDir)
-	if profileInstalledN > 0 || cliFallbackN > 0 {
-		log.Info("扩展启动策略（方案 A：Profile 安装）",
+	if isExtensionAssignmentComplete(userDataDir, sanitizedProfileLaunchArgs) {
+		args = stripLoadExtensionArgs(args)
+		log.Info("扩展完整性已确认：跳过安装/CLI/验证，正常启动",
 			logger.F("profile_id", profileId),
-			logger.F("profile_installed", profileInstalledN),
-			logger.F("cli_fallback", cliFallbackN),
-			logger.F("hot_settled", hotSettled),
+			logger.F("assigned", len(assignmentExtIDs)),
 		)
+		profileInstalledN = len(assignmentExtIDs)
+	} else {
+		// Incomplete: register prefs + CLI only for packages without durable data.
+		args, profileInstalledN, cliFallbackN = applyProfileNativeExtensionLaunchArgs(args, userDataDir)
+		if profileInstalledN > 0 || cliFallbackN > 0 {
+			log.Info("扩展启动策略（方案 A：未完整则适配）",
+				logger.F("profile_id", profileId),
+				logger.F("profile_registered", profileInstalledN),
+				logger.F("cli_fallback", cliFallbackN),
+				logger.F("hot_settled", hotSettled),
+			)
+		}
 	}
 	// Extension package repair runs off the critical path after first start
 	// (async). Avoid blocking multi-open on CRX/key network work.
@@ -676,8 +684,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				}
 			}()
 
-			// CLI fallback only: wait for Chrome to write state after --load-extension.
-			// Scheme A profile-install path needs no post-start adapt wait.
+			// After first adapt with CLI: wait for Chrome to flush LES, then freeze integrity.
 			if cliFallbackN > 0 && assignmentFP != "" {
 				launchArgsSnapshot := append([]string{}, sanitizedProfileLaunchArgs...)
 				go func() {
@@ -686,12 +693,17 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 					time.Sleep(1500 * time.Millisecond)
 					a.maybeMarkExtensionLaunchReady(profileId, userDataDir, assignmentFP, launchArgsSnapshot, assignmentExtIDs)
 				}()
-			} else if profileInstalledN > 0 || hotSettled {
+			} else if assignmentFP != "" {
 				markStartPrepDone(userDataDir)
-				if assignmentFP != "" {
-					// Profile already holds packages — mark ready without CLI adapt.
+				// No CLI this start: if durable data already complete, freeze marker now.
+				if isExtensionAssignmentComplete(userDataDir, sanitizedProfileLaunchArgs) ||
+					markExtensionIntegrityIfComplete(userDataDir, profileId, sanitizedProfileLaunchArgs) {
+					// fully stopped verification
+				} else if profileInstalledN > 0 || hotSettled {
 					a.maybeMarkExtensionLaunchReady(profileId, userDataDir, assignmentFP, sanitizedProfileLaunchArgs, assignmentExtIDs)
 				}
+			} else {
+				markStartPrepDone(userDataDir)
 			}
 
 			a.emitBrowserInstanceStarted(profile, false)

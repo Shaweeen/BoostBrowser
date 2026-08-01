@@ -230,6 +230,18 @@ export function BrowserProfileImportExtension(arg1, arg2) {
   return window['go']['main']['App']['BrowserProfileImportExtension'](arg1, arg2);
 }
 
+export function BrowserExtensionIntegrityScanAll(arg1) {
+  return window['go']['main']['App']['BrowserExtensionIntegrityScanAll'](arg1);
+}
+
+export function BrowserExtensionSyncKnownToProfiles(arg1) {
+  return window['go']['main']['App']['BrowserExtensionSyncKnownToProfiles'](arg1);
+}
+
+export function BrowserExtensionListKnownPackages() {
+  return window['go']['main']['App']['BrowserExtensionListKnownPackages']();
+}
+
 export function BrowserProfileList() {
   return window['go']['main']['App']['BrowserProfileList']();
 }

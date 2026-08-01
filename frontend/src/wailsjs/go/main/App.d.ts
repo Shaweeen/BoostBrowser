@@ -116,6 +116,12 @@ export function WalletBatchCancel(arg1:string):Promise<void>;
 
 export function BrowserProfileImportExtension(arg1:Array<string>,arg2:string):Promise<backend.ExtensionImportResult>;
 
+export function BrowserExtensionIntegrityScanAll(arg1:boolean):Promise<Record<string, any>>;
+
+export function BrowserExtensionSyncKnownToProfiles(arg1:Array<string>):Promise<backend.ExtensionImportResult>;
+
+export function BrowserExtensionListKnownPackages():Promise<Array<Record<string, string>>>;
+
 export function BrowserProfileList():Promise<Array<browser.Profile>>;
 
 export function BrowserProfileListByTag(arg1:string):Promise<Array<browser.Profile>>;

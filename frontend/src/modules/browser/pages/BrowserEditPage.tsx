@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { FolderOpen, Layers } from 'lucide-react'
 import { Button, Card, ConfirmModal, FormItem, Input, Modal, Select, Textarea, toast } from '../../../shared/components'
 import type { BrowserCore, BrowserProfileInput, BrowserProxy, BrowserGroup } from '../types'
-import { createBrowserProfile, fetchAllTags, fetchBrowserCores, fetchBrowserProfiles, fetchBrowserProxies, fetchBrowserSettings, fetchGroups, openUserDataDir, updateBrowserProfile } from '../api'
+import { createBrowserProfile, fetchAllTags, fetchBrowserCores, fetchBrowserProfiles, fetchBrowserProxies, fetchBrowserSettings, fetchGroups, listKnownExtensionPackages, openUserDataDir, syncKnownExtensionsToProfiles, updateBrowserProfile } from '../api'
 import { FingerprintPanel } from '../components/FingerprintPanel'
 import { TagInput } from '../components/TagInput'
 import { GroupSelector } from '../components/GroupSelector'
@@ -103,8 +103,23 @@ export function BrowserEditPage() {
     }
     try {
       if (isCreate) {
-        await createBrowserProfile(payload)
+        const created = await createBrowserProfile(payload)
         toast.success('环境已创建')
+        // 方案 A：新建环境时询问是否同步已有扩展
+        const packages = await listKnownExtensionPackages().catch(() => [])
+        if (created?.profileId && packages.length > 0) {
+          const ok = window.confirm(
+            `当前已有 ${packages.length} 个扩展包。\n是否将已有扩展同步到新环境「${created.profileName || created.profileId}」？\n\n同步后首次打开该环境会完成适配；数据完整后不再重复验证。`,
+          )
+          if (ok) {
+            try {
+              const result = await syncKnownExtensionsToProfiles([created.profileId])
+              toast.success(result?.message || '扩展已同步到新环境')
+            } catch (syncErr: any) {
+              toast.error(syncErr?.message || '同步扩展失败')
+            }
+          }
+        }
       } else if (id) {
         await updateBrowserProfile(id, payload)
         toast.success('环境已更新')
