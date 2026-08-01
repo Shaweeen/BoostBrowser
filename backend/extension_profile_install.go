@@ -224,51 +224,156 @@ func ensurePreferencesExtensionInstalled(userDataDir, extID, installPath, versio
 			return manifestErr
 		}
 		settings[extID] = map[string]any{
-			"active_permissions":   map[string]any{},
-			"commands":             map[string]any{},
-			"content_settings":     []any{},
-			"creation_flags":       float64(1),
-			"from_webstore":        false,
-			"granted_permissions":  map[string]any{},
+			"active_permissions":         map[string]any{},
+			"commands":                   map[string]any{},
+			"content_settings":           []any{},
+			"creation_flags":             float64(1),
+			"from_webstore":              false,
+			"granted_permissions":        map[string]any{},
 			"incognito_content_settings": []any{},
 			"incognito_preferences":      map[string]any{},
-			"install_time":         chromeExtensionInstallTime(),
+			"install_time":               chromeExtensionInstallTime(),
 			// 1 = INTERNAL — persists without --load-extension.
-			"location":             float64(1),
-			"manifest":             manifestObj,
-			"path":                 installPath,
-			"preferences":          map[string]any{},
-			"regular_only_preferences": map[string]any{},
-			"state":                float64(1), // ENABLED
-			"was_installed_by_default": false,
-			"was_installed_by_oem":     false,
-			"withholding_permissions":  false,
+			"location":                     float64(1),
+			"manifest":                     manifestObj,
+			"path":                         installPath,
+			"preferences":                  map[string]any{},
+			"regular_only_preferences":     map[string]any{},
+			"state":                        float64(1), // ENABLED
+			"was_installed_by_default":     false,
+			"was_installed_by_oem":         false,
+			"withholding_permissions":      false,
 		}
 	} else {
-		// Never replace the whole map — only heal path/state/location if empty.
-		if path, _ := existing["path"].(string); strings.TrimSpace(path) == "" {
-			existing["path"] = installPath
-		}
-		if _, ok := existing["state"]; !ok {
-			existing["state"] = float64(1)
-		}
-		if _, ok := existing["location"]; !ok {
-			existing["location"] = float64(1)
-		}
-		if _, ok := existing["manifest"]; !ok {
-			if manifestObj, err := readManifestObject(installPath); err == nil {
-				existing["manifest"] = manifestObj
-			}
+		// Preserve wallet-related fields; heal install identity + re-enable.
+		// User may have unbound (state=0) then re-assigned — must enable again.
+		existing["state"] = float64(1)
+		delete(existing, "disable_reasons")
+		// Point at the current package version path (extension updates).
+		existing["path"] = installPath
+		existing["location"] = float64(1)
+		if manifestObj, err := readManifestObject(installPath); err == nil {
+			existing["manifest"] = manifestObj
 		}
 		settings[extID] = existing
 	}
-	_ = version // version is encoded in installPath; kept for call-site clarity
+	_ = version
 
 	out, err := json.MarshalIndent(prefs, "", "   ")
 	if err != nil {
 		return err
 	}
 	return fsutil.WriteFileAtomic(prefPath, out, 0644)
+}
+
+// disableExtensionInProfile keeps package files + LES/wallet vaults, but sets
+// Preferences state to DISABLED so the extension no longer loads after unbind.
+// Deleting settings entirely would risk Chrome recreating a empty vault path
+// on re-assign; disable is the AdsPower-style "untick" behaviour.
+func disableExtensionInProfile(userDataDir, packageDir string) error {
+	userDataDir = strings.TrimSpace(userDataDir)
+	packageDir = strings.TrimSpace(packageDir)
+	if userDataDir == "" {
+		return fmt.Errorf("disable extension: empty user data")
+	}
+	extID := resolveExtensionPackageID(packageDir)
+	if extID == "" {
+		// Fallback: imported packages live under extensions/imported/<id>.
+		extID = strings.ToLower(filepath.Base(packageDir))
+	}
+	if extID == "" {
+		return fmt.Errorf("disable extension: cannot resolve id")
+	}
+	prefPath := filepath.Join(userDataDir, "Default", "Preferences")
+	data, err := os.ReadFile(prefPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil
+	}
+	var prefs map[string]any
+	if err := json.Unmarshal(data, &prefs); err != nil {
+		return err
+	}
+	extRoot, _ := prefs["extensions"].(map[string]any)
+	if extRoot == nil {
+		return nil
+	}
+	settings, _ := extRoot["settings"].(map[string]any)
+	if settings == nil {
+		return nil
+	}
+	existing, _ := settings[extID].(map[string]any)
+	if existing == nil {
+		// Also try matching by path prefix under Default/Extensions.
+		for id, raw := range settings {
+			entry, _ := raw.(map[string]any)
+			if entry == nil {
+				continue
+			}
+			p, _ := entry["path"].(string)
+			if p == "" {
+				continue
+			}
+			pl := strings.ToLower(filepath.Clean(p))
+			if strings.Contains(pl, string(os.PathSeparator)+extID+string(os.PathSeparator)) ||
+				strings.HasSuffix(pl, string(os.PathSeparator)+extID) {
+				existing = entry
+				extID = id
+				break
+			}
+		}
+	}
+	if existing == nil {
+		return nil
+	}
+	existing["state"] = float64(0) // DISABLED
+	// Chrome uses disable_reasons bitfield; 1 = user action.
+	existing["disable_reasons"] = float64(1)
+	settings[extID] = existing
+	out, err := json.MarshalIndent(prefs, "", "   ")
+	if err != nil {
+		return err
+	}
+	return fsutil.WriteFileAtomic(prefPath, out, 0644)
+}
+
+// disableAssignedExtensionOnProfiles disables the package in each profile's
+// Preferences when the environment is not running. Running profiles are left
+// for next cold start after LaunchArgs were already cleared by the caller.
+func disableAssignedExtensionOnProfiles(a *App, profileIDs []string, extDir string) {
+	if a == nil || a.browserMgr == nil || len(profileIDs) == 0 {
+		return
+	}
+	log := logger.New("Extension")
+	for _, id := range profileIDs {
+		a.browserMgr.Mutex.Lock()
+		profile := a.browserMgr.Profiles[id]
+		running := profile != nil && profile.Running
+		var userDataDir string
+		if profile != nil {
+			userDataDir = a.browserMgr.ResolveUserDataDir(profile)
+		}
+		a.browserMgr.Mutex.Unlock()
+		if profile == nil || running || userDataDir == "" {
+			continue
+		}
+		if err := disableExtensionInProfile(userDataDir, extDir); err != nil {
+			log.Warn("解绑时禁用 Profile 扩展失败（下次启动可能仍显示）",
+				logger.F("profile_id", id),
+				logger.F("error", err.Error()),
+			)
+			continue
+		}
+		log.Info("解绑：已在 Profile 中禁用扩展（保留钱包 data）",
+			logger.F("profile_id", id),
+			logger.F("extension_id", resolveExtensionPackageID(extDir)),
+		)
+	}
 }
 
 func readManifestObject(extDir string) (map[string]any, error) {
@@ -298,6 +403,9 @@ func chromeExtensionInstallTime() string {
 // fallback (should be rare).
 func ensureAssignedExtensionsInProfile(userDataDir string, launchArgs []string) (installed int, needCLI []string) {
 	dirs := activeLoadExtensionDirs(launchArgs)
+	// Always reconcile orphans (unbound while Chrome was running → still enabled).
+	disableUnassignedProfileExtensions(userDataDir, dirs)
+
 	if len(dirs) == 0 {
 		return 0, nil
 	}
@@ -316,7 +424,9 @@ func ensureAssignedExtensionsInProfile(userDataDir string, launchArgs []string) 
 	}
 	log := logger.New("Extension")
 	for _, packageDir := range paths {
+		// Already installed but may be disabled from prior unbind → re-enable.
 		if isExtensionInstalledInProfile(userDataDir, packageDir) {
+			_ = installUnpackedExtensionIntoProfile(userDataDir, packageDir) // re-enable + path heal
 			installed++
 			continue
 		}
@@ -335,6 +445,77 @@ func ensureAssignedExtensionsInProfile(userDataDir string, launchArgs []string) 
 		)
 	}
 	return installed, needCLI
+}
+
+// disableUnassignedProfileExtensions turns off Profile-installed extensions that
+// are no longer in the assignment list (LaunchArgs). Keeps LES/wallet data.
+func disableUnassignedProfileExtensions(userDataDir string, assignedDirs map[string]string) {
+	userDataDir = strings.TrimSpace(userDataDir)
+	if userDataDir == "" {
+		return
+	}
+	assigned := map[string]struct{}{}
+	for _, dir := range assignedDirs {
+		id := resolveExtensionPackageID(dir)
+		if id == "" {
+			id = strings.ToLower(filepath.Base(dir))
+		}
+		if id != "" {
+			assigned[id] = struct{}{}
+		}
+	}
+	prefPath := filepath.Join(userDataDir, "Default", "Preferences")
+	data, err := os.ReadFile(prefPath)
+	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+		return
+	}
+	var prefs map[string]any
+	if json.Unmarshal(data, &prefs) != nil {
+		return
+	}
+	extRoot, _ := prefs["extensions"].(map[string]any)
+	if extRoot == nil {
+		return
+	}
+	settings, _ := extRoot["settings"].(map[string]any)
+	if settings == nil {
+		return
+	}
+	extRootPath := filepath.Join(userDataDir, "Default", "Extensions")
+	extRootClean := strings.ToLower(filepath.Clean(extRootPath))
+	changed := false
+	for id, raw := range settings {
+		idLower := strings.ToLower(strings.TrimSpace(id))
+		if _, keep := assigned[idLower]; keep {
+			continue
+		}
+		entry, _ := raw.(map[string]any)
+		if entry == nil {
+			continue
+		}
+		// Only touch extensions we installed under this profile's Extensions/.
+		p, _ := entry["path"].(string)
+		pl := strings.ToLower(filepath.Clean(p))
+		if p == "" || (!strings.HasPrefix(pl, extRootClean+string(os.PathSeparator)) && pl != extRootClean) {
+			continue
+		}
+		state, _ := entry["state"].(float64)
+		if state == 0 {
+			continue
+		}
+		entry["state"] = float64(0)
+		entry["disable_reasons"] = float64(1)
+		settings[id] = entry
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	out, err := json.MarshalIndent(prefs, "", "   ")
+	if err != nil {
+		return
+	}
+	_ = fsutil.WriteFileAtomic(prefPath, out, 0644)
 }
 
 // applyProfileNativeExtensionLaunchArgs is Scheme A launch policy:

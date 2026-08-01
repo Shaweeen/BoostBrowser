@@ -155,6 +155,11 @@ func (a *App) BrowserProfileRemoveExtension(profileIds []string, downloadAddress
 	a.browserMgr.Mutex.Unlock()
 	a.clearExtensionLaunchReadyForProfiles(updated)
 
+	// Scheme A: LaunchArgs no longer drive daily load, so unbind must also
+	// disable the extension inside each stopped profile's Preferences.
+	// Wallet LES / Cookies are preserved for re-assign.
+	disableAssignedExtensionOnProfiles(a, updated, extDir)
+
 	if !stillReferenced && !a.globalExtensionRegistered(extID) {
 		_ = os.RemoveAll(extDir)
 		_ = os.RemoveAll(extDir + ".previous")
@@ -164,7 +169,7 @@ func (a *App) BrowserProfileRemoveExtension(profileIds []string, downloadAddress
 		ExtensionDir:    extDir,
 		ExtensionID:     extID,
 		UpdatedProfiles: updated,
-		Message:         fmt.Sprintf("扩展已从 %d 个实例解绑，重启实例后不再出现", len(updated)),
+		Message:         fmt.Sprintf("扩展已从 %d 个实例解绑并在 Profile 中禁用（钱包数据保留），重启后不再加载", len(updated)),
 	}, nil
 }
 
@@ -1312,6 +1317,36 @@ func (a *App) removeExtensionDirFromProfilesExcept(extDir string, keepProfiles m
 		return nil, fmt.Errorf("保存全局扩展配置失败：%w", err)
 	}
 	a.clearExtensionLaunchReadyForProfilesLocked(updated)
+	toDisable := make([]string, 0, len(updated))
+	for _, id := range updated {
+		if p := a.browserMgr.Profiles[id]; p != nil && !p.Running {
+			toDisable = append(toDisable, id)
+		}
+	}
+	// Must disable after releasing Mutex (helper takes the lock).
+	extDirCopy := extDir
+	idsCopy := append([]string{}, toDisable...)
+	// Caller holds lock; schedule disable after return via defer-like pattern:
+	// we unlock in defer of this function — call disable without holding lock
+	// by unlocking early is unsafe. Collect paths while locked instead.
+	type disableJob struct {
+		userDataDir string
+	}
+	jobs := make([]disableJob, 0, len(idsCopy))
+	for _, id := range idsCopy {
+		if p := a.browserMgr.Profiles[id]; p != nil {
+			jobs = append(jobs, disableJob{userDataDir: a.browserMgr.ResolveUserDataDir(p)})
+		}
+	}
+	// Unlock happens when function returns; run disable after unlock using
+	// a deferred call that runs while... still locked. So disable inline
+	// using pre-resolved paths (no lock needed).
+	for _, job := range jobs {
+		if job.userDataDir == "" {
+			continue
+		}
+		_ = disableExtensionInProfile(job.userDataDir, extDirCopy)
+	}
 	return updated, nil
 }
 

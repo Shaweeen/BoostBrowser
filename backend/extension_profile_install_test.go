@@ -108,14 +108,15 @@ func TestEnsurePreferencesExtensionInstalledPreservesExistingEntry(t *testing.T)
 	if err := os.MkdirAll(prefDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	// Pre-existing wallet-bearing prefs entry.
+	// Pre-existing wallet-bearing prefs entry (disabled after unbind).
 	initial := map[string]any{
 		"extensions": map[string]any{
 			"settings": map[string]any{
 				extID: map[string]any{
-					"state":   float64(1),
-					"path":    "/old/path",
-					"account": "keep-me",
+					"state":           float64(0),
+					"disable_reasons": float64(1),
+					"path":            "/old/path",
+					"account":         "keep-me",
 				},
 			},
 		},
@@ -147,8 +148,53 @@ func TestEnsurePreferencesExtensionInstalledPreservesExistingEntry(t *testing.T)
 	if entry["account"] != "keep-me" {
 		t.Fatalf("existing prefs fields must be preserved: %#v", entry)
 	}
-	// path was non-empty so must stay /old/path (no overwrite of existing path).
-	if entry["path"] != "/old/path" {
-		t.Fatalf("existing path must not be replaced: %#v", entry["path"])
+	// Re-assign must re-enable and point at the current package path.
+	if entry["state"] != float64(1) {
+		t.Fatalf("re-assign must re-enable extension: %#v", entry["state"])
+	}
+	if entry["path"] != installPath {
+		t.Fatalf("path must update to current install: %#v", entry["path"])
+	}
+}
+
+func TestDisableExtensionInProfileKeepsWalletLES(t *testing.T) {
+	root := t.TempDir()
+	extID := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	pkg := filepath.Join(root, "pkg", extID)
+	if err := os.MkdirAll(pkg, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "manifest.json"), []byte(`{"name":"W","version":"1.0","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	userData := filepath.Join(root, "user")
+	if err := installUnpackedExtensionIntoProfile(userData, pkg); err != nil {
+		t.Fatal(err)
+	}
+	les := filepath.Join(userData, "Default", "Local Extension Settings", extID)
+	if err := os.MkdirAll(les, 0700); err != nil {
+		t.Fatal(err)
+	}
+	vault := filepath.Join(les, "vault")
+	if err := os.WriteFile(vault, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := disableExtensionInProfile(userData, pkg); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(vault)
+	if string(got) != "secret" {
+		t.Fatal("disable must keep LES vault")
+	}
+	prefIDs := preferenceExtensionIDs(userData)
+	if _, ok := prefIDs[extID]; !ok {
+		t.Fatal("settings row must remain (disabled, not deleted)")
+	}
+	data, _ := os.ReadFile(filepath.Join(userData, "Default", "Preferences"))
+	var prefs map[string]any
+	_ = json.Unmarshal(data, &prefs)
+	entry := prefs["extensions"].(map[string]any)["settings"].(map[string]any)[extID].(map[string]any)
+	if entry["state"] != float64(0) {
+		t.Fatalf("expected disabled state, got %#v", entry["state"])
 	}
 }

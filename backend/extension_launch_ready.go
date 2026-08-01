@@ -334,7 +334,14 @@ func verifyAssignedExtensionsAgainstProfileData(userDataDir string, launchArgs [
 		if _, err := os.Stat(filepath.Join(extDir, "manifest.json")); err != nil {
 			return false
 		}
-		id := strings.ToLower(filepath.Base(extDir))
+		// Scheme A: profile-native install is sufficient.
+		if isExtensionInstalledInProfile(userDataDir, extDir) {
+			continue
+		}
+		id := resolveExtensionPackageID(extDir)
+		if id == "" {
+			id = strings.ToLower(filepath.Base(extDir))
+		}
 		if !isWebStoreExtensionID(id) {
 			// Custom folder names: live package is enough.
 			continue
@@ -682,7 +689,15 @@ func extensionProfileDataLooksAdapted(userDataDir string, launchArgs []string) b
 	need := 0
 	have := 0
 	for _, original := range dirs {
-		id := strings.ToLower(filepath.Base(strings.TrimSpace(original)))
+		id := resolveExtensionPackageID(original)
+		if id == "" {
+			id = strings.ToLower(filepath.Base(strings.TrimSpace(original)))
+		}
+		if isExtensionInstalledInProfile(userDataDir, original) {
+			need++
+			have++
+			continue
+		}
 		if !isWebStoreExtensionID(id) {
 			continue
 		}
