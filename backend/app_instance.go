@@ -605,8 +605,8 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				logger.F("max_attempts", maxStartAttempts),
 				logger.F("args", strings.Join(args, " ")),
 			)
-			// Post-start CDP tab collapse retired: selective inject + hot-settled
-			// starts prevent extension auto-pages; Preferences pin about:blank.
+			// Start path: no CDP tab sweeps (speed + respect user opens).
+			// Sole-about:blank handoff runs only on StartInputSync.
 
 			// 任务栏 badge 数字直接来自实例名字里的数字段：
 			//   名字 "1"        → badge 1

@@ -276,3 +276,9 @@ behavior is intentionally retired.
 | ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
 | --- | --- | --- | --- | --- | --- | --- |
 | CLEAN-073 | Main-frame `focusedCDPTargetPrefer` fallback that always preferred any `http(s)` page over `chrome-extension://` when OS focus probes failed; wheel path that returned without fallback when follower target match failed; production tile gap of 1px | `v1.7.74` (`c97b529` / `987ca98`) | Master scrolled MetaMask extension home while followers stayed at top (wheel hit wrong CDP document); match miss dropped wheel; user wants near-zero seams | `visibilityState=visible` ranking for active tab (including extension full pages); extension-ID soft match + Win32 wheel fallback; `defaultTileGapPx=0` | Windows pack; scroll on extension full-page manual check | `git show 987ca98:backend/app_input_syncer.go` httpish-first fallback after focus fail. Do not prefer background https over the visible extension tab. |
+
+## v1.7.76 sync-start sole-blank handoff (no post-start tab sweeps)
+
+| ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
+| --- | --- | --- | --- | --- | --- | --- |
+| CLEAN-074 | Retired no-op `FinalizeEnvironmentTabsForUserHandoff` that left multi-tab / extension pages open when user started sync; duplicate “post-start continuous tab cleanup” designs from older releases | `v1.7.75` and CLEAN-063 era | User needs one clean blank shell at sync start then full control; start-path CDP sweeps were slow and fought user opens | `prepareEnvironmentsForSyncHandoff` once inside `StartInputSync` (navigate-first sole about:blank); start path remains prefs+session discard only | Plan unit tests; Windows pack | `git show fb385fe:backend/extension_startup_cleanup.go` retired no-op; pre-CLEAN-063 multi-pass cleanup. Do not restore continuous post-start tab watchers. |

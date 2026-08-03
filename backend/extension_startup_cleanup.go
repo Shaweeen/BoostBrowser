@@ -13,27 +13,20 @@ import (
 )
 
 // sanitizeChromeStartupPreferences sets the profile foundation so Chromium
-// itself opens a single about:blank tab on start. No post-start CDP rewrite of
-// newtab → blank is required when these prefs stick.
+// itself opens a single about:blank tab on start (fast path: prefs only, no CDP).
 //
 // Chrome session.restore_on_startup:
 //
 //	4 = open the URLs in session.startup_urls
 //	5 = open the New Tab Page (chrome://new-tab-page) — NOT what we want
 //
-// We pin restore_on_startup=4 and startup_urls=["about:blank"].
+// Also discards restorable Session/Tabs files so last-run extension pages do
+// not restore on reopen (wallet vaults / Cookies / LES are never touched).
 //
-// Why MetaMask / Rabby / any extension can show *two* tabs after reopen:
-//  1. Previous run left chrome-extension://… unlock/options tabs open;
-//     Chrome persisted them in Session/Tabs files under user-data.
-//  2. Next start restores those tabs from data, AND --load-extension (if
-//     reinjected) opens a fresh extension page again → duplicate labels.
-// This function pins prefs AND discards restorable tab snapshots only
-// (wallet vaults / Cookies / LES / Extensions install dirs are never touched).
-//
-// Post-start CDP tab cleanup / handoff was removed: selective --load-extension
-// + hot-settled start stop extension auto-pages at the source
-// (see extension_launch_ready.go). Do not reintroduce Target.close sweeps.
+// Tab policy after launch:
+//   - Start path: NO CDP close sweeps (user speed + respect open actions).
+//   - Sync start only: one-shot sole about:blank (see sync_tab_handoff.go).
+//   - After that handoff: never manage tabs again until the next StartInputSync.
 func sanitizeChromeStartupPreferences(userDataDir string) {
 	if strings.TrimSpace(userDataDir) == "" {
 		return
@@ -285,14 +278,4 @@ func listCDPTargets(debugPort int) ([]cdpTarget, error) {
 	return targets, nil
 }
 
-// FinalizeEnvironmentTabsForUserHandoff is retired. Post-start CDP tab collapse
-// existed only to clean extension auto-pages caused by re-injecting
-// --load-extension. Root fix: selective inject + hot-settled start. Binding kept
-// as a no-op so older frontends do not break.
-func (a *App) FinalizeEnvironmentTabsForUserHandoff() map[string]interface{} {
-	return map[string]interface{}{
-		"skipped":  true,
-		"reason":   "retired_no_post_start_tab_cleanup",
-		"profiles": 0,
-	}
-}
+

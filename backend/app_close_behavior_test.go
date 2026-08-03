@@ -95,19 +95,18 @@ func TestSyncPanelShutdownNeverStopsSharedBrowserRuntimes(t *testing.T) {
 	}
 }
 
-func TestFinalizeEnvironmentTabsHandoffIsRetired(t *testing.T) {
-	// Post-start CDP handoff was deleted after selective --load-extension root fix.
-	app := NewApp(t.TempDir(), false)
-	result := app.FinalizeEnvironmentTabsForUserHandoff()
-	if result["skipped"] != true {
-		t.Fatalf("retired API must no-op skip: %#v", result)
-	}
-	if result["reason"] != "retired_no_post_start_tab_cleanup" {
-		t.Fatalf("unexpected reason: %#v", result)
-	}
+func TestFinalizeEnvironmentTabsHandoffPanelDelegatesToSyncStart(t *testing.T) {
+	// Canonical sole-blank handoff is StartInputSync; panel list API skips on Windows.
+	// Non-Windows stub also reports skipped (feature is Windows multi-open only).
 	panel := NewApp(t.TempDir(), true)
 	panelResult := panel.FinalizeEnvironmentTabsForUserHandoff()
 	if panelResult["skipped"] != true {
-		t.Fatalf("panel must also no-op: %#v", panelResult)
+		t.Fatalf("panel must skip list-style handoff: %#v", panelResult)
+	}
+	app := NewApp(t.TempDir(), false)
+	result := app.FinalizeEnvironmentTabsForUserHandoff()
+	// Windows main with zero running profiles: profiles=0; non-Windows: skipped stub.
+	if result["skipped"] != true && result["profiles"] != 0 {
+		t.Fatalf("idle handoff must be empty or skipped: %#v", result)
 	}
 }

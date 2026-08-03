@@ -266,6 +266,18 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 		return fmt.Errorf("没有可用的跟随实例")
 	}
 
+	// One-shot user handoff: every participating environment keeps only one
+	// about:blank. Runs before hooks so scroll/click start on a clean shell.
+	// After this, no further tab close/create until the next StartInputSync.
+	masterDebugPort := masterSnapshot.DebugPort
+	handoffProfiles, handoffClosed := prepareEnvironmentsForSyncHandoff(masterDebugPort, followerDebugPorts)
+	if handoffProfiles > 0 {
+		log.Info("同步前标签接管完成",
+			logger.F("profiles", handoffProfiles),
+			logger.F("closed_tabs", handoffClosed),
+		)
+	}
+
 	syncState.mu.Lock()
 	oldSyncer := syncState.syncer
 	syncState.syncer = nil
@@ -287,7 +299,6 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 			wailsruntime.EventsEmit(a.ctx, "window-sync:pause-changed", map[string]interface{}{"paused": paused})
 		}
 	})
-	masterDebugPort := masterSnapshot.DebugPort
 	if err := syncer.StartWithURLSync(masterHwnd, followerHwnds, masterSnapshot.Pid, masterDebugPort, followerDebugPorts); err != nil {
 		return fmt.Errorf("启动同步失败：%v", err)
 	}
