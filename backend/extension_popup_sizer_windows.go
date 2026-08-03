@@ -159,7 +159,7 @@ func isMainEnvironmentBrowserFrame(hwnd windows.HWND, title string) bool {
 // environmentFrameLooksLikeMain classifies a Chrome top-level by client size +
 // title. Size wins over title: a full browser frame whose tab title is
 // "MetaMask" / a wallet brand is still the environment main window. Only
-// compact portrait surfaces with popup titles are treated as extension hosts.
+// tall portrait compact surfaces with popup titles are treated as extension hosts.
 //
 // Regression (1.7.72): title-first rejection made tile/sync return zero HWNDs
 // whenever users had a wallet page open in the main tab ("没有可用的运行实例窗口").
@@ -168,15 +168,17 @@ func environmentFrameLooksLikeMain(w, h int, title string) bool {
 		return false
 	}
 	titlePopup := isCompactExtensionPopupTitle(title) || isDefinitiveExtensionPopupTitle(title)
-	// Classic wallet Notification geometry: tall portrait, not a wide tile cell.
-	if titlePopup && w <= 560 && h <= 900 && h >= w && (w*h) <= 560*750 {
+	// Wallet Notification / confirm: tall portrait (height clearly exceeds width).
+	// Landscape tile cells (e.g. 360×300 under 10-open) must NOT match this.
+	if titlePopup && h > w && h >= 400 && w <= 560 {
 		return false
 	}
-	// Small compact host with a popup title (extension menu / attach surface).
-	if titlePopup && (w < 400 || h < 280) {
+	// Tiny extension menus / attach chips.
+	if titlePopup && w < 280 && h < 280 {
 		return false
 	}
-	// Multi-open tile cells on 1080p are ~340–480×280+ — always main frames.
+	// Multi-open tile cells on 1080p are ~340–480×280+ — always main frames,
+	// including when the active tab title is a wallet product name.
 	if w >= 260 && h >= 120 {
 		return true
 	}
