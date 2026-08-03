@@ -119,6 +119,44 @@ func absCalibInt(value int) int {
 	return value
 }
 
+// mapPhysicalRenderToCDPCoords converts a screen point inside a Chrome render
+// widget (physical pixels from GetWindowRect) into CDP Input.dispatchMouseEvent
+// coordinates (CSS pixels of the document viewport).
+//
+// cssW/cssH should be window.innerWidth/innerHeight of the target document.
+// When unavailable (0), falls back to physical size (correct only at 100% DPI).
+// Under 125%/150% Windows scale, using raw physical offsets as CSS makes
+// top-right controls like "Connect Wallet" miss completely on followers.
+func mapPhysicalRenderToCDPCoords(screenX, screenY, mLeft, mTop, mRight, mBottom int, cssW, cssH float64) (x, y float64, ok bool) {
+	mW := mRight - mLeft
+	mH := mBottom - mTop
+	if mW <= 0 || mH <= 0 {
+		return 0, 0, false
+	}
+	if screenX < mLeft-2 || screenX > mRight+2 || screenY < mTop-2 || screenY > mBottom+2 {
+		return 0, 0, false
+	}
+	relX := float64(screenX-mLeft) / float64(mW)
+	relY := float64(screenY-mTop) / float64(mH)
+	if relX < 0 {
+		relX = 0
+	}
+	if relX > 1 {
+		relX = 1
+	}
+	if relY < 0 {
+		relY = 0
+	}
+	if relY > 1 {
+		relY = 1
+	}
+	outW, outH := float64(mW), float64(mH)
+	if cssW > 1 && cssH > 1 {
+		outW, outH = cssW, cssH
+	}
+	return relX * outW, relY * outH, true
+}
+
 // scaleScrollDelta keeps same-size tiles 1:1 on wheel magnitude; when cell sizes
 // differ, scale horizontal by width ratio and vertical by height ratio so
 // multi-env scroll distance tracks the visible page proportion.

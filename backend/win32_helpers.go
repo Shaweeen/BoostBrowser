@@ -263,6 +263,17 @@ func scoreBrowserTopLevelWindow(hwnd windows.HWND) (processWindowCandidate, bool
 	}
 
 	score := len(title) + 10000 + clientW*clientH/1000
+	// Prefer environment main frames over wallet/extension popups. Under dense
+	// multi-open tile a tall notification can exceed a small main-cell area and
+	// would otherwise win pure size scoring — that "displaces" tile targets.
+	if isMainEnvironmentBrowserFrame(hwnd, title) {
+		score += 200000
+		if looksLikeMainBrowserWindowTitle(title) {
+			score += 50000
+		}
+	} else if isCompactExtensionPopupTitle(title) || isDefinitiveExtensionPopupTitle(title) {
+		score -= 150000
+	}
 	return processWindowCandidate{hwnd: hwnd, score: score}, true
 }
 
@@ -462,12 +473,19 @@ func mapProcessTreeRoots(rootPIDs []int) map[int]int {
 	return pidToRoot
 }
 
-// findProcessTreeWindow resolves the real Chrome frame even when the launcher
-// PID hands the browser window to a child process. CloakBrowser and current
-// Chrome builds can both exhibit this during startup/recovery.
+// findProcessTreeWindow resolves the real Chrome *main* frame even when the
+// launcher PID hands the browser window to a child process. Prefer
+// findMainEnvironmentBrowserWindow so wallet/extension popups are not mistaken
+// for the environment frame (critical for multi-open tile under sync).
 func findProcessTreeWindow(rootPID int) (windows.HWND, error) {
-	if hwnd, err := findProcessWindow(rootPID); err == nil {
+	if hwnd := findMainEnvironmentBrowserWindow(rootPID); hwnd != 0 {
 		return hwnd, nil
+	}
+	// Fallback: largest visible Chrome top-level (legacy scoring).
+	if hwnd, err := findProcessWindow(rootPID); err == nil {
+		if isMainEnvironmentBrowserFrame(hwnd, getWindowTitle(hwnd)) {
+			return hwnd, nil
+		}
 	}
 	children := snapshotProcessChildren()
 	if children == nil {
@@ -483,8 +501,13 @@ func findProcessTreeWindow(rootPID int) (windows.HWND, error) {
 			continue
 		}
 		seen[pid] = true
-		if hwnd, err := findProcessWindow(pid); err == nil {
+		if hwnd := findMainEnvironmentBrowserWindow(pid); hwnd != 0 {
 			return hwnd, nil
+		}
+		if hwnd, err := findProcessWindow(pid); err == nil {
+			if isMainEnvironmentBrowserFrame(hwnd, getWindowTitle(hwnd)) {
+				return hwnd, nil
+			}
 		}
 		queue = append(queue, children[pid]...)
 	}

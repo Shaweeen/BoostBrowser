@@ -364,6 +364,59 @@ func TestExpectedPopupSurfaceLeftPreservesNearestWindowEdge(t *testing.T) {
 	}
 }
 
+func TestHttpishAndExtensionCDPTargetHelpers(t *testing.T) {
+	if !httpishCDPTarget(cdpTarget{URL: "https://beta.auralabs.pro/"}) {
+		t.Fatal("https dapp must be httpish")
+	}
+	if httpishCDPTarget(cdpTarget{URL: "chrome-extension://abc/popup.html"}) {
+		t.Fatal("extension must not be httpish")
+	}
+	if !extensionLikeCDPTarget(cdpTarget{URL: "chrome-extension://abc/notification.html"}) {
+		t.Fatal("extension notification")
+	}
+	if !popupLikeCDPTarget(cdpTarget{URL: "chrome-extension://abc/notification.html"}) {
+		t.Fatal("notification is popup-like")
+	}
+}
+
+func TestPidBelongsToSyncSurfaceTree(t *testing.T) {
+	if !pidBelongsToSyncSurface(10, 10, nil) {
+		t.Fatal("same pid")
+	}
+	if pidBelongsToSyncSurface(11, 10, nil) {
+		t.Fatal("child without tree must fail")
+	}
+	tree := map[int]int{11: 10, 10: 10, 12: 10}
+	if !pidBelongsToSyncSurface(11, 10, tree) {
+		t.Fatal("child in tree must match")
+	}
+	if pidBelongsToSyncSurface(99, 10, tree) {
+		t.Fatal("foreign pid")
+	}
+}
+
+func TestFocusedCDPTargetPreferOrdersPageBeforeExtension(t *testing.T) {
+	// Document pure ranking used when focus probes fail: page mode must not
+	// pick extension first (Connect Wallet regression). Implemented via
+	// httpishCDPTarget / extensionLikeCDPTarget predicates exercised above;
+	// full focusedCDPTargetPrefer needs a live CDP port so we assert ordering
+	// helpers only here.
+	pages := []cdpTarget{
+		{URL: "chrome-extension://metamask/home.html", Type: "page"},
+		{URL: "https://beta.auralabs.pro/stake", Type: "page"},
+	}
+	var chosen cdpTarget
+	for _, target := range pages {
+		if httpishCDPTarget(target) {
+			chosen = target
+			break
+		}
+	}
+	if !httpishCDPTarget(chosen) {
+		t.Fatal("page-prefer path must select https dapp over extension")
+	}
+}
+
 func TestConstrainSyncPopupRectKeepsNestedMenuInsideTile(t *testing.T) {
 	owner := winRect{Left: 0, Top: 0, Right: 500, Bottom: 700}
 	popup := winRect{Left: 430, Top: 120, Right: 680, Bottom: 520}

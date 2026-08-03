@@ -158,12 +158,17 @@ func isMainEnvironmentBrowserFrame(hwnd windows.HWND, title string) bool {
 		return false
 	}
 	// Typical extension popups are compact; the environment main page is a full
-	// browser frame. Allow short stacked heights after multi-open, but reject
-	// narrow popup-like surfaces unless the title clearly is a browser chrome frame.
-	if w < 480 && !looksLikeMainBrowserWindowTitle(title) {
+	// browser frame. Multi-open tile (e.g. 10 envs on 1080p) yields ~340–480px
+	// wide cells — thresholds must stay below that or re-tile re-resolves the
+	// wrong HWND (popup) and windows appear "displaced".
+	if w < 280 && !looksLikeMainBrowserWindowTitle(title) {
 		return false
 	}
-	if h < 200 && w < 700 && !looksLikeMainBrowserWindowTitle(title) {
+	if h < 140 && w < 500 && !looksLikeMainBrowserWindowTitle(title) {
+		return false
+	}
+	// Compact wallet notification-ish sizes that still pass title filters.
+	if w <= 520 && h <= 720 && w < h && isCompactExtensionPopupTitle(title) {
 		return false
 	}
 	return true

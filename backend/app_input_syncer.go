@@ -3,6 +3,7 @@
 package backend
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand"
@@ -85,8 +86,13 @@ type InputSyncer struct {
 	// open a WebSocket per tab on every mouse event; that cost dominates with
 	// 10+ followers and multi-tab profiles. Cache only metadata, never page content.
 	cachedMasterPort      int
+	cachedMasterPreferExt bool
 	cachedMasterTarget    cdpTarget
 	cachedMasterTargetExp time.Time
+
+	// CSS viewport size cache for CDP mouse coords (innerWidth/innerHeight).
+	// Keyed by debugPort so 10-follower bursts reuse one evaluate per env.
+	cssViewportCache sync.Map // int port -> cssViewportCacheEntry
 
 	// 跟随窗口列表原子快照
 	followerSnapshot []windows.HWND
@@ -172,20 +178,33 @@ func pageCDPTargets(debugPort int) []cdpTarget {
 	return pages
 }
 
+func httpishCDPTarget(target cdpTarget) bool {
+	u := strings.ToLower(strings.TrimSpace(target.URL))
+	return strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")
+}
+
+// focusedCDPTarget resolves the document that should receive synced input.
+// preferExtension=true when the master OS surface is a wallet/extension popup;
+// false for the main browser frame (dapp "Connect Wallet" etc.).
+//
+// Critical: when focus probes fail (sync panel steals OS focus), never prefer
+// chrome-extension:// over the live https dapp — that made Connect Wallet open
+// only on master while followers received clicks into MetaMask/Rabby pages.
 func focusedCDPTarget(debugPort int) (cdpTarget, bool) {
+	return focusedCDPTargetPrefer(debugPort, false)
+}
+
+func focusedCDPTargetPrefer(debugPort int, preferExtension bool) (cdpTarget, bool) {
 	pages := pageCDPTargets(debugPort)
 	if len(pages) == 0 {
 		return cdpTarget{}, false
 	}
-	// Common case: one tab → no WebSocket round-trip. Multi-tab profiles still
-	// pay for hasFocus so clicks land on the focused document, not the first
-	// /json entry.
+	// Common case: one tab → no WebSocket round-trip.
 	if len(pages) == 1 {
 		return pages[0], true
 	}
-	// Wallet popups/unlock pages often sit alongside the main tab. Prefer the
-	// document that actually has OS/DOM focus, then one with an active editable
-	// (password/auth input), and only fall back to the first /json page.
+	// Prefer the document that actually has OS/DOM focus, then one with an
+	// active editable (password/auth input).
 	const focusProbe = `(() => {
 		const e = document.activeElement;
 		const editable = !!(e && (
@@ -194,8 +213,9 @@ func focusedCDPTarget(debugPort int) (cdpTarget, bool) {
 		));
 		return {focused: !!document.hasFocus(), editable: editable};
 	})()`
-	var focusedAny, editableAny cdpTarget
+	var focusedAny, editableAny, focusedExt, editableExt cdpTarget
 	haveFocused, haveEditable := false, false
+	haveFocusedExt, haveEditableExt := false, false
 	for _, target := range pages {
 		result, err := cdpCallTarget(target, "Runtime.evaluate", map[string]any{
 			"expression": focusProbe, "returnByValue": true,
@@ -209,25 +229,65 @@ func focusedCDPTarget(debugPort int) (cdpTarget, bool) {
 		}
 		info, _ := value.(map[string]any)
 		if info == nil {
-			// Some CDP stacks return nested objects; tolerate bool-only legacy.
 			if focused, isBool := value.(bool); isBool && focused && !haveFocused {
 				focusedAny = target
 				haveFocused = true
+				if extensionLikeCDPTarget(target) {
+					focusedExt = target
+					haveFocusedExt = true
+				}
 			}
 			continue
 		}
 		focused, _ := info["focused"].(bool)
 		editable, _ := info["editable"].(bool)
+		isExt := extensionLikeCDPTarget(target)
 		if focused && editable {
-			return target, true
+			if preferExtension && !isExt {
+				// Keep looking for a focused extension when master is on a popup.
+			} else {
+				return target, true
+			}
 		}
-		if focused && !haveFocused {
-			focusedAny = target
-			haveFocused = true
+		if focused {
+			if isExt {
+				if !haveFocusedExt {
+					focusedExt = target
+					haveFocusedExt = true
+				}
+			} else if !haveFocused {
+				focusedAny = target
+				haveFocused = true
+			}
 		}
-		if editable && !haveEditable {
-			editableAny = target
-			haveEditable = true
+		if editable {
+			if isExt {
+				if !haveEditableExt {
+					editableExt = target
+					haveEditableExt = true
+				}
+			} else if !haveEditable {
+				editableAny = target
+				haveEditable = true
+			}
+		}
+	}
+	if preferExtension {
+		if haveFocusedExt {
+			return focusedExt, true
+		}
+		if haveEditableExt {
+			return editableExt, true
+		}
+		for _, target := range pages {
+			if extensionLikeCDPTarget(target) && popupLikeCDPTarget(target) {
+				return target, true
+			}
+		}
+		for _, target := range pages {
+			if extensionLikeCDPTarget(target) {
+				return target, true
+			}
 		}
 	}
 	if haveFocused {
@@ -236,10 +296,15 @@ func focusedCDPTarget(debugPort int) (cdpTarget, bool) {
 	if haveEditable {
 		return editableAny, true
 	}
-	// Prefer an open wallet/extension surface over a random first tab when focus
-	// probes all fail (common while the popup is still attaching).
+	// Main-frame path: prefer live http(s) dapp pages, never silent extension
+	// fallback (wallet service pages stay listed in /json after a prior unlock).
 	for _, target := range pages {
-		if extensionLikeCDPTarget(target) {
+		if httpishCDPTarget(target) {
+			return target, true
+		}
+	}
+	for _, target := range pages {
+		if !extensionLikeCDPTarget(target) {
 			return target, true
 		}
 	}
@@ -249,24 +314,30 @@ func focusedCDPTarget(debugPort int) (cdpTarget, bool) {
 // focusedMasterCDPTarget returns the master page target with a short metadata
 // cache so move/click storms do not re-open CDP sockets for every event.
 func (s *InputSyncer) focusedMasterCDPTarget(debugPort int) (cdpTarget, bool) {
+	return s.focusedMasterCDPTargetMode(debugPort, false)
+}
+
+func (s *InputSyncer) focusedMasterCDPTargetMode(debugPort int, preferExtension bool) (cdpTarget, bool) {
 	if s == nil || debugPort <= 0 {
 		return cdpTarget{}, false
 	}
 	now := time.Now()
 	s.mu.Lock()
-	if s.cachedMasterPort == debugPort && now.Before(s.cachedMasterTargetExp) && strings.TrimSpace(s.cachedMasterTarget.ID) != "" {
+	if s.cachedMasterPort == debugPort && s.cachedMasterPreferExt == preferExtension &&
+		now.Before(s.cachedMasterTargetExp) && strings.TrimSpace(s.cachedMasterTarget.ID) != "" {
 		target := s.cachedMasterTarget
 		s.mu.Unlock()
 		return target, true
 	}
 	s.mu.Unlock()
 
-	target, ok := focusedCDPTarget(debugPort)
+	target, ok := focusedCDPTargetPrefer(debugPort, preferExtension)
 	if !ok {
 		return cdpTarget{}, false
 	}
 	s.mu.Lock()
 	s.cachedMasterPort = debugPort
+	s.cachedMasterPreferExt = preferExtension
 	s.cachedMasterTarget = target
 	s.cachedMasterTargetExp = now.Add(focusedMasterCDPTargetCacheTTL)
 	s.mu.Unlock()
@@ -279,9 +350,75 @@ func (s *InputSyncer) invalidateMasterCDPTargetCache() {
 	}
 	s.mu.Lock()
 	s.cachedMasterPort = 0
+	s.cachedMasterPreferExt = false
 	s.cachedMasterTarget = cdpTarget{}
 	s.cachedMasterTargetExp = time.Time{}
 	s.mu.Unlock()
+}
+
+type cssViewportCacheEntry struct {
+	w, h      float64
+	expiresAt time.Time
+}
+
+const cssViewportCacheTTL = 400 * time.Millisecond
+
+// cdpCSSViewportSize returns the document CSS viewport (innerWidth/innerHeight)
+// for CDP mouse coordinates. Cached briefly per debug port under multi-open.
+func (s *InputSyncer) cdpCSSViewportSize(port int, target cdpTarget) (w, h float64, ok bool) {
+	if port > 0 && s != nil {
+		if raw, hit := s.cssViewportCache.Load(port); hit {
+			if entry, castOK := raw.(cssViewportCacheEntry); castOK && time.Now().Before(entry.expiresAt) && entry.w > 1 && entry.h > 1 {
+				return entry.w, entry.h, true
+			}
+		}
+	}
+	result, err := cdpCallTarget(target, "Runtime.evaluate", map[string]any{
+		"expression":    `(() => ({w: window.innerWidth||0, h: window.innerHeight||0}))()`,
+		"returnByValue": true,
+	})
+	if err != nil {
+		return 0, 0, false
+	}
+	value, vok := cdpRuntimeValue(result)
+	if !vok {
+		return 0, 0, false
+	}
+	info, _ := value.(map[string]any)
+	if info == nil {
+		return 0, 0, false
+	}
+	w = cdpNumberAsFloat(info["w"])
+	h = cdpNumberAsFloat(info["h"])
+	if w <= 1 || h <= 1 {
+		return 0, 0, false
+	}
+	if port > 0 && s != nil {
+		s.cssViewportCache.Store(port, cssViewportCacheEntry{
+			w: w, h: h, expiresAt: time.Now().Add(cssViewportCacheTTL),
+		})
+	}
+	return w, h, true
+}
+
+func cdpNumberAsFloat(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int32:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case json.Number:
+		f, _ := n.Float64()
+		return f
+	default:
+		return 0
+	}
 }
 
 func cdpTargetURLWithoutFragment(raw string) string {
@@ -832,6 +969,38 @@ func (s *InputSyncer) canDispatch() bool {
 		atomic.LoadInt32(&s.layoutUpdating) == 0
 }
 
+// ReplaceWindowHandles refreshes master/follower HWNDs after tile/layout so
+// sync keeps targeting the main browser frames (not stale or popup handles).
+// Callers must pass followers in the original sync followerIds order so CDP
+// debug ports remain index-aligned.
+func (s *InputSyncer) ReplaceWindowHandles(master windows.HWND, followers []windows.HWND) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if master != 0 && isWindow(master) {
+		s.masterHwnd = master
+	}
+	filtered := make([]windows.HWND, 0, len(followers))
+	seen := map[windows.HWND]struct{}{}
+	for _, h := range followers {
+		if h == 0 || h == s.masterHwnd || !isWindow(h) {
+			continue
+		}
+		if _, dup := seen[h]; dup {
+			continue
+		}
+		seen[h] = struct{}{}
+		filtered = append(filtered, h)
+	}
+	s.followerHwnds = filtered
+	s.mu.Unlock()
+
+	s.followerMu.Lock()
+	s.followerSnapshot = append([]windows.HWND(nil), filtered...)
+	s.followerMu.Unlock()
+}
+
 // BeginLayoutUpdate creates a hard boundary between window movement and input
 // coordinate mapping. Events queued against the previous geometry are dropped.
 // Confiner hold is owned by syncTileWindowsLocal (not nested here) so End does
@@ -1123,11 +1292,26 @@ type syncInputSurfaceCandidate struct {
 type syncInputSurfaceSearch struct {
 	pid          uint32
 	mainHwnd     windows.HWND
+	treeRoots    map[int]int // pid → root; MV3 wallet notifications may be child processes
 	master       syncInputSurfaceCandidate
 	expectedLeft int
 	expectedTop  int
 	best         windows.HWND
 	bestScore    int64
+}
+
+func pidBelongsToSyncSurface(pid uint32, mainPID uint32, treeRoots map[int]int) bool {
+	if pid == 0 || mainPID == 0 {
+		return false
+	}
+	if pid == mainPID {
+		return true
+	}
+	if treeRoots == nil {
+		return false
+	}
+	root, ok := treeRoots[int(pid)]
+	return ok && root == int(mainPID)
 }
 
 // syncInputSurfaceEnumCallback is process-global for the same reason as the
@@ -1140,7 +1324,7 @@ var syncInputSurfaceEnumCallback = windows.NewCallback(func(hwnd windows.HWND, l
 	}
 	var pid uint32
 	procGetWindowThreadProcessID.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&pid)))
-	if pid != search.pid {
+	if !pidBelongsToSyncSurface(pid, search.pid, search.treeRoots) {
 		return 1
 	}
 	className := getWindowClassName(hwnd)
@@ -1222,6 +1406,7 @@ func pointInsideMasterInputRegion(masterHwnd windows.HWND, screenX, screenY int)
 	}
 	// Menus and extension confirmation prompts are separate top-level Chrome
 	// widgets and may extend a few pixels outside the tiled master frame.
+	// MV3 wallet Notification hosts often run in a child process of the env.
 	hit := windowFromScreenPoint(screenX, screenY)
 	if hit == 0 {
 		return false
@@ -1230,8 +1415,16 @@ func pointInsideMasterInputRegion(masterHwnd windows.HWND, screenX, screenY int)
 	if root == 0 {
 		root = hit
 	}
-	if windowPID(root) == 0 || windowPID(root) != windowPID(masterHwnd) {
+	mainPID := windowPID(masterHwnd)
+	hitPID := windowPID(root)
+	if hitPID == 0 || mainPID == 0 {
 		return false
+	}
+	if hitPID != mainPID {
+		tree := mapProcessTreeRoots([]int{int(mainPID)})
+		if !pidBelongsToSyncSurface(hitPID, mainPID, tree) {
+			return false
+		}
 	}
 	className := strings.ToLower(getWindowClassName(root))
 	return strings.HasPrefix(className, "chrome_widgetwin_") || strings.EqualFold(className, "chrome_mainwindow")
@@ -1246,8 +1439,13 @@ func chromeInputSurfaceAtPoint(mainHwnd windows.HWND, screenX, screenY int) wind
 	if root == 0 {
 		root = hit
 	}
-	if windowPID(root) != windowPID(mainHwnd) {
-		return mainHwnd
+	mainPID := windowPID(mainHwnd)
+	hitPID := windowPID(root)
+	if hitPID != mainPID {
+		tree := mapProcessTreeRoots([]int{int(mainPID)})
+		if !pidBelongsToSyncSurface(hitPID, mainPID, tree) {
+			return mainHwnd
+		}
 	}
 	className := getWindowClassName(root)
 	if !strings.HasPrefix(strings.ToLower(className), "chrome_widgetwin_") && !strings.EqualFold(className, "Chrome_MainWindow") {
@@ -1273,11 +1471,13 @@ func findMatchingChromeInputSurface(masterSurface, masterMain, followerMain wind
 		title: getWindowTitle(masterSurface),
 		left:  int(ml), top: int(mt), width: int(mr - ml), height: int(mb - mt),
 	}
+	followerPID := windowPID(followerMain)
+	treeRoots := mapProcessTreeRoots([]int{int(followerPID)})
 	best := windows.HWND(0)
 	bestScore := int64(^uint64(0) >> 1)
 	for _, expectedLeft := range []int{offsetLeft, edgeLeft} {
 		search := &syncInputSurfaceSearch{
-			pid: windowPID(followerMain), mainHwnd: followerMain, master: master,
+			pid: followerPID, mainHwnd: followerMain, treeRoots: treeRoots, master: master,
 			expectedLeft: expectedLeft,
 			expectedTop:  expectedTop,
 			bestScore:    int64(^uint64(0) >> 1),
@@ -1515,7 +1715,13 @@ func masterActiveInputSurface(masterMain windows.HWND) windows.HWND {
 		if root == 0 {
 			root = windows.HWND(fg)
 		}
-		if windowPID(root) == windowPID(masterMain) {
+		mainPID := windowPID(masterMain)
+		fgPID := windowPID(root)
+		sameTree := fgPID == mainPID
+		if !sameTree && mainPID != 0 {
+			sameTree = pidBelongsToSyncSurface(fgPID, mainPID, mapProcessTreeRoots([]int{int(mainPID)}))
+		}
+		if sameTree {
 			className := strings.ToLower(getWindowClassName(root))
 			if strings.HasPrefix(className, "chrome_widgetwin_") || strings.EqualFold(getWindowClassName(root), "Chrome_MainWindow") {
 				return root
@@ -2358,7 +2564,15 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
 			if !s.canDispatch() || event.generation != atomic.LoadUint64(&s.dispatchGeneration) {
 				continue
 			}
-			masterTarget, hasMasterTarget := s.focusedMasterCDPTarget(event.masterPort)
+			// Wallet popup key entry (PIN/password) must prefer extension targets;
+			// main-frame typing must stay on the https dapp page.
+			preferExt := false
+			if s.masterHwnd != 0 {
+				if surface := masterActiveInputSurface(s.masterHwnd); surface != 0 && surface != s.masterHwnd {
+					preferExt = true
+				}
+			}
+			masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(event.masterPort, preferExt)
 			waitPopup := hasMasterTarget && waitForFollowerCDPMatch(masterTarget)
 			var wg sync.WaitGroup
 			for i, hwnd := range event.hwnds {
@@ -2505,14 +2719,14 @@ func (s *InputSyncer) dispatchPageMouseViaCDPNow(msg uint32, screenX, screenY in
 	if mr <= ml || mb <= mt {
 		return
 	}
-	rx := float64(screenX-int(ml)) / float64(mr-ml)
-	ry := float64(screenY-int(mt)) / float64(mb-mt)
 	s.mu.Lock()
 	masterPort := s.masterDebug
 	ports := append([]int(nil), s.followerDebug...)
 	hwnds := append([]windows.HWND(nil), s.followerHwnds...)
 	s.mu.Unlock()
-	masterTarget, hasMasterTarget := s.focusedMasterCDPTarget(masterPort)
+	// Main frame → dapp page; wallet/extension HWND → prefer extension document.
+	preferExt := masterSurface != 0 && masterSurface != s.masterHwnd
+	masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(masterPort, preferExt)
 	button := "left"
 	if msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP {
 		button = "right"
@@ -2543,18 +2757,21 @@ func (s *InputSyncer) dispatchPageMouseViaCDPNow(msg uint32, screenX, screenY in
 				s.dispatchPageMouseFallback(hwnd, msg, screenX, screenY)
 				return
 			}
-			fl, ft, fr, fb := getWindowRect(render)
-			x, y := rx*float64(fr-fl), ry*float64(fb-ft)
-			buttons := 0
-			if eventType == "mousePressed" {
-				_, buttons = pageMouseButton(msg)
-			}
 			s.dispatchWithRandomDelay(hwnd, func() {
 				s.withCDPPortLock(port, func() {
 					followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, waitPopup)
 					if !ok {
 						s.dispatchPageMouseFallback(hwnd, msg, screenX, screenY)
 						return
+					}
+					x, y, ok := s.mapPageClickToFollowerCDP(screenX, screenY, int(ml), int(mt), int(mr), int(mb), render, port, followerTarget)
+					if !ok {
+						s.dispatchPageMouseFallback(hwnd, msg, screenX, screenY)
+						return
+					}
+					buttons := 0
+					if eventType == "mousePressed" {
+						_, buttons = pageMouseButton(msg)
 					}
 					if _, err := cdpCallTarget(followerTarget, "Input.dispatchMouseEvent", map[string]any{
 						"type": eventType, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": 1,
@@ -2596,6 +2813,35 @@ func (s *InputSyncer) dispatchPageMouseMoveViaCDP(screenX, screenY int, buttonDo
 	})
 }
 
+// mapPageClickToFollowerCDP converts a master screen click into CDP CSS coords
+// for one follower document. Prefer live innerWidth/innerHeight; fall back to
+// the follower render widget's physical size (100% DPI only).
+func (s *InputSyncer) mapPageClickToFollowerCDP(
+	screenX, screenY int,
+	masterRenderLeft, masterRenderTop, masterRenderRight, masterRenderBottom int,
+	followerRender windows.HWND,
+	port int,
+	followerTarget cdpTarget,
+) (x, y float64, ok bool) {
+	cssW, cssH, cssOK := s.cdpCSSViewportSize(port, followerTarget)
+	if cssOK {
+		return mapPhysicalRenderToCDPCoords(
+			screenX, screenY,
+			masterRenderLeft, masterRenderTop, masterRenderRight, masterRenderBottom,
+			cssW, cssH,
+		)
+	}
+	if followerRender == 0 {
+		return 0, 0, false
+	}
+	fl, ft, fr, fb := getWindowRect(followerRender)
+	return mapPhysicalRenderToCDPCoords(
+		screenX, screenY,
+		masterRenderLeft, masterRenderTop, masterRenderRight, masterRenderBottom,
+		float64(fr-fl), float64(fb-ft),
+	)
+}
+
 func (s *InputSyncer) dispatchPageMouseMoveViaCDPNow(screenX, screenY int, buttonDownMsg uint32) {
 	masterSurface, masterRender, insidePage := chromePageSurfaceAtPoint(s.masterHwnd, screenX, screenY)
 	if !insidePage {
@@ -2605,15 +2851,14 @@ func (s *InputSyncer) dispatchPageMouseMoveViaCDPNow(screenX, screenY int, butto
 	if mr <= ml || mb <= mt {
 		return
 	}
-	rx := float64(screenX-int(ml)) / float64(mr-ml)
-	ry := float64(screenY-int(mt)) / float64(mb-mt)
 	button, buttons := pageMouseButton(buttonDownMsg)
 	s.mu.Lock()
 	masterPort := s.masterDebug
 	ports := append([]int(nil), s.followerDebug...)
 	hwnds := append([]windows.HWND(nil), s.followerHwnds...)
 	s.mu.Unlock()
-	masterTarget, hasMasterTarget := s.focusedMasterCDPTarget(masterPort)
+	preferExt := masterSurface != 0 && masterSurface != s.masterHwnd
+	masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(masterPort, preferExt)
 	var wg sync.WaitGroup
 	for i, hwnd := range hwnds {
 		port := 0
@@ -2630,11 +2875,13 @@ func (s *InputSyncer) dispatchPageMouseMoveViaCDPNow(screenX, screenY int, butto
 			if !ok {
 				return
 			}
-			fl, ft, fr, fb := getWindowRect(render)
-			x, y := rx*float64(fr-fl), ry*float64(fb-ft)
 			s.dispatchWithRandomDelay(hwnd, func() {
 				s.withCDPPortLock(port, func() {
 					followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, false)
+					if !ok {
+						return
+					}
+					x, y, ok := s.mapPageClickToFollowerCDP(screenX, screenY, int(ml), int(mt), int(mr), int(mb), render, port, followerTarget)
 					if !ok {
 						return
 					}
@@ -2694,27 +2941,6 @@ func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY in
 	if mW <= 0 || mH <= 0 {
 		return
 	}
-	// Same-size tiles: absolute pixel offset into the render surface.
-	// Different sizes: proportional so horizontal/vertical scroll stay aligned.
-	var rx, ry float64
-	if absCalibInt(mW) > 0 {
-		rx = float64(screenX-int(ml)) / float64(mW)
-	}
-	if absCalibInt(mH) > 0 {
-		ry = float64(screenY-int(mt)) / float64(mH)
-	}
-	if rx < 0 {
-		rx = 0
-	}
-	if rx > 1 {
-		rx = 1
-	}
-	if ry < 0 {
-		ry = 0
-	}
-	if ry > 1 {
-		ry = 1
-	}
 	baseDX, baseDY := pageWheelDeltas(msg, delta, keyState)
 	modifiers := 0
 	if keyState&MK_CONTROL != 0 {
@@ -2728,7 +2954,8 @@ func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY in
 	ports := append([]int(nil), s.followerDebug...)
 	hwnds := append([]windows.HWND(nil), s.followerHwnds...)
 	s.mu.Unlock()
-	masterTarget, hasMasterTarget := s.focusedMasterCDPTarget(masterPort)
+	preferExt := masterSurface != 0 && masterSurface != s.masterHwnd
+	masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(masterPort, preferExt)
 	waitPopup := hasMasterTarget && waitForFollowerCDPMatch(masterTarget)
 	var wg sync.WaitGroup
 	for i, hwnd := range hwnds {
@@ -2750,13 +2977,6 @@ func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY in
 			}
 			fl, ft, fr, fb := getWindowRect(render)
 			fW, fH := int(fr-fl), int(fb-ft)
-			var x, y float64
-			if absCalibInt(mW-fW) <= sameSizePixelTolerance && absCalibInt(mH-fH) <= sameSizePixelTolerance {
-				x = float64(screenX - int(ml))
-				y = float64(screenY - int(mt))
-			} else {
-				x, y = rx*float64(fW), ry*float64(fH)
-			}
 			// Scale wheel magnitude with content size so followers don't under/over-scroll.
 			deltaX := scaleScrollDelta(baseDX, mW, fW)
 			deltaY := scaleScrollDelta(baseDY, mH, fH)
@@ -2764,6 +2984,11 @@ func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY in
 				s.withCDPPortLock(port, func() {
 					followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, waitPopup)
 					if !ok {
+						return
+					}
+					x, y, ok := s.mapPageClickToFollowerCDP(screenX, screenY, int(ml), int(mt), int(mr), int(mb), render, port, followerTarget)
+					if !ok {
+						s.dispatchPageWheelFallback(hwnd, msg, screenX, screenY, delta, keyState)
 						return
 					}
 					if _, err := cdpCallTarget(followerTarget, "Input.dispatchMouseEvent", map[string]any{
@@ -3038,7 +3263,13 @@ func (s *InputSyncer) urlSyncLoop(stopCh <-chan struct{}) {
 			continue
 		}
 
-		masterTarget, hasMasterTarget := s.focusedMasterCDPTarget(masterDebug)
+		preferExt := false
+		if s.masterHwnd != 0 {
+			if surface := masterActiveInputSurface(s.masterHwnd); surface != 0 && surface != s.masterHwnd {
+				preferExt = true
+			}
+		}
+		masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(masterDebug, preferExt)
 		if atomic.LoadInt32(&s.pageKeyboardFocus) == 1 && hasMasterTarget {
 			if state := s.getMasterFocusedEditableStateOnTarget(masterTarget); state != "" && state != s.lastFocusedEditableState {
 				s.lastFocusedEditableState = state

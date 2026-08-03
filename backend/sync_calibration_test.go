@@ -101,3 +101,24 @@ func TestExpectedPopupOffset(t *testing.T) {
 		t.Fatalf("top offset: %d", got)
 	}
 }
+
+func TestMapPhysicalRenderToCDPCoordsUsesCSSViewport(t *testing.T) {
+	// Master render 400×300 physical; click at 90% width (Connect Wallet zone).
+	// Follower CSS viewport is 267×200 (≈150% DPI): must map into CSS, not 360.
+	x, y, ok := mapPhysicalRenderToCDPCoords(360, 50, 0, 0, 400, 300, 267, 200)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	// 360/400 * 267 = 240.3
+	if x < 239 || x > 242 || y < 32 || y > 35 {
+		t.Fatalf("CSS map got %v,%v want ~240.3,33.3", x, y)
+	}
+	// Without CSS (pass physical as size) would yield 360 — past a 267-wide viewport.
+	xPhys, _, ok := mapPhysicalRenderToCDPCoords(360, 50, 0, 0, 400, 300, 400, 300)
+	if !ok || xPhys < 359 || xPhys > 361 {
+		t.Fatalf("physical fallback: %v", xPhys)
+	}
+	if xPhys <= 267 {
+		t.Fatal("precondition: raw physical x must exceed CSS width (the DPI bug)")
+	}
+}

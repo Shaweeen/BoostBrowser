@@ -4,6 +4,7 @@ package backend
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -437,20 +438,23 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	// Minimise it before arranging browser windows so it cannot cover the grid.
 	minimizeMainClientWindow()
 
-	// Always hold popup confinement during tile (main local flag + shared flag
-	// for panel). Batch multi-start auto-tile has no InputSyncer session.
+	// Hold popup confinement for the whole arrange + DWM settle. Short holds
+	// under 10-window sync let the confiner race half-applied SetWindowPos and
+	// leave frames "displaced".
 	if a != nil {
 		setLayoutHoldRoot(a.appRoot)
 	}
 	holdPopupConfinementForLayout(true)
+	layoutHoldMs := 80
+	if len(profileIds) >= 8 {
+		layoutHoldMs = 220
+	}
 	defer func() {
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(time.Duration(layoutHoldMs) * time.Millisecond)
 		holdPopupConfinementForLayout(false)
 	}()
 
-	// Window movement and coordinate replay must never overlap. Invalidate
-	// queued actions, suspend dispatch while geometry changes, then allow a
-	// short DWM settle interval before accepting new input.
+	// Window movement and coordinate replay must never overlap.
 	syncState.mu.Lock()
 	layoutSyncer := syncState.syncer
 	layoutActive := syncState.active && layoutSyncer != nil
@@ -458,14 +462,13 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	if layoutActive {
 		layoutSyncer.BeginLayoutUpdate()
 		defer func() {
-			time.Sleep(35 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			layoutSyncer.EndLayoutUpdate()
 		}()
 	}
 
-	// Reuse the exact HWNDs already validated by the active sync engine. Chrome
-	// can transfer its top-level frame to a sibling process, so resolving again
-	// from a stored PID is less reliable than the running session snapshot.
+	// Hint HWNDs from the active sync session, but re-validate as *main* frames.
+	// Under multi-open, a stored handle can be a wallet popup after focus shift.
 	activeWindows := make(map[string]windows.HWND)
 	activeMasterID := ""
 	syncState.mu.Lock()
@@ -486,14 +489,31 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	a.browserMgr.Mutex.Lock()
 	defer a.browserMgr.Mutex.Unlock()
 
-	// 收集运行中的实例窗口
 	type winInfo struct {
-		hwnd      windows.HWND
-		profileId string
+		hwnd        windows.HWND
+		profileId   string
+		profileName string
 	}
 	var wins []winInfo
 	seenProfileIDs := make(map[string]struct{}, len(profileIds))
 	seenWindows := make(map[windows.HWND]struct{}, len(profileIds))
+
+	resolveMainHWND := func(profileID string, profile *BrowserProfile, hinted windows.HWND) windows.HWND {
+		// Prefer live main-frame resolution so we never tile a popup.
+		if profile != nil && profile.Pid > 0 {
+			if hwnd := findMainEnvironmentBrowserWindow(profile.Pid); hwnd != 0 {
+				return hwnd
+			}
+			if hwnd, err := findProcessTreeWindow(profile.Pid); err == nil && hwnd != 0 {
+				return hwnd
+			}
+		}
+		if hinted != 0 && isWindow(hinted) && isMainEnvironmentBrowserFrame(hinted, getWindowTitle(hinted)) {
+			return hinted
+		}
+		return 0
+	}
+
 	for _, rawProfileID := range profileIds {
 		pid := strings.TrimSpace(rawProfileID)
 		if pid == "" {
@@ -504,26 +524,22 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 		}
 		seenProfileIDs[pid] = struct{}{}
 		profile, profileExists := a.browserMgr.Profiles[pid]
-		if hwnd := activeWindows[pid]; hwnd != 0 && isWindow(hwnd) {
-			if _, duplicate := seenWindows[hwnd]; duplicate {
-				continue
-			}
-			seenWindows[hwnd] = struct{}{}
-			wins = append(wins, winInfo{hwnd: hwnd, profileId: pid})
+		if !profileExists || profile == nil || !profile.Running {
 			continue
 		}
-		if !profileExists || !profile.Running || profile.Pid <= 0 {
-			continue
-		}
-		hwnd, err := findProcessTreeWindow(profile.Pid)
-		if err != nil {
+		hwnd := resolveMainHWND(pid, profile, activeWindows[pid])
+		if hwnd == 0 {
 			continue
 		}
 		if _, duplicate := seenWindows[hwnd]; duplicate {
+			// Two profiles resolved to the same frame — skip second (prevents
+			// one physical window receiving two tile cells / "swap" chaos).
 			continue
 		}
 		seenWindows[hwnd] = struct{}{}
-		wins = append(wins, winInfo{hwnd: hwnd, profileId: pid})
+		wins = append(wins, winInfo{
+			hwnd: hwnd, profileId: pid, profileName: profile.ProfileName,
+		})
 	}
 
 	if len(wins) == 0 {
@@ -543,7 +559,11 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 		syncState.mu.Unlock()
 	}
 
-	// 确保主控排在最左边（index 0 = 左侧）
+	// Stable natural-number order for all non-master cells (1,2,3…), then pin
+	// master at index 0 for sync UX. Avoids random profileIds order under sync.
+	sort.SliceStable(wins, func(i, j int) bool {
+		return naturalProfileNameLess(wins[i].profileName, wins[i].profileId, wins[j].profileName, wins[j].profileId)
+	})
 	if effectiveMaster != "" {
 		masterIdx := -1
 		for i, w := range wins {
@@ -560,20 +580,18 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	}
 
 	// 获取屏幕可用工作区（排除任务栏）
-	// 使用 SystemParametersInfo 获取 SPI_GETWORKAREA
 	type RECT struct {
 		Left, Top, Right, Bottom int32
 	}
 	var workArea RECT
 	procSystemParametersInfoW := user32dll.NewProc("SystemParametersInfoW")
-	procSystemParametersInfoW.Call(0x0030, 0, uintptr(unsafe.Pointer(&workArea)), 0) // SPI_GETWORKAREA = 0x0030
+	procSystemParametersInfoW.Call(0x0030, 0, uintptr(unsafe.Pointer(&workArea)), 0) // SPI_GETWORKAREA
 	screenW := int(workArea.Right - workArea.Left)
 	screenH := int(workArea.Bottom - workArea.Top)
 	originX := int(workArea.Left)
 	originY := int(workArea.Top)
 
 	if screenW <= 0 || screenH <= 0 {
-		// 回退：使用全屏尺寸
 		smCXScreen, _, _ := procGetSystemMetrics.Call(0)
 		smCYScreen, _, _ := procGetSystemMetrics.Call(1)
 		screenW = int(smCXScreen)
@@ -586,7 +604,6 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	resolvedLayout := layoutMode
 	switch resolvedLayout {
 	case "horizontal", "vertical", "grid":
-		// ok
 	default:
 		resolvedLayout = "grid"
 	}
@@ -603,61 +620,137 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 		cols = 1
 		rows = n
 	default:
-		if n <= 2 {
-			cols = n
-			rows = 1
-		} else if n <= 4 {
-			cols = 2
-			rows = (n + 1) / 2
-		} else if n <= 6 {
-			cols = 3
-			rows = 2
-		} else {
-			cols = 4
-			rows = (n + 3) / 4
-		}
+		cols, rows = tileGridDimensions(n)
 	}
 
-	// Chrome/DWM paints ~7–12px resize borders + soft shadows. 1px was not
-	// enough under multi-open (small cells amplify the seam). Overlap adjacent
-	// outer frames by the system border estimate and bleed outer edges past the
-	// work area so 平铺/堆叠/横排 all look flush.
-	// SM_CXFRAME=32, SM_CXPADDEDBORDER=92
 	smCXFrame, _, _ := procGetSystemMetrics.Call(32)
 	smPad, _, _ := procGetSystemMetrics.Call(92)
 	frameOverlap := chromeTileFrameOverlapPx(int(smCXFrame), int(smPad))
-	const outerBleedPx = 8
+	// Slightly smaller bleed for dense grids so cells do not over-overlap and
+	// "steal" neighbor space (looks like random displacement under 10 windows).
+	outerBleedPx := 8
+	if n >= 8 {
+		outerBleedPx = 4
+	}
 	rects := computeGaplessTileRects(n, cols, rows, originX, originY, screenW, screenH, frameOverlap, outerBleedPx)
 
-	// SW_RESTORE = 9
 	procShowWindow := user32dll.NewProc("ShowWindow")
+	procBeginDeferWindowPos := user32dll.NewProc("BeginDeferWindowPos")
+	procDeferWindowPos := user32dll.NewProc("DeferWindowPos")
+	procEndDeferWindowPos := user32dll.NewProc("EndDeferWindowPos")
+
+	// Restore (un-minimize / un-maximize) first so DeferWindowPos sizes apply.
+	for _, w := range wins {
+		procShowWindow.Call(uintptr(w.hwnd), 9) // SW_RESTORE
+	}
+
+	// Atomic multi-window placement: one DWM transaction avoids intermediate
+	// layouts that confiner/input saw as "wrong positions" under 10-way sync.
+	hdwp, _, _ := procBeginDeferWindowPos.Call(uintptr(n))
+	if hdwp != 0 {
+		for i, w := range wins {
+			if i >= len(rects) {
+				break
+			}
+			r := rects[i]
+			hdwp, _, _ = procDeferWindowPos.Call(
+				hdwp,
+				uintptr(w.hwnd),
+				0, // HWND_TOP, with SWP_NOZORDER ignored
+				uintptr(r.X),
+				uintptr(r.Y),
+				uintptr(r.W),
+				uintptr(r.H),
+				uintptr(SWP_NOZORDER|SWP_NOACTIVATE),
+			)
+			if hdwp == 0 {
+				break
+			}
+		}
+		if hdwp != 0 {
+			procEndDeferWindowPos.Call(hdwp)
+		}
+	}
+	// Fallback if DeferWindowPos failed mid-way.
+	if hdwp == 0 {
+		for i, w := range wins {
+			if i >= len(rects) {
+				break
+			}
+			r := rects[i]
+			procSetWindowPos.Call(
+				uintptr(w.hwnd),
+				0,
+				uintptr(r.X),
+				uintptr(r.Y),
+				uintptr(r.W),
+				uintptr(r.H),
+				uintptr(SWP_NOZORDER|SWP_NOACTIVATE|SWP_SHOWWINDOW),
+			)
+		}
+	}
 
 	tiledIds := make([]string, 0, n)
+	idToHwnd := make(map[string]windows.HWND, n)
+	var masterHandle windows.HWND
 	for i, w := range wins {
 		if i >= len(rects) {
 			break
 		}
-		r := rects[i]
-
-		// 先恢复窗口（如果被最小化）；去掉最大化再定位，否则 SetWindowPos 会被忽略。
-		procShowWindow.Call(uintptr(w.hwnd), 9) // SW_RESTORE
-
-		procSetWindowPos.Call(
-			uintptr(w.hwnd),
-			0, // HWND_TOP
-			uintptr(r.X),
-			uintptr(r.Y),
-			uintptr(r.W),
-			uintptr(r.H),
-			uintptr(SWP_NOZORDER|SWP_SHOWWINDOW),
-		)
 		tiledIds = append(tiledIds, w.profileId)
+		idToHwnd[w.profileId] = w.hwnd
+		if w.profileId == effectiveMaster {
+			masterHandle = w.hwnd
+		}
+	}
+	if masterHandle == 0 && len(wins) > 0 {
+		masterHandle = wins[0].hwnd
 	}
 
-	// 平铺后将主控窗口设为前台焦点（与 Python 版本一致）
-	if effectiveMaster != "" && len(wins) > 0 && wins[0].profileId == effectiveMaster {
+	// Keep sync engine HWND snapshot aligned with the frames we just moved.
+	// Rebuild followers in syncState.followerIds order so CDP debug ports stay
+	// index-aligned (tile natural-sort must not reorder input/URL targets).
+	if layoutActive && layoutSyncer != nil {
+		syncState.mu.Lock()
+		fids := append([]string(nil), syncState.followerIds...)
+		syncState.mu.Unlock()
+		followerHandles := make([]windows.HWND, 0, len(fids))
+		seenFollower := make(map[windows.HWND]struct{}, len(fids))
+		for _, id := range fids {
+			h := idToHwnd[id]
+			if h == 0 || h == masterHandle {
+				continue
+			}
+			if _, dup := seenFollower[h]; dup {
+				continue
+			}
+			seenFollower[h] = struct{}{}
+			followerHandles = append(followerHandles, h)
+		}
+		// Tiled non-master not listed in followerIds (rare) — append last.
+		for _, w := range wins {
+			if w.hwnd == 0 || w.hwnd == masterHandle {
+				continue
+			}
+			if _, ok := seenFollower[w.hwnd]; ok {
+				continue
+			}
+			seenFollower[w.hwnd] = struct{}{}
+			followerHandles = append(followerHandles, w.hwnd)
+		}
+		layoutSyncer.ReplaceWindowHandles(masterHandle, followerHandles)
+	}
+	syncState.mu.Lock()
+	if syncState.active {
+		if masterHandle != 0 {
+			syncState.masterHwnd = masterHandle
+		}
+	}
+	syncState.mu.Unlock()
+
+	if effectiveMaster != "" && masterHandle != 0 {
 		procSetForegroundWindow := user32dll.NewProc("SetForegroundWindow")
-		procSetForegroundWindow.Call(uintptr(wins[0].hwnd))
+		procSetForegroundWindow.Call(uintptr(masterHandle))
 	}
 
 	return &TileWindowsResult{
