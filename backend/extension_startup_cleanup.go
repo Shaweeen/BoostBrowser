@@ -25,8 +25,9 @@ import (
 //
 // Tab policy after launch:
 //   - Start path: NO CDP close sweeps (user speed + respect open actions).
-//   - Sync start only: one-shot sole about:blank (see sync_tab_handoff.go).
-//   - After that handoff: never manage tabs again until the next StartInputSync.
+//   - Sync start: sole about:blank only for brand-new env processes (once per
+//     profileID+pid); already-used envs keep user tabs/extensions untouched.
+//   - After handoff mark: never re-manage that process (user owns all opens).
 func sanitizeChromeStartupPreferences(userDataDir string) {
 	if strings.TrimSpace(userDataDir) == "" {
 		return
