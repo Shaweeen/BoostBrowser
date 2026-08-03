@@ -157,17 +157,38 @@ func mapPhysicalRenderToCDPCoords(screenX, screenY, mLeft, mTop, mRight, mBottom
 	return relX * outW, relY * outH, true
 }
 
-// scaleScrollDelta keeps same-size tiles 1:1 on wheel magnitude; when cell sizes
-// differ, scale horizontal by width ratio and vertical by height ratio so
-// multi-env scroll distance tracks the visible page proportion.
+// scaleScrollDelta keeps same-size tiles 1:1 on wheel magnitude; when viewport
+// lengths differ, scale by follower/master ratio so page content advances by
+// the same *proportion* of the visible document (CSS viewport preferred).
+//
+// Prefer CSS innerWidth/innerHeight over physical render-widget pixels: under
+// multi-open the render HWND can differ by title-bar/DPI while the page CSS
+// viewport is what wheel deltas actually move.
 func scaleScrollDelta(delta float64, masterLen, followerLen int) float64 {
 	if masterLen <= 0 || followerLen <= 0 {
 		return delta
 	}
-	if absCalibInt(masterLen-followerLen) <= sameSizePixelTolerance {
+	// Slightly looser than click mapping: 1–2% chrome chrome difference must
+	// still stay 1:1 so uniform tiles do not accumulate scroll drift.
+	tol := sameSizePixelTolerance
+	if masterLen > 200 {
+		pct := masterLen / 50 // 2%
+		if pct > tol {
+			tol = pct
+		}
+	}
+	if absCalibInt(masterLen-followerLen) <= tol {
 		return delta
 	}
 	return delta * float64(followerLen) / float64(masterLen)
+}
+
+// scaleScrollDeltaF is the float form used when CSS viewports are available.
+func scaleScrollDeltaF(delta, masterLen, followerLen float64) float64 {
+	if masterLen <= 1 || followerLen <= 1 {
+		return delta
+	}
+	return scaleScrollDelta(delta, int(math.Round(masterLen)), int(math.Round(followerLen)))
 }
 
 // chromeManagerPopupMatchScore ranks a follower popup candidate (lower is better).

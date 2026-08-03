@@ -172,3 +172,34 @@ func TestComputeGaplessTileRectsTenWindowsUniform(t *testing.T) {
 		t.Fatalf("10-window cell unexpectedly narrow: %d (risk mis-classifying main frame)", w0)
 	}
 }
+
+func TestComputeUniformTileRectsOnePixelGapAndLastSameSize(t *testing.T) {
+	// 10 windows, 4×3, 1px gap: every cell identical; last incomplete-row cell
+	// must NOT stretch to remaining width.
+	cols, rows := 4, 3
+	rects := computeUniformTileRects(10, cols, rows, 0, 0, 1920, 1040, defaultTileGapPx)
+	if len(rects) != 10 {
+		t.Fatalf("want 10, got %d", len(rects))
+	}
+	w0, h0 := rects[0].W, rects[0].H
+	// (1920 - 3*1) / 4 = 479; (1040 - 2*1) / 3 = 346
+	if w0 != 479 || h0 != 346 {
+		t.Fatalf("uniform cell want 479x346 got %dx%d", w0, h0)
+	}
+	for i, r := range rects {
+		if r.W != w0 || r.H != h0 {
+			t.Fatalf("window %d must match first %dx%d, got %dx%d", i, w0, h0, r.W, r.H)
+		}
+	}
+	// Gap between col0 and col1 is exactly 1px.
+	if rects[1].X != rects[0].X+w0+1 {
+		t.Fatalf("horizontal gap want 1: col0.right=%d col1.x=%d", rects[0].X+w0, rects[1].X)
+	}
+	if rects[4].Y != rects[0].Y+h0+1 {
+		t.Fatalf("vertical gap want 1: row0.bottom=%d row1.y=%d", rects[0].Y+h0, rects[4].Y)
+	}
+	// Last window (index 9) is col1 of row2 — same size, not full remaining width.
+	if rects[9].W != w0 || rects[9].X != w0+1 {
+		t.Fatalf("last incomplete-row window must stay uniform: %+v", rects[9])
+	}
+}

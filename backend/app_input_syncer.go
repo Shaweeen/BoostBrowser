@@ -2957,6 +2957,13 @@ func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY in
 	preferExt := masterSurface != 0 && masterSurface != s.masterHwnd
 	masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(masterPort, preferExt)
 	waitPopup := hasMasterTarget && waitForFollowerCDPMatch(masterTarget)
+	// Master CSS viewport once: wheel deltas must scale by page proportion, not
+	// only by physical Chrome_RenderWidgetHostHWND size (title bar / DPI drift).
+	var masterCssW, masterCssH float64
+	masterCssOK := false
+	if hasMasterTarget {
+		masterCssW, masterCssH, masterCssOK = s.cdpCSSViewportSize(masterPort, masterTarget)
+	}
 	var wg sync.WaitGroup
 	for i, hwnd := range hwnds {
 		port := 0
@@ -2977,9 +2984,6 @@ func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY in
 			}
 			fl, ft, fr, fb := getWindowRect(render)
 			fW, fH := int(fr-fl), int(fb-ft)
-			// Scale wheel magnitude with content size so followers don't under/over-scroll.
-			deltaX := scaleScrollDelta(baseDX, mW, fW)
-			deltaY := scaleScrollDelta(baseDY, mH, fH)
 			s.dispatchWithRandomDelay(hwnd, func() {
 				s.withCDPPortLock(port, func() {
 					followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, waitPopup)
@@ -2990,6 +2994,16 @@ func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY in
 					if !ok {
 						s.dispatchPageWheelFallback(hwnd, msg, screenX, screenY, delta, keyState)
 						return
+					}
+					// Prefer CSS viewport ratio (same proportion of page scrolled).
+					// Fall back to physical render size when metrics unavailable.
+					deltaX, deltaY := baseDX, baseDY
+					if fCssW, fCssH, fOK := s.cdpCSSViewportSize(port, followerTarget); fOK && masterCssOK {
+						deltaX = scaleScrollDeltaF(baseDX, masterCssW, fCssW)
+						deltaY = scaleScrollDeltaF(baseDY, masterCssH, fCssH)
+					} else {
+						deltaX = scaleScrollDelta(baseDX, mW, fW)
+						deltaY = scaleScrollDelta(baseDY, mH, fH)
 					}
 					if _, err := cdpCallTarget(followerTarget, "Input.dispatchMouseEvent", map[string]any{
 						"type": "mouseWheel", "x": x, "y": y,

@@ -633,16 +633,9 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 		cols, rows = tileGridDimensions(n)
 	}
 
-	smCXFrame, _, _ := procGetSystemMetrics.Call(32)
-	smPad, _, _ := procGetSystemMetrics.Call(92)
-	frameOverlap := chromeTileFrameOverlapPx(int(smCXFrame), int(smPad))
-	// Slightly smaller bleed for dense grids so cells do not over-overlap and
-	// "steal" neighbor space (looks like random displacement under 10 windows).
-	outerBleedPx := 8
-	if n >= 8 {
-		outerBleedPx = 4
-	}
-	rects := computeGaplessTileRects(n, cols, rows, originX, originY, screenW, screenH, frameOverlap, outerBleedPx)
+	// Fixed 1px gap + identical cell size for every window (including last row).
+	// Large DWM overlap made seams look uneven and broke scroll/click ratios.
+	rects := computeUniformTileRects(n, cols, rows, originX, originY, screenW, screenH, defaultTileGapPx)
 
 	procShowWindow := user32dll.NewProc("ShowWindow")
 	procBeginDeferWindowPos := user32dll.NewProc("BeginDeferWindowPos")
