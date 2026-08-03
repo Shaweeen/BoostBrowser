@@ -78,13 +78,17 @@ func TestFinalizeHandoffPanelSkipsOwnCollapse(t *testing.T) {
 }
 
 func TestSyncTabHandoffDoneIsPerProfilePid(t *testing.T) {
-	// Isolate from other tests by using unique ids.
 	id := "handoff-test-profile-xyz"
 	clearSyncTabHandoffForProfile(id)
 	if isSyncTabHandoffDone(id, 1001) {
 		t.Fatal("expected not done")
 	}
-	markSyncTabHandoffDone(id, 1001)
+	if !claimSyncTabHandoff(id, 1001) {
+		t.Fatal("first claim must succeed")
+	}
+	if claimSyncTabHandoff(id, 1001) {
+		t.Fatal("second claim must fail (execute once)")
+	}
 	if !isSyncTabHandoffDone(id, 1001) {
 		t.Fatal("same pid must be done")
 	}
@@ -102,11 +106,11 @@ func TestPrepareHandoffSkipsAlreadyDone(t *testing.T) {
 	idA, idB := "handoff-a-skip", "handoff-b-new"
 	clearSyncTabHandoffForProfile(idA)
 	clearSyncTabHandoffForProfile(idB)
-	markSyncTabHandoffDone(idA, 2001)
-	// Dead debug ports: collapse no-ops, but applied/skipped accounting still runs.
+	_ = claimSyncTabHandoff(idA, 2001)
+	// Dead debug ports: collapse no-ops; claim still runs once.
 	applied, skipped, _ := prepareEnvironmentsForSyncHandoff([]syncHandoffTarget{
-		{profileID: idA, pid: 2001, debugPort: 59991}, // already done → skip
-		{profileID: idB, pid: 2002, debugPort: 59992}, // new → applied + mark
+		{profileID: idA, pid: 2001, debugPort: 59991}, // already claimed → skip
+		{profileID: idB, pid: 2002, debugPort: 59992}, // new → applied + claim
 	})
 	if skipped != 1 {
 		t.Fatalf("expected 1 skip for already-handed-off: applied=%d skipped=%d", applied, skipped)
@@ -115,9 +119,9 @@ func TestPrepareHandoffSkipsAlreadyDone(t *testing.T) {
 		t.Fatalf("expected 1 apply for new env: applied=%d", applied)
 	}
 	if !isSyncTabHandoffDone(idB, 2002) {
-		t.Fatal("new env must be marked after attempt")
+		t.Fatal("new env must be marked after claim")
 	}
-	// Second sync with same set: both skipped.
+	// Second sync with same set: both skipped — user tabs would be untouched.
 	applied2, skipped2, _ := prepareEnvironmentsForSyncHandoff([]syncHandoffTarget{
 		{profileID: idA, pid: 2001, debugPort: 59991},
 		{profileID: idB, pid: 2002, debugPort: 59992},
@@ -127,4 +131,21 @@ func TestPrepareHandoffSkipsAlreadyDone(t *testing.T) {
 	}
 	clearSyncTabHandoffForProfile(idA)
 	clearSyncTabHandoffForProfile(idB)
+}
+
+func TestPlanCollapseNeverTouchesServiceWorkers(t *testing.T) {
+	plan := planCollapseToSoleAboutBlank([]cdpTarget{
+		{ID: "blank", Type: "page", URL: "about:blank"},
+		{ID: "web", Type: "page", URL: "https://example.com/"},
+		{ID: "sw", Type: "service_worker", URL: "chrome-extension://mm/background.js"},
+		{ID: "bg", Type: "background_page", URL: "chrome-extension://mm/bg.html"},
+	})
+	for _, id := range plan.closeIDs {
+		if id == "sw" || id == "bg" || id == "blank" {
+			t.Fatalf("must not close workers/background/keep: %s plan=%+v", id, plan)
+		}
+	}
+	if plan.keepID != "blank" {
+		t.Fatalf("keep blank: %+v", plan)
+	}
 }

@@ -266,10 +266,8 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 		return fmt.Errorf("没有可用的跟随实例")
 	}
 
-	// Per-environment one-shot handoff: only NEW processes (not yet marked)
-	// collapse to sole about:blank. Envs that already completed handoff keep
-	// whatever tabs the user has open (do not disrupt mid-session work when
-	// additional environments join sync).
+	// Per-env one-shot: brand-new processes only → one about:blank then stop.
+	// Already-handed-off envs keep user web tabs + extension pages untouched.
 	masterDebugPort := masterSnapshot.DebugPort
 	handoffTargets := make([]syncHandoffTarget, 0, 1+len(validFollowerIds))
 	handoffTargets = append(handoffTargets, syncHandoffTarget{

@@ -14,11 +14,17 @@ import (
 
 // Sync-start tab handoff (sole about:blank) — once per environment process.
 //
-//   - First time an env (profileID+pid) joins StartInputSync → collapse to one
-//     about:blank, then mark done.
-//   - Envs that already completed handoff (user is actively browsing/synced)
-//     are never collapsed again when other envs join or sync restarts.
-//   - Stop → start yields a new pid → handoff runs once for that new process.
+// What it does (only once, only for brand-new env processes):
+//   - First StartInputSync for this profileID+pid → leave one about:blank page.
+//
+// What it never does (after that mark, or for already-marked envs):
+//   - Does NOT close user-opened web tabs, user-opened extension pages, or
+//     any later tabs the user creates while browsing.
+//   - Does NOT disable extensions, LES/wallets, service workers, or backgrounds.
+//   - Does NOT re-run when other environments join sync or when sync restarts.
+//   - Does NOT run on environment start/stop paths (start is prefs-only).
+//
+// Stop → start yields a new pid → that new process gets handoff once, then stops.
 //
 // Safety (from v1.7.63): navigate keep-tab to about:blank BEFORE closing
 // siblings. Closing Chromium's last page destroys the whole window.
@@ -26,7 +32,7 @@ import (
 const soleBlankCollapseTimeout = 800 * time.Millisecond
 
 // syncTabHandoffDone keys: "profileID:pid" for environments that already received
-// the one-shot sole-blank collapse. Process-local (sync panel process).
+// (or claimed) the one-shot sole-blank collapse. Process-local (sync panel).
 var syncTabHandoffDone sync.Map
 
 func syncTabHandoffKey(profileID string, pid int) string {
@@ -39,6 +45,16 @@ func isSyncTabHandoffDone(profileID string, pid int) bool {
 	}
 	_, ok := syncTabHandoffDone.Load(syncTabHandoffKey(profileID, pid))
 	return ok
+}
+
+// claimSyncTabHandoff marks the env as handed-off atomically. Returns true only
+// for the first claim so concurrent StartInputSync cannot collapse twice.
+func claimSyncTabHandoff(profileID string, pid int) bool {
+	if strings.TrimSpace(profileID) == "" || pid <= 0 {
+		return false
+	}
+	_, loaded := syncTabHandoffDone.LoadOrStore(syncTabHandoffKey(profileID, pid), true)
+	return !loaded
 }
 
 func markSyncTabHandoffDone(profileID string, pid int) {
@@ -94,6 +110,8 @@ type collapseTabPlan struct {
 }
 
 func planCollapseToSoleAboutBlank(targets []cdpTarget) collapseTabPlan {
+	// Only top-level page tabs. Never touch service_worker, background_page,
+	// shared_worker, etc. — those keep wallet/extension runtimes alive.
 	pages := make([]cdpTarget, 0, len(targets))
 	for _, t := range targets {
 		if t.ID == "" || !strings.EqualFold(strings.TrimSpace(t.Type), "page") {
@@ -213,9 +231,9 @@ func collapseEnvironmentTabsToSoleAboutBlank(debugPort int) int {
 	return closed
 }
 
-// prepareEnvironmentsForSyncHandoff collapses only environments that have not
-// yet received sole-blank handoff for this process lifetime. Already-handed-off
-// envs (user mid-session) are left untouched when new windows join sync.
+// prepareEnvironmentsForSyncHandoff collapses only brand-new env processes.
+// Already-handed-off envs are never re-managed — user tabs/extensions stay as-is.
+// Claim-before-collapse guarantees “execute once then stop” under concurrent sync.
 func prepareEnvironmentsForSyncHandoff(targets []syncHandoffTarget) (applied, skipped, closedTabs int) {
 	pending := make([]syncHandoffTarget, 0, len(targets))
 	seenPID := map[int]struct{}{}
@@ -228,7 +246,8 @@ func prepareEnvironmentsForSyncHandoff(targets []syncHandoffTarget) (applied, sk
 			continue
 		}
 		seenPID[t.pid] = struct{}{}
-		if isSyncTabHandoffDone(t.profileID, t.pid) {
+		// Atomic claim: first claim wins; already claimed → skip forever for this pid.
+		if !claimSyncTabHandoff(t.profileID, t.pid) {
 			skipped++
 			continue
 		}
@@ -236,7 +255,7 @@ func prepareEnvironmentsForSyncHandoff(targets []syncHandoffTarget) (applied, sk
 	}
 	if len(pending) == 0 {
 		if skipped > 0 {
-			logger.New("SyncAPI").Info("同步标签接管：全部参与环境已接管过，跳过关页",
+			logger.New("SyncAPI").Info("同步标签接管：已接管环境保持用户标签不动",
 				logger.F("skipped", skipped),
 			)
 		}
@@ -249,8 +268,8 @@ func prepareEnvironmentsForSyncHandoff(targets []syncHandoffTarget) (applied, sk
 		wg.Add(1)
 		go func(target syncHandoffTarget) {
 			defer wg.Done()
+			// One-shot collapse for this new process only. No retry watcher after.
 			n := collapseEnvironmentTabsToSoleAboutBlank(target.debugPort)
-			markSyncTabHandoffDone(target.profileID, target.pid)
 			mu.Lock()
 			closedTabs += n
 			applied++
@@ -258,9 +277,9 @@ func prepareEnvironmentsForSyncHandoff(targets []syncHandoffTarget) (applied, sk
 		}(t)
 	}
 	wg.Wait()
-	logger.New("SyncAPI").Info("同步标签接管：仅对新环境收拢 about:blank",
+	logger.New("SyncAPI").Info("同步标签接管：仅新开环境收拢一次 about:blank，随后完全由用户控制",
 		logger.F("applied", applied),
-		logger.F("skipped_already_handed_off", skipped),
+		logger.F("skipped_user_owned", skipped),
 		logger.F("closed_tabs", closedTabs),
 	)
 	return applied, skipped, closedTabs
