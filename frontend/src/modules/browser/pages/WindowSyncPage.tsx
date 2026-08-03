@@ -496,6 +496,9 @@ export function WindowSyncPage() {
       }
       // Always start in immediate mode; random delay is opt-in only.
       setDelayPreset('off')
+      // Backend also defaults to immediate; re-assert in case a previous session
+      // left random delay enabled on a recycled process.
+      void updateSyncRandomDelay(false, 0, 0)
       setPanelPresentation('compact')
       setShowSyncControls(false)
     } finally {

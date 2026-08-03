@@ -119,6 +119,19 @@ func absCalibInt(value int) int {
 	return value
 }
 
+// scaleScrollDelta keeps same-size tiles 1:1 on wheel magnitude; when cell sizes
+// differ, scale horizontal by width ratio and vertical by height ratio so
+// multi-env scroll distance tracks the visible page proportion.
+func scaleScrollDelta(delta float64, masterLen, followerLen int) float64 {
+	if masterLen <= 0 || followerLen <= 0 {
+		return delta
+	}
+	if absCalibInt(masterLen-followerLen) <= sameSizePixelTolerance {
+		return delta
+	}
+	return delta * float64(followerLen) / float64(masterLen)
+}
+
 // chromeManagerPopupMatchScore ranks a follower popup candidate (lower is better).
 // Combines size delta, relative-offset delta, and title dissimilarity — the same
 // three signals Chrome-Manager uses in on_mouse_event / sync_specific_popup.

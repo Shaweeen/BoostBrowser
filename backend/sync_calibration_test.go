@@ -80,6 +80,18 @@ func TestShouldThrottleMouseMoveByDistance(t *testing.T) {
 	}
 }
 
+func TestScaleScrollDeltaSameSizeUnchanged(t *testing.T) {
+	if got := scaleScrollDelta(120, 800, 802); got != 120 {
+		t.Fatalf("near-same size must keep delta: %v", got)
+	}
+	if got := scaleScrollDelta(-240, 600, 300); got != -120 {
+		t.Fatalf("half height must half vertical delta: %v", got)
+	}
+	if got := scaleScrollDelta(100, 400, 800); got != 200 {
+		t.Fatalf("double width must double horizontal delta: %v", got)
+	}
+}
+
 func TestExpectedPopupOffset(t *testing.T) {
 	// Master at 0, popup at 100 → follower at 1000 should place popup at 1100.
 	if got := expectedPopupOffsetLeft(100, 0, 1000); got != 1100 {

@@ -1089,11 +1089,15 @@ func syncMouseDragThrottle(followerCount int) time.Duration {
 // ============================================================================
 
 // mapCoordsChromeManager maps master screen coords → follower client lParam.
-// Order matches galaylm/Chrome-Manager-Clean on_mouse_event:
-//  1) outer GetWindowRect (same-size absolute / else proportional)
-//  2) client-area absolute or proportional
-//  3) Chrome render-child content rect as last resort
+// For in-page hits prefer the Chrome render widget (content pixels) so dapp /
+// extension-injected buttons land on the same control. Otherwise fall back to
+// outer/client rects (Chrome-Manager order).
 func mapCoordsChromeManager(screenX, screenY int, masterHwnd, followerHwnd windows.HWND) (uintptr, bool) {
+	if pointInsideChromeRender(masterHwnd, screenX, screenY) {
+		if lparam, ok := mapCoordsViaRenderContent(screenX, screenY, masterHwnd, followerHwnd); ok {
+			return lparam, true
+		}
+	}
 	if lparam, ok := mapCoordsOuterWindowRects(screenX, screenY, masterHwnd, followerHwnd); ok {
 		return lparam, true
 	}
@@ -1259,29 +1263,34 @@ func findMatchingChromeInputSurface(masterSurface, masterMain, followerMain wind
 	ml, mt, mr, mb := getWindowRect(masterSurface)
 	mml, mmt, mmr, _ := getWindowRect(masterMain)
 	fl, ft, fr, _ := getWindowRect(followerMain)
-	// Prefer CM relative offset (popup - main) on the follower; keep edge-anchor
-	// as a secondary expected X when the popup is right-aligned in the tile.
+	// Try CM relative offset first, then right/left edge-anchor (wallet dock).
+	// Pick the better score so extension popups still match under dense tiles.
 	offsetLeft := expectedPopupOffsetLeft(int(ml), int(mml), int(fl))
 	edgeLeft := expectedPopupSurfaceLeft(int(ml), int(mr), int(mml), int(mmr), int(fl), int(fr))
-	expectedLeft := offsetLeft
-	// If edge-anchor is closer to a typical wallet dock, blend by choosing the
-	// candidate search expected as CM offset (primary) — enum score also uses it.
-	_ = edgeLeft
+	expectedTop := expectedPopupOffsetTop(int(mt), int(mmt), int(ft))
 	master := syncInputSurfaceCandidate{
 		hwnd: masterSurface, className: getWindowClassName(masterSurface),
 		title: getWindowTitle(masterSurface),
 		left:  int(ml), top: int(mt), width: int(mr - ml), height: int(mb - mt),
 	}
-	search := &syncInputSurfaceSearch{
-		pid: windowPID(followerMain), mainHwnd: followerMain, master: master,
-		expectedLeft: expectedLeft,
-		expectedTop:  expectedPopupOffsetTop(int(mt), int(mmt), int(ft)),
-		bestScore:    int64(^uint64(0) >> 1),
+	best := windows.HWND(0)
+	bestScore := int64(^uint64(0) >> 1)
+	for _, expectedLeft := range []int{offsetLeft, edgeLeft} {
+		search := &syncInputSurfaceSearch{
+			pid: windowPID(followerMain), mainHwnd: followerMain, master: master,
+			expectedLeft: expectedLeft,
+			expectedTop:  expectedTop,
+			bestScore:    int64(^uint64(0) >> 1),
+		}
+		procEnumWindows.Call(syncInputSurfaceEnumCallback, uintptr(unsafe.Pointer(search)))
+		runtime.KeepAlive(search)
+		if search.best != 0 && search.bestScore < bestScore {
+			best = search.best
+			bestScore = search.bestScore
+		}
 	}
-	procEnumWindows.Call(syncInputSurfaceEnumCallback, uintptr(unsafe.Pointer(search)))
-	runtime.KeepAlive(search)
-	if search.best != 0 {
-		return search.best
+	if best != 0 {
+		return best
 	}
 	return followerMain
 }
@@ -1373,11 +1382,15 @@ func mapChromeInputTarget(screenX, screenY int, masterMain, followerMain windows
 		return followerMain, lparam, ok
 	}
 	followerSurface := findMatchingChromeInputSurface(masterSurface, masterMain, followerMain)
-	if followerSurface == followerMain {
-		return 0, 0, false
+	if followerSurface != followerMain {
+		if lparam, ok := mapPointBetweenInputSurfaces(screenX, screenY, masterSurface, followerSurface); ok {
+			return followerSurface, lparam, true
+		}
 	}
-	lparam, ok := mapPointBetweenInputSurfaces(screenX, screenY, masterSurface, followerSurface)
-	return followerSurface, lparam, ok
+	// No matching extension popup on follower: still map into the main frame so
+	// the click is not dropped (better for dapp "Connect" under partial popup lag).
+	lparam, ok := mapCoordsChromeManager(screenX, screenY, masterMain, followerMain)
+	return followerMain, lparam, ok
 }
 
 // listChromePopupSurfaces / chromePopupListSearch remain available for diagnostics
@@ -1615,39 +1628,11 @@ func mapCoordsViaClientArea(screenX, screenY int, masterHwnd, followerHwnd windo
 	return MAKELONG(uint16(int16(clientX)), uint16(int16(clientY))), true
 }
 
-// mapScreenPointToFollower maps a physical screen point from the master client
-// to the equivalent physical screen point in a follower. WM_MOUSEWHEEL requires
-// screen coordinates (unlike button and move messages, which use client
-// coordinates), so reusing mapCoordsChromeManager here causes DPI-dependent
-// drift and incorrect scrolling targets.
+// mapScreenPointToFollower maps a master screen point to follower screen coords
+// for WM_MOUSEWHEEL (screen lParam). Uses outer-rect CM calibration with
+// same-size absolute mapping so wheel targets match click mapping.
 func mapScreenPointToFollower(screenX, screenY int, masterHwnd, followerHwnd windows.HWND) (int, int, bool) {
-	mClientX, mClientY := screenToClient(masterHwnd, screenX, screenY)
-	mW, mH, ok := getClientSize(masterHwnd)
-	if !ok || mW <= 0 || mH <= 0 {
-		return 0, 0, false
-	}
-	// Scrollbars and trackpad gestures can land a few pixels outside the strict
-	// client rect under DPI scaling; clamp instead of dropping the event.
-	if mClientX < 0 {
-		mClientX = 0
-	}
-	if mClientY < 0 {
-		mClientY = 0
-	}
-	if mClientX > mW {
-		mClientX = mW
-	}
-	if mClientY > mH {
-		mClientY = mH
-	}
-	fW, fH, ok := getClientSize(followerHwnd)
-	if !ok || fW <= 0 || fH <= 0 {
-		return 0, 0, false
-	}
-	x := int(float64(mClientX) / float64(mW) * float64(fW))
-	y := int(float64(mClientY) / float64(mH) * float64(fH))
-	left, top, _, _ := getWindowRect(followerHwnd)
-	return int(left) + x, int(top) + y, true
+	return mapScreenPointBetweenInputSurfaces(screenX, screenY, masterHwnd, followerHwnd)
 }
 
 var procEnumChildWindows = user32dll.NewProc("EnumChildWindows")
@@ -1660,30 +1645,31 @@ func mapCoordsViaRenderContent(screenX, screenY int, masterHwnd, followerHwnd wi
 	}
 
 	mLeft, mTop, mRight, mBottom := getWindowRect(masterRender)
-	mW := mRight - mLeft
-	mH := mBottom - mTop
+	mW := int(mRight - mLeft)
+	mH := int(mBottom - mTop)
 	if mW <= 50 || mH <= 50 || mW > 10000 || mH > 10000 {
 		return 0, false
 	}
-	if screenX < int(mLeft) || screenX > int(mRight) || screenY < int(mTop) || screenY > int(mBottom) {
-		return 0, false
-	}
-
-	relX := float64(screenX-int(mLeft)) / float64(mW)
-	relY := float64(screenY-int(mTop)) / float64(mH)
-	if relX < 0 || relX > 1 || relY < 0 || relY > 1 {
+	// Allow a few px slack for scrollbars / DPI (same as outer mapper).
+	if screenX < int(mLeft)-2 || screenX > int(mRight)+2 || screenY < int(mTop)-2 || screenY > int(mBottom)+2 {
 		return 0, false
 	}
 
 	fLeft, fTop, fRight, fBottom := getWindowRect(followerRender)
-	fW := fRight - fLeft
-	fH := fBottom - fTop
+	fW := int(fRight - fLeft)
+	fH := int(fBottom - fTop)
 	if fW <= 50 || fH <= 50 || fW > 10000 || fH > 10000 {
 		return 0, false
 	}
 
-	targetScreenX := int(fLeft) + int(float64(fW)*relX)
-	targetScreenY := int(fTop) + int(float64(fH)*relY)
+	// Reuse CM same-size absolute / else proportional on the *render* rect so
+	// in-page buttons and scrollbars share one calibration model.
+	cx, cy, ok := chromeManagerMapPoint(screenX, screenY, int(mLeft), int(mTop), int(mRight), int(mBottom), fW, fH)
+	if !ok {
+		return 0, false
+	}
+	targetScreenX := int(fLeft) + cx
+	targetScreenY := int(fTop) + cy
 	clientX, clientY := screenToClient(followerHwnd, targetScreenX, targetScreenY)
 	if clientX < -32768 || clientX > 32767 || clientY < -32768 || clientY > 32767 {
 		return 0, false
@@ -2704,12 +2690,32 @@ func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY in
 		return
 	}
 	ml, mt, mr, mb := getWindowRect(masterRender)
-	if mr <= ml || mb <= mt {
+	mW, mH := int(mr-ml), int(mb-mt)
+	if mW <= 0 || mH <= 0 {
 		return
 	}
-	rx := float64(screenX-int(ml)) / float64(mr-ml)
-	ry := float64(screenY-int(mt)) / float64(mb-mt)
-	deltaX, deltaY := pageWheelDeltas(msg, delta, keyState)
+	// Same-size tiles: absolute pixel offset into the render surface.
+	// Different sizes: proportional so horizontal/vertical scroll stay aligned.
+	var rx, ry float64
+	if absCalibInt(mW) > 0 {
+		rx = float64(screenX-int(ml)) / float64(mW)
+	}
+	if absCalibInt(mH) > 0 {
+		ry = float64(screenY-int(mt)) / float64(mH)
+	}
+	if rx < 0 {
+		rx = 0
+	}
+	if rx > 1 {
+		rx = 1
+	}
+	if ry < 0 {
+		ry = 0
+	}
+	if ry > 1 {
+		ry = 1
+	}
+	baseDX, baseDY := pageWheelDeltas(msg, delta, keyState)
 	modifiers := 0
 	if keyState&MK_CONTROL != 0 {
 		modifiers |= 2
@@ -2743,7 +2749,17 @@ func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY in
 				return
 			}
 			fl, ft, fr, fb := getWindowRect(render)
-			x, y := rx*float64(fr-fl), ry*float64(fb-ft)
+			fW, fH := int(fr-fl), int(fb-ft)
+			var x, y float64
+			if absCalibInt(mW-fW) <= sameSizePixelTolerance && absCalibInt(mH-fH) <= sameSizePixelTolerance {
+				x = float64(screenX - int(ml))
+				y = float64(screenY - int(mt))
+			} else {
+				x, y = rx*float64(fW), ry*float64(fH)
+			}
+			// Scale wheel magnitude with content size so followers don't under/over-scroll.
+			deltaX := scaleScrollDelta(baseDX, mW, fW)
+			deltaY := scaleScrollDelta(baseDY, mH, fH)
 			s.dispatchWithRandomDelay(hwnd, func() {
 				s.withCDPPortLock(port, func() {
 					followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, waitPopup)
