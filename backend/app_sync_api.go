@@ -499,7 +499,9 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	seenWindows := make(map[windows.HWND]struct{}, len(profileIds))
 
 	resolveMainHWND := func(profileID string, profile *BrowserProfile, hinted windows.HWND) windows.HWND {
-		// Prefer live main-frame resolution so we never tile a popup.
+		// Prefer live main-frame resolution so we do not tile a wallet popup.
+		// Always keep hard fallbacks: over-strict filters must not make tile
+		// return "没有可用的运行实例窗口" when Chrome is clearly open.
 		if profile != nil && profile.Pid > 0 {
 			if hwnd := findMainEnvironmentBrowserWindow(profile.Pid); hwnd != 0 {
 				return hwnd
@@ -507,8 +509,16 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 			if hwnd, err := findProcessTreeWindow(profile.Pid); err == nil && hwnd != 0 {
 				return hwnd
 			}
+			if hwnd, err := findProcessWindow(profile.Pid); err == nil && hwnd != 0 {
+				return hwnd
+			}
 		}
-		if hinted != 0 && isWindow(hinted) && isMainEnvironmentBrowserFrame(hinted, getWindowTitle(hinted)) {
+		if hinted != 0 && isWindow(hinted) {
+			title := getWindowTitle(hinted)
+			if isMainEnvironmentBrowserFrame(hinted, title) {
+				return hinted
+			}
+			// Sync-session handle still better than giving up entirely.
 			return hinted
 		}
 		return 0

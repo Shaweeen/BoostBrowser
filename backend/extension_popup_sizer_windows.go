@@ -143,10 +143,6 @@ func isMainEnvironmentBrowserFrame(hwnd windows.HWND, title string) bool {
 	if hwnd == 0 {
 		return false
 	}
-	// Never apply the startup template to extension/wallet popups or DevTools.
-	if isCompactExtensionPopupTitle(title) || isDefinitiveExtensionPopupTitle(title) {
-		return false
-	}
 	if looksLikeServiceWorkerDevToolsTitle(title) {
 		return false
 	}
@@ -157,21 +153,40 @@ func isMainEnvironmentBrowserFrame(hwnd windows.HWND, title string) bool {
 	if !ok {
 		return false
 	}
-	// Typical extension popups are compact; the environment main page is a full
-	// browser frame. Multi-open tile (e.g. 10 envs on 1080p) yields ~340–480px
-	// wide cells — thresholds must stay below that or re-tile re-resolves the
-	// wrong HWND (popup) and windows appear "displaced".
-	if w < 280 && !looksLikeMainBrowserWindowTitle(title) {
+	return environmentFrameLooksLikeMain(w, h, title)
+}
+
+// environmentFrameLooksLikeMain classifies a Chrome top-level by client size +
+// title. Size wins over title: a full browser frame whose tab title is
+// "MetaMask" / a wallet brand is still the environment main window. Only
+// compact portrait surfaces with popup titles are treated as extension hosts.
+//
+// Regression (1.7.72): title-first rejection made tile/sync return zero HWNDs
+// whenever users had a wallet page open in the main tab ("没有可用的运行实例窗口").
+func environmentFrameLooksLikeMain(w, h int, title string) bool {
+	if w < 80 || h < 8 {
 		return false
 	}
-	if h < 140 && w < 500 && !looksLikeMainBrowserWindowTitle(title) {
+	titlePopup := isCompactExtensionPopupTitle(title) || isDefinitiveExtensionPopupTitle(title)
+	// Classic wallet Notification geometry: tall portrait, not a wide tile cell.
+	if titlePopup && w <= 560 && h <= 900 && h >= w && (w*h) <= 560*750 {
 		return false
 	}
-	// Compact wallet notification-ish sizes that still pass title filters.
-	if w <= 520 && h <= 720 && w < h && isCompactExtensionPopupTitle(title) {
+	// Small compact host with a popup title (extension menu / attach surface).
+	if titlePopup && (w < 400 || h < 280) {
 		return false
 	}
-	return true
+	// Multi-open tile cells on 1080p are ~340–480×280+ — always main frames.
+	if w >= 260 && h >= 120 {
+		return true
+	}
+	if looksLikeMainBrowserWindowTitle(title) && w >= 120 && h >= 80 {
+		return true
+	}
+	if titlePopup {
+		return false
+	}
+	return w >= 200 && h >= 100
 }
 
 func isStrongExtensionPopupTitle(title string) bool {

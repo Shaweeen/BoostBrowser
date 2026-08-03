@@ -20,6 +20,30 @@ func TestIsMainEnvironmentBrowserFrameRejectsPopupsAndZero(t *testing.T) {
 	}
 }
 
+func TestEnvironmentFrameLooksLikeMainAcceptsWalletTitledBrowser(t *testing.T) {
+	// Full env window with MetaMask open as the active tab must still tile/sync.
+	if !environmentFrameLooksLikeMain(900, 700, "MetaMask") {
+		t.Fatal("large wallet-titled browser must count as main frame")
+	}
+	if !environmentFrameLooksLikeMain(360, 300, "MetaMask") {
+		t.Fatal("tiled multi-open cell with wallet tab title must count as main")
+	}
+	// Classic tall notification host stays a popup.
+	if environmentFrameLooksLikeMain(360, 600, "MetaMask") {
+		t.Fatal("portrait wallet notification must not count as main frame")
+	}
+	if environmentFrameLooksLikeMain(390, 620, "Rabby Wallet Notification") {
+		t.Fatal("notification host must not count as main frame")
+	}
+	// Empty-title wide tile cell (Cloak / custom core).
+	if !environmentFrameLooksLikeMain(480, 340, "") {
+		t.Fatal("empty-title tile cell must count as main frame")
+	}
+	if environmentFrameLooksLikeMain(100, 80, "MetaMask") {
+		t.Fatal("tiny popup must not count as main")
+	}
+}
+
 func TestWalletNotificationNeverForceFitsSize(t *testing.T) {
 	// Rabby/MetaMask Notification hosts blank permanently if resized mid-paint.
 	if !isWalletNotificationHostTitle("Rabby Wallet Notification") {
