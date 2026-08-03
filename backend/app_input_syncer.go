@@ -184,12 +184,12 @@ func httpishCDPTarget(target cdpTarget) bool {
 }
 
 // focusedCDPTarget resolves the document that should receive synced input.
-// preferExtension=true when the master OS surface is a wallet/extension popup;
-// false for the main browser frame (dapp "Connect Wallet" etc.).
+// preferExtension=true when the master OS surface is a wallet/extension popup HWND.
 //
-// Critical: when focus probes fail (sync panel steals OS focus), never prefer
-// chrome-extension:// over the live https dapp — that made Connect Wallet open
-// only on master while followers received clicks into MetaMask/Rabby pages.
+// Main-frame path must still select a *visible* chrome-extension page when that
+// is the active tab (MetaMask home etc.). Preferring any https URL over a
+// visible extension made wheel/scroll hit the wrong document so followers did
+// not scroll with the master (regression after Connect-Wallet target fix).
 func focusedCDPTarget(debugPort int) (cdpTarget, bool) {
 	return focusedCDPTargetPrefer(debugPort, false)
 }
@@ -203,19 +203,25 @@ func focusedCDPTargetPrefer(debugPort int, preferExtension bool) (cdpTarget, boo
 	if len(pages) == 1 {
 		return pages[0], true
 	}
-	// Prefer the document that actually has OS/DOM focus, then one with an
-	// active editable (password/auth input).
+	// focused = OS/DOM focus; visible = selected tab (works when sync panel
+	// steals OS focus so document.hasFocus() is false on every env page).
 	const focusProbe = `(() => {
 		const e = document.activeElement;
 		const editable = !!(e && (
 			e.tagName === 'INPUT' || e.tagName === 'TEXTAREA' ||
 			(typeof e.isContentEditable === 'boolean' && e.isContentEditable)
 		));
-		return {focused: !!document.hasFocus(), editable: editable};
+		return {
+			focused: !!document.hasFocus(),
+			visible: document.visibilityState === 'visible',
+			editable: editable,
+		};
 	})()`
 	var focusedAny, editableAny, focusedExt, editableExt cdpTarget
+	var visibleAny, visibleExt cdpTarget
 	haveFocused, haveEditable := false, false
 	haveFocusedExt, haveEditableExt := false, false
+	haveVisible, haveVisibleExt := false, false
 	for _, target := range pages {
 		result, err := cdpCallTarget(target, "Runtime.evaluate", map[string]any{
 			"expression": focusProbe, "returnByValue": true,
@@ -240,11 +246,12 @@ func focusedCDPTargetPrefer(debugPort int, preferExtension bool) (cdpTarget, boo
 			continue
 		}
 		focused, _ := info["focused"].(bool)
+		visible, _ := info["visible"].(bool)
 		editable, _ := info["editable"].(bool)
 		isExt := extensionLikeCDPTarget(target)
 		if focused && editable {
 			if preferExtension && !isExt {
-				// Keep looking for a focused extension when master is on a popup.
+				// keep looking for extension when master is on a popup HWND
 			} else {
 				return target, true
 			}
@@ -258,6 +265,16 @@ func focusedCDPTargetPrefer(debugPort int, preferExtension bool) (cdpTarget, boo
 			} else if !haveFocused {
 				focusedAny = target
 				haveFocused = true
+			}
+		}
+		if visible {
+			if !haveVisible {
+				visibleAny = target
+				haveVisible = true
+			}
+			if isExt && !haveVisibleExt {
+				visibleExt = target
+				haveVisibleExt = true
 			}
 		}
 		if editable {
@@ -276,6 +293,9 @@ func focusedCDPTargetPrefer(debugPort int, preferExtension bool) (cdpTarget, boo
 		if haveFocusedExt {
 			return focusedExt, true
 		}
+		if haveVisibleExt {
+			return visibleExt, true
+		}
 		if haveEditableExt {
 			return editableExt, true
 		}
@@ -293,11 +313,15 @@ func focusedCDPTargetPrefer(debugPort int, preferExtension bool) (cdpTarget, boo
 	if haveFocused {
 		return focusedAny, true
 	}
+	// Visible tab wins over "any https in /json" — MetaMask full-page home is
+	// chrome-extension:// and must receive wheel/click when it is the active tab.
+	if haveVisible {
+		return visibleAny, true
+	}
 	if haveEditable {
 		return editableAny, true
 	}
-	// Main-frame path: prefer live http(s) dapp pages, never silent extension
-	// fallback (wallet service pages stay listed in /json after a prior unlock).
+	// Nothing visible/focused (probe failed): prefer https dapp, then other non-ext.
 	for _, target := range pages {
 		if httpishCDPTarget(target) {
 			return target, true
@@ -538,8 +562,32 @@ func matchingFollowerCDPTarget(master cdpTarget, debugPort int, waitForPopup boo
 		if bestScore > 0 {
 			return best, true
 		}
+		// Soft match: same extension ID (MetaMask home on master → same on follower)
+		// even when path/hash differs and score stayed 0.
+		if masterID := chromeExtensionID(master.URL); masterID != "" {
+			for _, candidate := range pages {
+				if chromeExtensionID(candidate.URL) == masterID {
+					return candidate, true
+				}
+			}
+		}
+		// Main-frame http(s): first visible-ish http page on follower.
+		if httpishCDPTarget(master) {
+			for _, candidate := range pages {
+				if httpishCDPTarget(candidate) {
+					return candidate, true
+				}
+			}
+		}
 		if attempt+1 < attempts {
 			time.Sleep(40 * time.Millisecond)
+		}
+	}
+	// Last resort for non-popup master: any page so wheel/click is not dropped.
+	if !popupLikeCDPTarget(master) {
+		pages := pageCDPTargets(debugPort)
+		if len(pages) > 0 {
+			return pages[0], true
 		}
 	}
 	return cdpTarget{}, false
@@ -2988,6 +3036,8 @@ func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY in
 				s.withCDPPortLock(port, func() {
 					followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, waitPopup)
 					if !ok {
+						// Never drop wheel silently — Win32 path still moves most pages.
+						s.dispatchPageWheelFallback(hwnd, msg, screenX, screenY, delta, keyState)
 						return
 					}
 					x, y, ok := s.mapPageClickToFollowerCDP(screenX, screenY, int(ml), int(mt), int(mr), int(mb), render, port, followerTarget)

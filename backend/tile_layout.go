@@ -90,8 +90,9 @@ func tileGridDimensions(n int) (cols, rows int) {
 }
 
 // defaultTileGapPx is the fixed pixel gap between adjacent tiled environments.
-// User-facing multi-open layout uses a 1px seam (not large DWM overlap).
-const defaultTileGapPx = 1
+// 0 = flush grid (sub-pixel “~0.15px” hairline is DWM only; Win32 cannot place
+// fractional gaps). Vertical and horizontal use the same value.
+const defaultTileGapPx = 0
 
 // computeUniformTileRects places n windows into a cols×rows grid with **identical
 // outer W×H for every window** (including incomplete last-row cells) and a fixed
