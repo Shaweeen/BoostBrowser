@@ -816,6 +816,9 @@ func (a *App) BrowserInstanceStop(profileId string) (*BrowserProfile, error) {
 	a.browserCloseMu.Lock()
 	defer a.browserCloseMu.Unlock()
 
+	// Allow a future start of this profile to receive sole-blank handoff once.
+	clearSyncTabHandoffForProfile(profileId)
+
 	a.rabbyImportMu.Lock()
 	blocked := a.rabbyImportActive[profileId]
 	a.rabbyImportMu.Unlock()

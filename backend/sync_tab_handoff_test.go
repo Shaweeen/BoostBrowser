@@ -76,3 +76,55 @@ func TestFinalizeHandoffPanelSkipsOwnCollapse(t *testing.T) {
 		t.Fatalf("unexpected reason: %#v", result)
 	}
 }
+
+func TestSyncTabHandoffDoneIsPerProfilePid(t *testing.T) {
+	// Isolate from other tests by using unique ids.
+	id := "handoff-test-profile-xyz"
+	clearSyncTabHandoffForProfile(id)
+	if isSyncTabHandoffDone(id, 1001) {
+		t.Fatal("expected not done")
+	}
+	markSyncTabHandoffDone(id, 1001)
+	if !isSyncTabHandoffDone(id, 1001) {
+		t.Fatal("same pid must be done")
+	}
+	// New browser process (new pid) must hand off again.
+	if isSyncTabHandoffDone(id, 1002) {
+		t.Fatal("new pid must not inherit handoff mark")
+	}
+	clearSyncTabHandoffForProfile(id)
+	if isSyncTabHandoffDone(id, 1001) {
+		t.Fatal("clear must drop all pids for profile")
+	}
+}
+
+func TestPrepareHandoffSkipsAlreadyDone(t *testing.T) {
+	idA, idB := "handoff-a-skip", "handoff-b-new"
+	clearSyncTabHandoffForProfile(idA)
+	clearSyncTabHandoffForProfile(idB)
+	markSyncTabHandoffDone(idA, 2001)
+	// Dead debug ports: collapse no-ops, but applied/skipped accounting still runs.
+	applied, skipped, _ := prepareEnvironmentsForSyncHandoff([]syncHandoffTarget{
+		{profileID: idA, pid: 2001, debugPort: 59991}, // already done → skip
+		{profileID: idB, pid: 2002, debugPort: 59992}, // new → applied + mark
+	})
+	if skipped != 1 {
+		t.Fatalf("expected 1 skip for already-handed-off: applied=%d skipped=%d", applied, skipped)
+	}
+	if applied != 1 {
+		t.Fatalf("expected 1 apply for new env: applied=%d", applied)
+	}
+	if !isSyncTabHandoffDone(idB, 2002) {
+		t.Fatal("new env must be marked after attempt")
+	}
+	// Second sync with same set: both skipped.
+	applied2, skipped2, _ := prepareEnvironmentsForSyncHandoff([]syncHandoffTarget{
+		{profileID: idA, pid: 2001, debugPort: 59991},
+		{profileID: idB, pid: 2002, debugPort: 59992},
+	})
+	if applied2 != 0 || skipped2 != 2 {
+		t.Fatalf("second pass must skip all: applied=%d skipped=%d", applied2, skipped2)
+	}
+	clearSyncTabHandoffForProfile(idA)
+	clearSyncTabHandoffForProfile(idB)
+}

@@ -4,6 +4,7 @@ package backend
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -11,14 +12,64 @@ import (
 	"boost-browser/backend/internal/logger"
 )
 
-// Sync-start tab handoff (sole about:blank) — user-triggered, one-shot per
-// StartInputSync. After this, BrowserStudio never closes/creates tabs again
-// for that session; extension clicks and new tabs are fully user-owned.
+// Sync-start tab handoff (sole about:blank) — once per environment process.
+//
+//   - First time an env (profileID+pid) joins StartInputSync → collapse to one
+//     about:blank, then mark done.
+//   - Envs that already completed handoff (user is actively browsing/synced)
+//     are never collapsed again when other envs join or sync restarts.
+//   - Stop → start yields a new pid → handoff runs once for that new process.
 //
 // Safety (from v1.7.63): navigate keep-tab to about:blank BEFORE closing
 // siblings. Closing Chromium's last page destroys the whole window.
 
 const soleBlankCollapseTimeout = 800 * time.Millisecond
+
+// syncTabHandoffDone keys: "profileID:pid" for environments that already received
+// the one-shot sole-blank collapse. Process-local (sync panel process).
+var syncTabHandoffDone sync.Map
+
+func syncTabHandoffKey(profileID string, pid int) string {
+	return strings.TrimSpace(profileID) + ":" + strconv.Itoa(pid)
+}
+
+func isSyncTabHandoffDone(profileID string, pid int) bool {
+	if strings.TrimSpace(profileID) == "" || pid <= 0 {
+		return false
+	}
+	_, ok := syncTabHandoffDone.Load(syncTabHandoffKey(profileID, pid))
+	return ok
+}
+
+func markSyncTabHandoffDone(profileID string, pid int) {
+	if strings.TrimSpace(profileID) == "" || pid <= 0 {
+		return
+	}
+	syncTabHandoffDone.Store(syncTabHandoffKey(profileID, pid), true)
+}
+
+// clearSyncTabHandoffForProfile drops all handoff marks for a profile (any pid).
+// Call when the environment is fully stopped so a future start is treated as new.
+func clearSyncTabHandoffForProfile(profileID string) {
+	profileID = strings.TrimSpace(profileID)
+	if profileID == "" {
+		return
+	}
+	prefix := profileID + ":"
+	syncTabHandoffDone.Range(func(key, _ any) bool {
+		if k, ok := key.(string); ok && strings.HasPrefix(k, prefix) {
+			syncTabHandoffDone.Delete(key)
+		}
+		return true
+	})
+}
+
+// syncHandoffTarget is one running environment considered for sole-blank handoff.
+type syncHandoffTarget struct {
+	profileID string
+	pid       int
+	debugPort int
+}
 
 func isBlankOrNewTabURL(raw string) bool {
 	u := strings.ToLower(strings.TrimSpace(raw))
@@ -162,57 +213,57 @@ func collapseEnvironmentTabsToSoleAboutBlank(debugPort int) int {
 	return closed
 }
 
-// collapseEnvironmentsToSoleAboutBlankParallel collapses each debug port once.
-// Used only from StartInputSync so multi-open stays bounded.
-func collapseEnvironmentsToSoleAboutBlankParallel(debugPorts []int) (profiles, closedTabs int) {
-	ports := make([]int, 0, len(debugPorts))
-	seen := map[int]struct{}{}
-	for _, p := range debugPorts {
-		if p <= 0 {
+// prepareEnvironmentsForSyncHandoff collapses only environments that have not
+// yet received sole-blank handoff for this process lifetime. Already-handed-off
+// envs (user mid-session) are left untouched when new windows join sync.
+func prepareEnvironmentsForSyncHandoff(targets []syncHandoffTarget) (applied, skipped, closedTabs int) {
+	pending := make([]syncHandoffTarget, 0, len(targets))
+	seenPID := map[int]struct{}{}
+	for _, t := range targets {
+		t.profileID = strings.TrimSpace(t.profileID)
+		if t.profileID == "" || t.pid <= 0 || t.debugPort <= 0 {
 			continue
 		}
-		if _, dup := seen[p]; dup {
+		if _, dup := seenPID[t.pid]; dup {
 			continue
 		}
-		seen[p] = struct{}{}
-		ports = append(ports, p)
+		seenPID[t.pid] = struct{}{}
+		if isSyncTabHandoffDone(t.profileID, t.pid) {
+			skipped++
+			continue
+		}
+		pending = append(pending, t)
 	}
-	if len(ports) == 0 {
-		return 0, 0
+	if len(pending) == 0 {
+		if skipped > 0 {
+			logger.New("SyncAPI").Info("同步标签接管：全部参与环境已接管过，跳过关页",
+				logger.F("skipped", skipped),
+			)
+		}
+		return 0, skipped, 0
 	}
+
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	for _, port := range ports {
+	for _, t := range pending {
 		wg.Add(1)
-		go func(debugPort int) {
+		go func(target syncHandoffTarget) {
 			defer wg.Done()
-			n := collapseEnvironmentTabsToSoleAboutBlank(debugPort)
+			n := collapseEnvironmentTabsToSoleAboutBlank(target.debugPort)
+			markSyncTabHandoffDone(target.profileID, target.pid)
 			mu.Lock()
 			closedTabs += n
+			applied++
 			mu.Unlock()
-		}(port)
+		}(t)
 	}
 	wg.Wait()
-	return len(ports), closedTabs
-}
-
-// prepareEnvironmentsForSyncHandoff is the only post-start tab action: on sync
-// start, every participating environment is reduced to one about:blank. After
-// return, no tab management runs until the next StartInputSync.
-func prepareEnvironmentsForSyncHandoff(masterDebugPort int, followerDebugPorts []int) (profiles, closedTabs int) {
-	ports := make([]int, 0, 1+len(followerDebugPorts))
-	if masterDebugPort > 0 {
-		ports = append(ports, masterDebugPort)
-	}
-	ports = append(ports, followerDebugPorts...)
-	profiles, closedTabs = collapseEnvironmentsToSoleAboutBlankParallel(ports)
-	if profiles > 0 {
-		logger.New("SyncAPI").Info("同步启动：各环境仅保留一个 about:blank，此后标签由用户完全控制",
-			logger.F("profiles", profiles),
-			logger.F("closed_tabs", closedTabs),
-		)
-	}
-	return profiles, closedTabs
+	logger.New("SyncAPI").Info("同步标签接管：仅对新环境收拢 about:blank",
+		logger.F("applied", applied),
+		logger.F("skipped_already_handed_off", skipped),
+		logger.F("closed_tabs", closedTabs),
+	)
+	return applied, skipped, closedTabs
 }
 
 // FinalizeEnvironmentTabsForUserHandoff is API compatibility.
@@ -223,6 +274,7 @@ func (a *App) FinalizeEnvironmentTabsForUserHandoff() map[string]interface{} {
 		"skipped":    false,
 		"profiles":   0,
 		"closedTabs": 0,
+		"applied":    0,
 	}
 	if a != nil && a.panelMode {
 		result["skipped"] = true
@@ -235,16 +287,22 @@ func (a *App) FinalizeEnvironmentTabsForUserHandoff() map[string]interface{} {
 		return result
 	}
 	a.browserMgr.Mutex.Lock()
-	ports := make([]int, 0)
-	for _, p := range a.browserMgr.Profiles {
-		if p == nil || !p.Running || p.DebugPort <= 0 {
+	targets := make([]syncHandoffTarget, 0)
+	for id, p := range a.browserMgr.Profiles {
+		if p == nil || !p.Running || p.DebugPort <= 0 || p.Pid <= 0 {
 			continue
 		}
-		ports = append(ports, p.DebugPort)
+		targets = append(targets, syncHandoffTarget{
+			profileID: id,
+			pid:       p.Pid,
+			debugPort: p.DebugPort,
+		})
 	}
 	a.browserMgr.Mutex.Unlock()
-	profiles, closed := collapseEnvironmentsToSoleAboutBlankParallel(ports)
-	result["profiles"] = profiles
+	applied, skipped, closed := prepareEnvironmentsForSyncHandoff(targets)
+	result["applied"] = applied
+	result["skipped_already"] = skipped
+	result["profiles"] = applied + skipped
 	result["closedTabs"] = closed
 	return result
 }

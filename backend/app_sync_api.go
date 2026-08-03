@@ -266,14 +266,38 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 		return fmt.Errorf("没有可用的跟随实例")
 	}
 
-	// One-shot user handoff: every participating environment keeps only one
-	// about:blank. Runs before hooks so scroll/click start on a clean shell.
-	// After this, no further tab close/create until the next StartInputSync.
+	// Per-environment one-shot handoff: only NEW processes (not yet marked)
+	// collapse to sole about:blank. Envs that already completed handoff keep
+	// whatever tabs the user has open (do not disrupt mid-session work when
+	// additional environments join sync).
 	masterDebugPort := masterSnapshot.DebugPort
-	handoffProfiles, handoffClosed := prepareEnvironmentsForSyncHandoff(masterDebugPort, followerDebugPorts)
-	if handoffProfiles > 0 {
-		log.Info("同步前标签接管完成",
-			logger.F("profiles", handoffProfiles),
+	handoffTargets := make([]syncHandoffTarget, 0, 1+len(validFollowerIds))
+	handoffTargets = append(handoffTargets, syncHandoffTarget{
+		profileID: masterProfileId,
+		pid:       masterSnapshot.Pid,
+		debugPort: masterDebugPort,
+	})
+	// validFollowerIds[i] aligns with followerDebugPorts[i]; resolve pid by id.
+	pidByID := make(map[string]int, len(followers))
+	for _, c := range followers {
+		pidByID[c.id] = c.profile.Pid
+	}
+	for i, fid := range validFollowerIds {
+		port := 0
+		if i < len(followerDebugPorts) {
+			port = followerDebugPorts[i]
+		}
+		handoffTargets = append(handoffTargets, syncHandoffTarget{
+			profileID: fid,
+			pid:       pidByID[fid],
+			debugPort: port,
+		})
+	}
+	applied, skippedHandoff, handoffClosed := prepareEnvironmentsForSyncHandoff(handoffTargets)
+	if applied > 0 || skippedHandoff > 0 {
+		log.Info("同步前标签接管",
+			logger.F("applied_new", applied),
+			logger.F("skipped_already", skippedHandoff),
 			logger.F("closed_tabs", handoffClosed),
 		)
 	}
