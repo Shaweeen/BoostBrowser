@@ -486,9 +486,80 @@ func constrainSyncPopupRectOptions(popup, owner winRect, inset int, allowResize 
 			}
 		}
 	}
+	// Final clamp to the monitor work area so wallet popups on bottom-row tiles
+	// are not buried under the Windows taskbar (inputs become unclickable).
+	x, y, width, height = clampPopupRectToWorkArea(x, y, width, height, allowResize)
+
 	// Ignore 1px jitter so continuous confinement does not fight Chromium layout.
 	posChanged := absSyncInt(x-int(popup.Left)) > 1 || absSyncInt(y-int(popup.Top)) > 1
 	sizeChanged := allowResize && (absSyncInt(width-naturalWidth) > 2 || absSyncInt(height-naturalHeight) > 2)
 	changed = posChanged || sizeChanged
 	return x, y, width, height, changed
+}
+
+// clampPopupRectToWorkArea keeps (x,y,w,h) inside SPI_GETWORKAREA so the
+// taskbar never covers wallet password/confirm controls on bottom tiles.
+func clampPopupRectToWorkArea(x, y, width, height int, allowResize bool) (int, int, int, int) {
+	wl, wt, wr, wb, ok := getSPIWorkArea()
+	if !ok {
+		return x, y, width, height
+	}
+	return clampRectToBounds(x, y, width, height, wl, wt, wr, wb, allowResize)
+}
+
+// clampRectToBounds is the pure work-area clamp (unit-tested without Win32).
+func clampRectToBounds(x, y, width, height, wl, wt, wr, wb int, allowResize bool) (int, int, int, int) {
+	if width <= 0 || height <= 0 {
+		return x, y, width, height
+	}
+	workW := wr - wl
+	workH := wb - wt
+	if workW <= 0 || workH <= 0 {
+		return x, y, width, height
+	}
+	if allowResize {
+		if width > workW {
+			width = workW
+		}
+		if height > workH {
+			height = workH
+		}
+	}
+	if x < wl {
+		x = wl
+	}
+	if y < wt {
+		y = wt
+	}
+	if x+width > wr {
+		x = wr - width
+		if x < wl {
+			x = wl
+		}
+	}
+	if y+height > wb {
+		// Prefer shifting up so the full popup sits above the taskbar.
+		y = wb - height
+		if y < wt {
+			y = wt
+			if allowResize && height > workH {
+				height = workH
+			}
+		}
+	}
+	return x, y, width, height
+}
+
+func getSPIWorkArea() (left, top, right, bottom int, ok bool) {
+	type rect struct{ Left, Top, Right, Bottom int32 }
+	var work rect
+	proc := user32dll.NewProc("SystemParametersInfoW")
+	r, _, _ := proc.Call(0x0030, 0, uintptr(unsafe.Pointer(&work)), 0) // SPI_GETWORKAREA
+	if r == 0 {
+		return 0, 0, 0, 0, false
+	}
+	if work.Right <= work.Left || work.Bottom <= work.Top {
+		return 0, 0, 0, 0, false
+	}
+	return int(work.Left), int(work.Top), int(work.Right), int(work.Bottom), true
 }

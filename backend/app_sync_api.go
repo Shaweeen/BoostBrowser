@@ -76,67 +76,107 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 }
 
 func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
-	// The main client's environment list and root PIDs are authoritative. Reuse
-	// every valid HWND it published, then resolve all still-missing root PIDs in
-	// one bounded batch. The panel never reconciles or persists runtime state.
+	// Main client's browser-runtime.json is the authoritative running set for the
+	// sync panel. Under 50–200 multi-open, build the list from snapshot entries
+	// first (not only panel in-memory Running flags), then re-resolve HWNDs for
+	// every PID so "无窗口" does not stick while Chrome is visible on the taskbar.
 	runtimeSnapshot, snapshotOK := a.readBrowserRuntimeSnapshot()
 	if !snapshotOK {
 		runtimeSnapshot = browserRuntimeSnapshot{}
 	}
 	a.applyBrowserRuntimeSnapshotData(runtimeSnapshot)
-	// NOTE: 不要在这里加 browserMgr.Mutex 锁！List() 内部会自行加锁，
-	// 如果外层再锁一次会导致死锁（Go sync.Mutex 不可重入）。
-	profiles := a.browserMgr.List()
-	candidates := make([]BrowserProfile, 0, len(profiles))
 
-	for _, p := range profiles {
-		// Return any profile that has a live runtime handle. Older builds could leave
-		// Running=false after app restart while the browser window was still open;
-		// sync panel must still surface those windows after reconciliation.
-		if !p.Running && p.Pid <= 0 && p.DebugPort <= 0 {
+	type candidate struct {
+		profileID   string
+		profileName string
+		pid         int
+		debugPort   int
+		badge       int
+		hintHWND    windows.HWND
+	}
+	byID := make(map[string]candidate, len(runtimeSnapshot.Entries)+16)
+	rootPIDs := make([]int, 0, len(runtimeSnapshot.Entries)+16)
+
+	// 1) Snapshot entries = main-published running environments (full multi-open set).
+	for _, entry := range runtimeSnapshot.Entries {
+		if entry.PID <= 0 {
 			continue
 		}
-
-		candidates = append(candidates, p)
-	}
-
-	cachedWindows := make(map[string]windows.HWND, len(runtimeSnapshot.Entries))
-	rootPIDs := make([]int, 0, len(candidates))
-	for _, entry := range runtimeSnapshot.Entries {
-		cachedWindows[entry.ProfileID] = validRuntimeSnapshotWindow(entry)
-	}
-	for _, profile := range candidates {
-		if profile.Pid > 0 && cachedWindows[profile.ProfileId] == 0 {
-			rootPIDs = append(rootPIDs, profile.Pid)
+		// Prefer showing envs whose process OR published HWND still looks live.
+		hwnd := validRuntimeSnapshotWindow(entry)
+		if hwnd == 0 && !isProcessAlive(entry.PID) {
+			continue
 		}
+		name := strings.TrimSpace(entry.ProfileName)
+		if name == "" {
+			name = entry.ProfileID
+		}
+		byID[entry.ProfileID] = candidate{
+			profileID:   entry.ProfileID,
+			profileName: name,
+			pid:         entry.PID,
+			debugPort:   entry.DebugPort,
+			badge:       extractBadgeNumberFromName(name),
+			hintHWND:    hwnd,
+		}
+		rootPIDs = append(rootPIDs, entry.PID)
 	}
+
+	// 2) Merge any panel-local running profiles missing from snapshot (edge case).
+	// NOTE: do not hold browserMgr.Mutex here — List() locks internally.
+	for _, p := range a.browserMgr.List() {
+		if !p.Running || p.Pid <= 0 {
+			continue
+		}
+		if _, exists := byID[p.ProfileId]; exists {
+			continue
+		}
+		byID[p.ProfileId] = candidate{
+			profileID:   p.ProfileId,
+			profileName: p.ProfileName,
+			pid:         p.Pid,
+			debugPort:   p.DebugPort,
+			badge:       extractBadgeNumberFromName(p.ProfileName),
+		}
+		rootPIDs = append(rootPIDs, p.Pid)
+	}
+
+	// 3) Always batch-resolve HWNDs for every candidate PID (stale snapshot HWND
+	// is common after tile/move under dense multi-open).
 	resolvedWindows := findProcessTreeWindows(rootPIDs)
 	missing := 0
-	for _, p := range candidates {
-		if cachedWindows[p.ProfileId] == 0 && resolvedWindows[p.Pid] == 0 && p.Pid > 0 {
+	for _, c := range byID {
+		if c.pid > 0 && resolvedWindows[c.pid] == 0 && c.hintHWND == 0 {
 			missing++
 		}
 	}
-	// Multi-open often leaves top-level frames unregistered for a short moment.
-	// One cheap retry avoids an empty/unusable assistant list right after batch start.
-	if missing > 0 && missing >= (len(candidates)+1)/2 {
-		time.Sleep(150 * time.Millisecond)
+	// Retry when many frames are still settling (batch start / 100+ multi-open).
+	if missing > 0 && (missing >= 3 || missing*2 >= len(byID)) {
+		time.Sleep(200 * time.Millisecond)
 		resolvedWindows = findProcessTreeWindows(rootPIDs)
 	}
-	result := make([]SyncProfileInfo, len(candidates))
-	for i, p := range candidates {
-		info := SyncProfileInfo{ProfileId: p.ProfileId, ProfileName: p.ProfileName, Pid: p.Pid, DebugPort: p.DebugPort, Running: p.Running, BadgeNumber: extractBadgeNumberFromName(p.ProfileName)}
-		hwnd := cachedWindows[p.ProfileId]
-		if hwnd == 0 {
-			hwnd = resolvedWindows[p.Pid]
+
+	result := make([]SyncProfileInfo, 0, len(byID))
+	for _, c := range byID {
+		info := SyncProfileInfo{
+			ProfileId:   c.profileID,
+			ProfileName: c.profileName,
+			Pid:         c.pid,
+			DebugPort:   c.debugPort,
+			Running:     true,
+			BadgeNumber: c.badge,
 		}
-		if hwnd != 0 {
+		hwnd := resolvedWindows[c.pid]
+		if hwnd == 0 {
+			hwnd = c.hintHWND
+		}
+		if hwnd != 0 && isWindow(hwnd) {
 			info.Hwnd = int64(hwnd)
 			info.Status = "running"
 		} else {
 			info.Status = "no_window"
 		}
-		result[i] = info
+		result = append(result, info)
 	}
 	return result
 }

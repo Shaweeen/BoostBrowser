@@ -288,3 +288,9 @@ behavior is intentionally retired.
 | ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
 | --- | --- | --- | --- | --- | --- | --- |
 | CLEAN-075 | Collapse-all-participants on every `StartInputSync` regardless of prior handoff | `v1.7.76` (`7e281ce`) | Re-sync or joining new envs wiped tabs the user already opened on previously synced windows | `syncTabHandoffDone` keyed by profileID+pid; atomic `claimSyncTabHandoff`; only brand-new processes collapse; skip already-claimed; clear on stop | Handoff unit tests; Windows pack | `git show 7e281ce:backend/sync_tab_handoff.go` collapse-all-ports. Never re-close tabs on envs already claimed for this process. |
+
+## v1.7.78 dense multi-open sync list + taskbar-safe popups
+
+| ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
+| --- | --- | --- | --- | --- | --- | --- |
+| CLEAN-076 | Panel sync list built only from in-memory Running + strict `isProcessAlive`; popup confinement without monitor work-area clamp | `v1.7.77` (`e31a841`) | Assistant stuck ~30 envs while 100+ Chrome windows ran; bottom-row wallet popups sat under the taskbar | Snapshot-first candidate set + HWND re-resolve; accept HWND-valid runtimes; upsert missing profile rows; `clampPopupRectToWorkArea` | Snapshot upsert test; work-area clamp unit test; Windows pack | `git show e31a841:backend/app_sync_api.go` getSyncProfilesLocal. Do not drop live snapshot rows on flaky process-alive alone. |

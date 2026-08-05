@@ -661,3 +661,25 @@ func TestPanelSnapshotReplacesProcessLocalRuntimeWithMainClientState(t *testing.
 		t.Fatalf("an empty main-client snapshot must clear panel runtime state: %+v", profile)
 	}
 }
+
+func TestApplySnapshotCreatesMissingProfileForDenseMultiOpen(t *testing.T) {
+	// Panel may not yet have every profile row when main publishes 100+ runtimes.
+	root := t.TempDir()
+	app := NewApp(root, true)
+	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
+	currentPID := os.Getpid()
+	snap := browserRuntimeSnapshot{Entries: []browserRuntimeSnapshotEntry{{
+		ProfileID:   "missing-profile",
+		ProfileName: "环境-140",
+		PID:         currentPID,
+		DebugPort:   39999,
+	}}}
+	live, total := app.applyBrowserRuntimeSnapshotData(snap)
+	if live != 1 || total != 1 {
+		t.Fatalf("live=%d total=%d", live, total)
+	}
+	p := app.browserMgr.Profiles["missing-profile"]
+	if p == nil || !p.Running || p.Pid != currentPID || p.ProfileName != "环境-140" {
+		t.Fatalf("must upsert ephemeral runtime profile: %+v", p)
+	}
+}

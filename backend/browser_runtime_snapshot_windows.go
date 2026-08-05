@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -113,8 +114,8 @@ func (a *App) PrepareWindowSyncRuntimeSnapshot() int {
 		}
 		count++
 	}
-	// Re-resolve once when windows are still settling after a multi-open batch.
-	// The first EnumWindows pass often misses frames that become visible ~100ms later.
+	// Re-resolve when windows are still settling after multi-open. Dense batches
+	// (50–200) need a longer settle; first EnumWindows often misses late frames.
 	path := a.browserRuntimeSnapshotPath()
 	if data, err := os.ReadFile(path); err == nil {
 		var snap browserRuntimeSnapshot
@@ -126,9 +127,17 @@ func (a *App) PrepareWindowSyncRuntimeSnapshot() int {
 			}
 		}
 	}
-	if count > 0 && missingHWND > 0 {
+	needRetry := count > 0 && (missingHWND > 0 || count >= 40)
+	if needRetry {
 		a.browserMgr.Mutex.Unlock()
-		time.Sleep(180 * time.Millisecond)
+		settle := 180 * time.Millisecond
+		if count >= 40 {
+			settle = 350 * time.Millisecond
+		}
+		if count >= 100 {
+			settle = 500 * time.Millisecond
+		}
+		time.Sleep(settle)
 		a.browserMgr.Mutex.Lock()
 		a.persistBrowserRuntimeSnapshotLocked()
 	}
@@ -156,14 +165,37 @@ func (a *App) applyBrowserRuntimeSnapshotData(snapshot browserRuntimeSnapshot) (
 		profile.DebugReady = false
 	}
 	for _, entry := range snapshot.Entries {
-		profile := a.browserMgr.Profiles[entry.ProfileID]
-		if profile == nil || entry.PID <= 0 || !isProcessAlive(entry.PID) {
+		if entry.PID <= 0 {
 			continue
+		}
+		// Accept snapshot row if process is alive OR published HWND is still a
+		// real window. Strict isProcessAlive-only dropped many multi-open envs
+		// under load and left the assistant stuck around ~30 while 100+ ran.
+		hwndOK := entry.HWND != 0 && isWindow(windows.HWND(entry.HWND))
+		if !isProcessAlive(entry.PID) && !hwndOK {
+			continue
+		}
+		profile := a.browserMgr.Profiles[entry.ProfileID]
+		if profile == nil {
+			// Snapshot can reference profiles the panel map has not loaded yet
+			// (panel opened before batch create finished). Surface them anyway.
+			name := strings.TrimSpace(entry.ProfileName)
+			if name == "" {
+				name = entry.ProfileID
+			}
+			profile = &BrowserProfile{
+				ProfileId:   entry.ProfileID,
+				ProfileName: name,
+			}
+			a.browserMgr.Profiles[entry.ProfileID] = profile
 		}
 		profile.Running = true
 		profile.Pid = entry.PID
 		profile.DebugPort = entry.DebugPort
 		profile.DebugReady = entry.DebugPort > 0
+		if strings.TrimSpace(profile.ProfileName) == "" && strings.TrimSpace(entry.ProfileName) != "" {
+			profile.ProfileName = entry.ProfileName
+		}
 		live++
 	}
 	return live, len(snapshot.Entries)

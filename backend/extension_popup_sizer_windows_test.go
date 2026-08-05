@@ -44,6 +44,25 @@ func TestEnvironmentFrameLooksLikeMainAcceptsWalletTitledBrowser(t *testing.T) {
 	}
 }
 
+func TestClampRectToBoundsLiftsPopupAboveTaskbar(t *testing.T) {
+	// Work area ends at y=1000 (taskbar below). Popup 400x600 placed too low.
+	_, y, w, h := clampRectToBounds(100, 700, 400, 600, 0, 0, 1920, 1000, false)
+	if y+h > 1000 {
+		t.Fatalf("popup bottom must stay above taskbar: y=%d h=%d", y, h)
+	}
+	if y != 400 { // 1000-600
+		t.Fatalf("expect lift to y=400, got %d", y)
+	}
+	if w != 400 || h != 600 {
+		t.Fatalf("position-only must keep size: %dx%d", w, h)
+	}
+	// With resize, taller-than-work popup shrinks.
+	_, y2, _, h2 := clampRectToBounds(0, 0, 300, 2000, 0, 0, 1920, 1000, true)
+	if h2 > 1000 || y2 != 0 {
+		t.Fatalf("resized into work area: y=%d h=%d", y2, h2)
+	}
+}
+
 func TestWalletNotificationNeverForceFitsSize(t *testing.T) {
 	// Rabby/MetaMask Notification hosts blank permanently if resized mid-paint.
 	if !isWalletNotificationHostTitle("Rabby Wallet Notification") {
