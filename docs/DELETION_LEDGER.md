@@ -306,3 +306,9 @@ behavior is intentionally retired.
 | ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
 | --- | --- | --- | --- | --- | --- | --- |
 | CLEAN-078 | Auto sole-blank collapse on every `StartInputSync`; unconditional `discardChromeRestorableTabSessions` on every environment start | `v1.7.79` / handoff era | Sync wiped work tabs for envs used outside sync; every start wiped sessions and re-triggered extension surfaces | Input-only sync; session wipe only on first-adapt (`wipeSessions` when CLI still needed); live process scan for panel list | Close-behavior no-op handoff test; Windows pack | `git show 18f6a0c:backend/app_sync_api.go` prepareEnvironmentsForSyncHandoff call. Do not auto-close tabs on sync start. |
+
+## v1.7.81 hot-start zero CLI + live-scan sync list
+
+| ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
+| --- | --- | --- | --- | --- | --- | --- |
+| CLEAN-079 | Hot-start still running full `applyProfileNative` CLI decision; session wipe when only prep marker missing; `applyBrowserRuntimeSnapshotData` wipe after live process discovery on StartInputSync/GetSyncProfiles | `v1.7.80` (`9680c4e`) | CLI reinject / session wipe re-opened extension surfaces; snapshot apply cleared 100+ live discoveries down to ~30 | Integrity/hot-settled hard `stripLoadExtensionArgs`; wipe only when `needingInject>0`; live-scan authoritative write-back; no snapshot wipe after scan | Windows pack; multi-open refresh | `git show 9680c4e:backend/app_instance.go` wipeSessions; `git show 9680c4e:backend/app_sync_api.go` apply after live scan. Never wipe live sync candidates with snapshot apply. |

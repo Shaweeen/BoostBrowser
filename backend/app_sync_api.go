@@ -4,6 +4,7 @@ package backend
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -76,9 +77,8 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 }
 
 func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
-	// Discover running environments by scanning live Chromium processes and each
-	// profile's user-data-dir (DevToolsActivePort). The optional main-client
-	// snapshot is only a merge hint — not the sole source of truth.
+	// P1: Discover from already-started client envs (live process scan).
+	// Snapshot file is optional merge only — never wipe live discoveries.
 	type candidate struct {
 		profileID   string
 		profileName string
@@ -93,15 +93,39 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 	// NOTE: do not hold browserMgr.Mutex here — List() locks internally.
 	profiles := a.browserMgr.List()
 	profileByDataDir := make(map[string]BrowserProfile, len(profiles))
+	profileByFolder := make(map[string]BrowserProfile, len(profiles))
 	for _, p := range profiles {
-		key := normalizeRuntimePathKey(a.browserMgr.ResolveUserDataDir(&p))
+		ud := a.browserMgr.ResolveUserDataDir(&p)
+		key := normalizeRuntimePathKey(ud)
 		if key != "" {
 			profileByDataDir[key] = p
+			folder := strings.ToLower(filepath.Base(key))
+			if folder != "" && folder != "." {
+				// Last write wins if folders collide; full path match preferred first.
+				if _, exists := profileByFolder[folder]; !exists {
+					profileByFolder[folder] = p
+				}
+			}
 		}
 	}
 
-	// 1) Primary: one live process scan (command-line user-data-dir + debug port).
-	liveProcesses, _ := discoverBoostBrowserProcesses(a.appRoot)
+	matchProfile := func(userDataDir string) (BrowserProfile, bool) {
+		key := normalizeRuntimePathKey(userDataDir)
+		if key == "" {
+			return BrowserProfile{}, false
+		}
+		if p, ok := profileByDataDir[key]; ok {
+			return p, true
+		}
+		// Fallback: folder name match (path prefix/suffix drift across roots).
+		if p, ok := profileByFolder[strings.ToLower(filepath.Base(key))]; ok {
+			return p, true
+		}
+		return BrowserProfile{}, false
+	}
+
+	// 1) Primary: live Chromium process scan (user-data-dir + debug port).
+	liveProcesses, _ := discoverBoostBrowserProcessesCached(a.appRoot)
 	byDataDir := make(map[string][]browserRuntimeProcess)
 	portToPID := make(map[int]int, len(liveProcesses))
 	for _, proc := range liveProcesses {
@@ -116,11 +140,14 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 		}
 	}
 	for key, list := range byDataDir {
-		p, ok := profileByDataDir[key]
+		p, ok := matchProfile(key)
+		if !ok {
+			// Try raw key as path for matchProfile
+			p, ok = matchProfile(list[0].UserDataDir)
+		}
 		if !ok {
 			continue
 		}
-		// Prefer lowest PID with a debug port (launcher); HWND resolved in batch later.
 		proc := list[0]
 		for _, item := range list[1:] {
 			if item.PID > 0 && item.DebugPort > 0 && (proc.PID <= 0 || item.PID < proc.PID) {
@@ -140,8 +167,7 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 		rootPIDs = append(rootPIDs, proc.PID)
 	}
 
-	// 2) Secondary: DevToolsActivePort under each configured profile dir.
-	// Catches cases where WMI/process scan misses a still-running env.
+	// 2) Secondary: DevToolsActivePort for every configured profile dir.
 	for _, p := range profiles {
 		if _, exists := byID[p.ProfileId]; exists {
 			continue
@@ -151,7 +177,7 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 		if err != nil || port <= 0 {
 			continue
 		}
-		if !canConnectDebugPort(port, 200*time.Millisecond) {
+		if !canConnectDebugPort(port, 180*time.Millisecond) {
 			continue
 		}
 		pid := portToPID[port]
@@ -170,7 +196,7 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 		}
 	}
 
-	// 3) Optional merge: main-client snapshot (hints only, never replaces live scan).
+	// 3) Soft merge snapshot HWNDs/PIDs (never call apply* wipe after live scan).
 	if runtimeSnapshot, ok := a.readBrowserRuntimeSnapshot(); ok {
 		for _, entry := range runtimeSnapshot.Entries {
 			if entry.PID <= 0 {
@@ -185,7 +211,7 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 					existing.hintHWND = hwnd
 					byID[entry.ProfileID] = existing
 				}
-				if existing.pid <= 0 && entry.PID > 0 {
+				if existing.pid <= 0 {
 					existing.pid = entry.PID
 					byID[entry.ProfileID] = existing
 					rootPIDs = append(rootPIDs, entry.PID)
@@ -210,11 +236,9 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 			}
 			rootPIDs = append(rootPIDs, entry.PID)
 		}
-		// Keep panel runtime fields roughly aligned for StartInputSync.
-		a.applyBrowserRuntimeSnapshotData(runtimeSnapshot)
 	}
 
-	// 4) Also keep any still-marked Running locals not found above.
+	// 4) Panel/local Running still alive.
 	for _, p := range profiles {
 		if !p.Running || p.Pid <= 0 {
 			continue
@@ -235,7 +259,6 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 		rootPIDs = append(rootPIDs, p.Pid)
 	}
 
-	// Deduplicate PIDs for window resolve.
 	pidSeen := map[int]struct{}{}
 	uniquePIDs := make([]int, 0, len(rootPIDs))
 	for _, pid := range rootPIDs {
@@ -249,7 +272,6 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 		uniquePIDs = append(uniquePIDs, pid)
 	}
 
-	// Live HWND resolve for every discovered PID.
 	resolvedWindows := findProcessTreeWindows(uniquePIDs)
 	missing := 0
 	for _, c := range byID {
@@ -257,23 +279,48 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 			missing++
 		}
 	}
-	if missing > 0 && (missing >= 3 || missing*2 >= len(byID)) {
-		time.Sleep(200 * time.Millisecond)
+	if missing > 0 && (missing >= 2 || missing*3 >= len(byID)+1) {
+		time.Sleep(220 * time.Millisecond)
 		resolvedWindows = findProcessTreeWindows(uniquePIDs)
+		// Last resort per-PID main-frame resolve for stubborn misses.
+		for id, c := range byID {
+			if c.pid <= 0 || resolvedWindows[c.pid] != 0 {
+				continue
+			}
+			if hwnd := findMainEnvironmentBrowserWindow(c.pid); hwnd != 0 {
+				resolvedWindows[c.pid] = hwnd
+				continue
+			}
+			if hwnd, err := findProcessTreeWindow(c.pid); err == nil && hwnd != 0 {
+				resolvedWindows[c.pid] = hwnd
+			}
+			_ = id
+		}
 	}
 
-	// Write discovered runtime back into panel profile map for StartInputSync.
+	// Authoritative write-back: only live-discovered envs are Running.
 	if a.browserMgr != nil {
 		a.browserMgr.Mutex.Lock()
+		for id, p := range a.browserMgr.Profiles {
+			if p == nil {
+				continue
+			}
+			if _, ok := byID[id]; !ok {
+				p.Running = false
+				p.Pid = 0
+				p.DebugPort = 0
+				p.DebugReady = false
+			}
+		}
 		for id, c := range byID {
 			p := a.browserMgr.Profiles[id]
 			if p == nil {
 				p = &BrowserProfile{ProfileId: id, ProfileName: c.profileName}
 				a.browserMgr.Profiles[id] = p
 			}
+			p.Running = true
 			if c.pid > 0 {
 				p.Pid = c.pid
-				p.Running = true
 			}
 			if c.debugPort > 0 {
 				p.DebugPort = c.debugPort
@@ -329,14 +376,11 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	syncSessionMu.Lock()
 	defer syncSessionMu.Unlock()
 	log := logger.New("SyncAPI")
-	// Live scan first (same path as GetSyncProfiles): discover already-started
-	// envs from Chromium processes / DevToolsActivePort. Snapshot is optional.
+	// Live scan from already-started client envs (same as GetSyncProfiles).
+	// Do NOT applyBrowserRuntimeSnapshotData after this — it used to wipe live
+	// discoveries and left the assistant stuck around ~30 while 100+ ran.
 	// Ads/MoreLogin-style: sync is input-only — never closes user work tabs.
 	_ = a.getSyncProfilesLocal()
-	if snap, ok := a.readBrowserRuntimeSnapshot(); ok {
-		// Soft merge only — do not require the file to exist.
-		a.applyBrowserRuntimeSnapshotData(snap)
-	}
 	snapshotEntries := make(map[string]browserRuntimeSnapshotEntry)
 	if snap, ok := a.readBrowserRuntimeSnapshot(); ok {
 		for _, entry := range snap.Entries {

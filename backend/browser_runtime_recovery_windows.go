@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf16"
 
@@ -202,6 +203,38 @@ func pickRuntimeProcessForSync(candidates []browserRuntimeProcess) (browserRunti
 		}
 	}
 	return candidates[0], true
+}
+
+// discoverBoostBrowserProcessesCached reuses a short-lived process list so
+// GetSyncProfiles + StartInputSync in the same second share one CIM scan.
+var discoverProcessCache struct {
+	mu   sync.Mutex
+	at   time.Time
+	root string
+	list []browserRuntimeProcess
+}
+
+func discoverBoostBrowserProcessesCached(appRoot string) ([]browserRuntimeProcess, error) {
+	root := filepath.Clean(strings.TrimSpace(appRoot))
+	discoverProcessCache.mu.Lock()
+	defer discoverProcessCache.mu.Unlock()
+	if root != "" && root == discoverProcessCache.root &&
+		time.Since(discoverProcessCache.at) < 2*time.Second &&
+		discoverProcessCache.list != nil {
+		out := make([]browserRuntimeProcess, len(discoverProcessCache.list))
+		copy(out, discoverProcessCache.list)
+		return out, nil
+	}
+	list, err := discoverBoostBrowserProcesses(root)
+	if err != nil {
+		return list, err
+	}
+	discoverProcessCache.root = root
+	discoverProcessCache.at = time.Now()
+	discoverProcessCache.list = list
+	out := make([]browserRuntimeProcess, len(list))
+	copy(out, list)
+	return out, nil
 }
 
 func discoverBoostBrowserProcesses(appRoot string) ([]browserRuntimeProcess, error) {

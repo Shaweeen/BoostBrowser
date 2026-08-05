@@ -255,10 +255,11 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		)
 	}
 
-	// Profile foundation prefs (about:blank default). Wipe restorable session
-	// tabs ONLY when still first-adapting extensions (CLI may still inject).
-	// Hot-settled envs keep the user's last work tabs (AdsPower/MoreLogin-like).
-	wipeSessions := !hotSettled && (len(needingInject) > 0 || !extensionPrepReady)
+	// Integrity complete / hot-settled: zero CLI and never wipe user sessions.
+	assignmentComplete := isExtensionAssignmentComplete(userDataDir, sanitizedProfileLaunchArgs)
+	// Wipe Session/Tabs ONLY when first-adapt still needs --load-extension.
+	// Do not wipe merely because prep marker is missing (that destroyed work tabs).
+	wipeSessions := !hotSettled && !assignmentComplete && len(needingInject) > 0
 	sanitizeChromeStartupPreferencesOpts(userDataDir, wipeSessions)
 	if !hotSettled && assignmentFP == "" {
 		markStartPrepDone(userDataDir)
@@ -512,24 +513,38 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
-	// Scheme A start path — READ-ONLY presence detection only.
-	// If the environment already has the assigned extension(s) in user-data,
-	// cancel --load-extension for those packages. Never rewrite Preferences,
-	// LES, Cookies, or package files here (respect user data).
+	// Scheme A / MoreLogin-style: Profile owns extensions after first adapt.
+	// Hot-settled or integrity-complete → hard strip ALL --load-extension (P0).
 	var profileInstalledN, cliFallbackN int
-	args, profileInstalledN, cliFallbackN = applyProfileNativeExtensionLaunchArgs(args, userDataDir)
-	if cliFallbackN == 0 && profileInstalledN > 0 {
-		log.Info("只读检测：环境已有扩展，已取消 CLI load",
+	if hotSettled || assignmentComplete {
+		args = stripLoadExtensionArgs(args)
+		profileInstalledN = len(assignmentExtIDs)
+		if profileInstalledN == 0 {
+			profileInstalledN = len(activeLoadExtensionDirs(sanitizedProfileLaunchArgs))
+		}
+		cliFallbackN = 0
+		log.Info("热启动/完整性已确认：强制零 CLI load，保留用户 Session",
 			logger.F("profile_id", profileId),
-			logger.F("present", profileInstalledN),
-		)
-	} else if cliFallbackN > 0 {
-		log.Info("只读检测：部分扩展尚无环境 data，保留 CLI 首次适配",
-			logger.F("profile_id", profileId),
-			logger.F("present", profileInstalledN),
-			logger.F("cli_load", cliFallbackN),
 			logger.F("hot_settled", hotSettled),
+			logger.F("assignment_complete", assignmentComplete),
+			logger.F("present", profileInstalledN),
 		)
+	} else {
+		// READ-ONLY presence: cancel CLI per package that already has profile data.
+		args, profileInstalledN, cliFallbackN = applyProfileNativeExtensionLaunchArgs(args, userDataDir)
+		if cliFallbackN == 0 && profileInstalledN > 0 {
+			log.Info("只读检测：环境已有扩展，已取消 CLI load",
+				logger.F("profile_id", profileId),
+				logger.F("present", profileInstalledN),
+			)
+		} else if cliFallbackN > 0 {
+			log.Info("只读检测：部分扩展尚无环境 data，保留 CLI 首次适配",
+				logger.F("profile_id", profileId),
+				logger.F("present", profileInstalledN),
+				logger.F("cli_load", cliFallbackN),
+				logger.F("hot_settled", hotSettled),
+			)
+		}
 	}
 	// Extension package repair runs off the critical path after first start
 	// (async). Avoid blocking multi-open on CRX/key network work.
