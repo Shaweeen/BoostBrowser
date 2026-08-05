@@ -294,3 +294,9 @@ behavior is intentionally retired.
 | ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
 | --- | --- | --- | --- | --- | --- | --- |
 | CLEAN-076 | Panel sync list built only from in-memory Running + strict `isProcessAlive`; popup confinement without monitor work-area clamp | `v1.7.77` (`e31a841`) | Assistant stuck ~30 envs while 100+ Chrome windows ran; bottom-row wallet popups sat under the taskbar | Snapshot-first candidate set + HWND re-resolve; accept HWND-valid runtimes; upsert missing profile rows; `clampPopupRectToWorkArea` | Snapshot upsert test; work-area clamp unit test; Windows pack | `git show e31a841:backend/app_sync_api.go` getSyncProfilesLocal. Do not drop live snapshot rows on flaky process-alive alone. |
+
+## v1.7.79 live process scan for sync panel
+
+| ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
+| --- | --- | --- | --- | --- | --- | --- |
+| CLEAN-077 | Sync-panel list ownership that required main-client `browser-runtime.json` as the sole/authoritative running set | `v1.7.78` (`968a999`) | Snapshot lag/staleness under dense multi-open left assistant far below real open count | Live `discoverBoostBrowserProcesses` + DevToolsActivePort scan matched by user-data-dir; snapshot optional merge only; broadened process match to app data dir | Windows pack; manual 100+ multi-open refresh | `git show 968a999:backend/app_sync_api.go` snapshot-first getSyncProfilesLocal. Do not treat the JSON snapshot as the only discovery path. |

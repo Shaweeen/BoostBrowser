@@ -340,7 +340,9 @@ func (a *App) startup(ctx context.Context) {
 			a.lifecycleLog("runtime-reconcile", "state=completed")
 		}()
 	} else if a.panelMode {
-		a.lifecycleLog("runtime-reconcile", "state=skipped", "reason=panel-consumes-main-client-snapshot")
+		// Panel discovers live envs by process/user-data-dir scan on each refresh
+		// (see getSyncProfilesLocal). Snapshot file is optional merge only.
+		a.lifecycleLog("runtime-reconcile", "state=skipped", "reason=panel-live-process-scan")
 	} else {
 		a.lifecycleLog("runtime-reconcile", "state=skipped", "reason=no-live-runtime")
 	}
@@ -357,7 +359,7 @@ func (a *App) startup(ctx context.Context) {
 	} else {
 		// 全局鼠标/键盘 Hook 不得运行在主 Wails 宿主中。同步面板是独立
 		// 进程并直接持有同步引擎，主客户端崩溃或重启时同步仍保持运行。
-		a.lifecycleLog("sync-engine-owner", "mode=external-panel", "transport=shared-runtime-snapshot")
+		a.lifecycleLog("sync-engine-owner", "mode=external-panel", "transport=live-process-scan")
 	}
 
 	// v1.6.12: 暂停启动后台代理测速定时器。

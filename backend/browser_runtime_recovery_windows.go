@@ -210,22 +210,35 @@ func discoverBoostBrowserProcesses(appRoot string) ([]browserRuntimeProcess, err
 		return nil, nil
 	}
 	root = filepath.Clean(root)
+	// Match either:
+	//   - chrome binaries under <appRoot>/chrome (bundled kernels), or
+	//   - any Chromium whose --user-data-dir sits under <appRoot>/data
+	// so the sync panel can discover all multi-open envs without depending on
+	// a single published snapshot file.
 	script := fmt.Sprintf(`
 $root = %s
 $chromeRoot = [System.IO.Path]::GetFullPath((Join-Path $root 'chrome'))
+$dataRoot = [System.IO.Path]::GetFullPath((Join-Path $root 'data'))
 $items = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-  $_.ExecutablePath -and $_.CommandLine -and $_.ExecutablePath.StartsWith($chromeRoot, [System.StringComparison]::OrdinalIgnoreCase) -and $_.CommandLine.Contains('--user-data-dir=') -and $_.CommandLine.Contains('--remote-debugging-port=')
+  if (-not $_.CommandLine) { return $false }
+  $cmd = $_.CommandLine
+  if ($cmd -notmatch '--user-data-dir=' -or $cmd -notmatch '--remote-debugging-port=') { return $false }
+  $exe = [string]$_.ExecutablePath
+  $exeHit = $exe -and $exe.StartsWith($chromeRoot, [System.StringComparison]::OrdinalIgnoreCase)
+  $dataHit = $cmd.IndexOf($dataRoot, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+  return ($exeHit -or $dataHit)
 } | Select-Object ProcessId, ExecutablePath, CommandLine
 @($items) | ConvertTo-Json -Depth 3 -Compress
 `, psSingleQuoted(root))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Dense multi-open (100+) CIM queries need more than 5s on busy machines.
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodePowerShellCommand(script))
 	hideWindow(cmd)
 	out, cmdErr := cmd.Output()
 	if ctx.Err() == context.DeadlineExceeded {
-		return nil, fmt.Errorf("powershell process discovery timed out after 5s")
+		return nil, fmt.Errorf("powershell process discovery timed out after 12s")
 	}
 	if cmdErr != nil {
 		return nil, cmdErr

@@ -76,16 +76,9 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 }
 
 func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
-	// Main client's browser-runtime.json is the authoritative running set for the
-	// sync panel. Under 50–200 multi-open, build the list from snapshot entries
-	// first (not only panel in-memory Running flags), then re-resolve HWNDs for
-	// every PID so "无窗口" does not stick while Chrome is visible on the taskbar.
-	runtimeSnapshot, snapshotOK := a.readBrowserRuntimeSnapshot()
-	if !snapshotOK {
-		runtimeSnapshot = browserRuntimeSnapshot{}
-	}
-	a.applyBrowserRuntimeSnapshotData(runtimeSnapshot)
-
+	// Discover running environments by scanning live Chromium processes and each
+	// profile's user-data-dir (DevToolsActivePort). The optional main-client
+	// snapshot is only a merge hint — not the sole source of truth.
 	type candidate struct {
 		profileID   string
 		profileName string
@@ -94,41 +87,142 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 		badge       int
 		hintHWND    windows.HWND
 	}
-	byID := make(map[string]candidate, len(runtimeSnapshot.Entries)+16)
-	rootPIDs := make([]int, 0, len(runtimeSnapshot.Entries)+16)
+	byID := make(map[string]candidate, 64)
+	rootPIDs := make([]int, 0, 64)
 
-	// 1) Snapshot entries = main-published running environments (full multi-open set).
-	for _, entry := range runtimeSnapshot.Entries {
-		if entry.PID <= 0 {
-			continue
+	// NOTE: do not hold browserMgr.Mutex here — List() locks internally.
+	profiles := a.browserMgr.List()
+	profileByDataDir := make(map[string]BrowserProfile, len(profiles))
+	for _, p := range profiles {
+		key := normalizeRuntimePathKey(a.browserMgr.ResolveUserDataDir(&p))
+		if key != "" {
+			profileByDataDir[key] = p
 		}
-		// Prefer showing envs whose process OR published HWND still looks live.
-		hwnd := validRuntimeSnapshotWindow(entry)
-		if hwnd == 0 && !isProcessAlive(entry.PID) {
-			continue
-		}
-		name := strings.TrimSpace(entry.ProfileName)
-		if name == "" {
-			name = entry.ProfileID
-		}
-		byID[entry.ProfileID] = candidate{
-			profileID:   entry.ProfileID,
-			profileName: name,
-			pid:         entry.PID,
-			debugPort:   entry.DebugPort,
-			badge:       extractBadgeNumberFromName(name),
-			hintHWND:    hwnd,
-		}
-		rootPIDs = append(rootPIDs, entry.PID)
 	}
 
-	// 2) Merge any panel-local running profiles missing from snapshot (edge case).
-	// NOTE: do not hold browserMgr.Mutex here — List() locks internally.
-	for _, p := range a.browserMgr.List() {
+	// 1) Primary: one live process scan (command-line user-data-dir + debug port).
+	liveProcesses, _ := discoverBoostBrowserProcesses(a.appRoot)
+	byDataDir := make(map[string][]browserRuntimeProcess)
+	portToPID := make(map[int]int, len(liveProcesses))
+	for _, proc := range liveProcesses {
+		key := normalizeRuntimePathKey(proc.UserDataDir)
+		if key != "" {
+			byDataDir[key] = append(byDataDir[key], proc)
+		}
+		if proc.DebugPort > 0 && proc.PID > 0 {
+			if _, ok := portToPID[proc.DebugPort]; !ok {
+				portToPID[proc.DebugPort] = proc.PID
+			}
+		}
+	}
+	for key, list := range byDataDir {
+		p, ok := profileByDataDir[key]
+		if !ok {
+			continue
+		}
+		// Prefer lowest PID with a debug port (launcher); HWND resolved in batch later.
+		proc := list[0]
+		for _, item := range list[1:] {
+			if item.PID > 0 && item.DebugPort > 0 && (proc.PID <= 0 || item.PID < proc.PID) {
+				proc = item
+			}
+		}
+		if proc.PID <= 0 {
+			continue
+		}
+		byID[p.ProfileId] = candidate{
+			profileID:   p.ProfileId,
+			profileName: p.ProfileName,
+			pid:         proc.PID,
+			debugPort:   proc.DebugPort,
+			badge:       extractBadgeNumberFromName(p.ProfileName),
+		}
+		rootPIDs = append(rootPIDs, proc.PID)
+	}
+
+	// 2) Secondary: DevToolsActivePort under each configured profile dir.
+	// Catches cases where WMI/process scan misses a still-running env.
+	for _, p := range profiles {
+		if _, exists := byID[p.ProfileId]; exists {
+			continue
+		}
+		userDataDir := a.browserMgr.ResolveUserDataDir(&p)
+		port, err := readBrowserDebugPortFile(userDataDir)
+		if err != nil || port <= 0 {
+			continue
+		}
+		if !canConnectDebugPort(port, 200*time.Millisecond) {
+			continue
+		}
+		pid := portToPID[port]
+		if pid <= 0 && p.Pid > 0 && isProcessAlive(p.Pid) {
+			pid = p.Pid
+		}
+		byID[p.ProfileId] = candidate{
+			profileID:   p.ProfileId,
+			profileName: p.ProfileName,
+			pid:         pid,
+			debugPort:   port,
+			badge:       extractBadgeNumberFromName(p.ProfileName),
+		}
+		if pid > 0 {
+			rootPIDs = append(rootPIDs, pid)
+		}
+	}
+
+	// 3) Optional merge: main-client snapshot (hints only, never replaces live scan).
+	if runtimeSnapshot, ok := a.readBrowserRuntimeSnapshot(); ok {
+		for _, entry := range runtimeSnapshot.Entries {
+			if entry.PID <= 0 {
+				continue
+			}
+			hwnd := validRuntimeSnapshotWindow(entry)
+			if hwnd == 0 && !isProcessAlive(entry.PID) {
+				continue
+			}
+			if existing, exists := byID[entry.ProfileID]; exists {
+				if existing.hintHWND == 0 && hwnd != 0 {
+					existing.hintHWND = hwnd
+					byID[entry.ProfileID] = existing
+				}
+				if existing.pid <= 0 && entry.PID > 0 {
+					existing.pid = entry.PID
+					byID[entry.ProfileID] = existing
+					rootPIDs = append(rootPIDs, entry.PID)
+				}
+				if existing.debugPort <= 0 && entry.DebugPort > 0 {
+					existing.debugPort = entry.DebugPort
+					byID[entry.ProfileID] = existing
+				}
+				continue
+			}
+			name := strings.TrimSpace(entry.ProfileName)
+			if name == "" {
+				name = entry.ProfileID
+			}
+			byID[entry.ProfileID] = candidate{
+				profileID:   entry.ProfileID,
+				profileName: name,
+				pid:         entry.PID,
+				debugPort:   entry.DebugPort,
+				badge:       extractBadgeNumberFromName(name),
+				hintHWND:    hwnd,
+			}
+			rootPIDs = append(rootPIDs, entry.PID)
+		}
+		// Keep panel runtime fields roughly aligned for StartInputSync.
+		a.applyBrowserRuntimeSnapshotData(runtimeSnapshot)
+	}
+
+	// 4) Also keep any still-marked Running locals not found above.
+	for _, p := range profiles {
 		if !p.Running || p.Pid <= 0 {
 			continue
 		}
 		if _, exists := byID[p.ProfileId]; exists {
+			continue
+		}
+		if !isProcessAlive(p.Pid) {
 			continue
 		}
 		byID[p.ProfileId] = candidate{
@@ -141,19 +235,55 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 		rootPIDs = append(rootPIDs, p.Pid)
 	}
 
-	// 3) Always batch-resolve HWNDs for every candidate PID (stale snapshot HWND
-	// is common after tile/move under dense multi-open).
-	resolvedWindows := findProcessTreeWindows(rootPIDs)
+	// Deduplicate PIDs for window resolve.
+	pidSeen := map[int]struct{}{}
+	uniquePIDs := make([]int, 0, len(rootPIDs))
+	for _, pid := range rootPIDs {
+		if pid <= 0 {
+			continue
+		}
+		if _, ok := pidSeen[pid]; ok {
+			continue
+		}
+		pidSeen[pid] = struct{}{}
+		uniquePIDs = append(uniquePIDs, pid)
+	}
+
+	// Live HWND resolve for every discovered PID.
+	resolvedWindows := findProcessTreeWindows(uniquePIDs)
 	missing := 0
 	for _, c := range byID {
 		if c.pid > 0 && resolvedWindows[c.pid] == 0 && c.hintHWND == 0 {
 			missing++
 		}
 	}
-	// Retry when many frames are still settling (batch start / 100+ multi-open).
 	if missing > 0 && (missing >= 3 || missing*2 >= len(byID)) {
 		time.Sleep(200 * time.Millisecond)
-		resolvedWindows = findProcessTreeWindows(rootPIDs)
+		resolvedWindows = findProcessTreeWindows(uniquePIDs)
+	}
+
+	// Write discovered runtime back into panel profile map for StartInputSync.
+	if a.browserMgr != nil {
+		a.browserMgr.Mutex.Lock()
+		for id, c := range byID {
+			p := a.browserMgr.Profiles[id]
+			if p == nil {
+				p = &BrowserProfile{ProfileId: id, ProfileName: c.profileName}
+				a.browserMgr.Profiles[id] = p
+			}
+			if c.pid > 0 {
+				p.Pid = c.pid
+				p.Running = true
+			}
+			if c.debugPort > 0 {
+				p.DebugPort = c.debugPort
+				p.DebugReady = true
+			}
+			if strings.TrimSpace(p.ProfileName) == "" {
+				p.ProfileName = c.profileName
+			}
+		}
+		a.browserMgr.Mutex.Unlock()
 	}
 
 	result := make([]SyncProfileInfo, 0, len(byID))
@@ -166,7 +296,10 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 			Running:     true,
 			BadgeNumber: c.badge,
 		}
-		hwnd := resolvedWindows[c.pid]
+		hwnd := windows.HWND(0)
+		if c.pid > 0 {
+			hwnd = resolvedWindows[c.pid]
+		}
 		if hwnd == 0 {
 			hwnd = c.hintHWND
 		}
