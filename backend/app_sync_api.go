@@ -329,17 +329,19 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	syncSessionMu.Lock()
 	defer syncSessionMu.Unlock()
 	log := logger.New("SyncAPI")
-	// Start is a transaction boundary: discard assumptions from earlier UI
-	// scans and obtain the current process/window ownership before validating
-	// the requested master and followers.
-	runtimeSnapshot, snapshotOK := a.readBrowserRuntimeSnapshot()
-	if !snapshotOK {
-		return fmt.Errorf("无法读取主客户端的运行环境状态，请返回主客户端后重新打开同步助手")
+	// Live scan first (same path as GetSyncProfiles): discover already-started
+	// envs from Chromium processes / DevToolsActivePort. Snapshot is optional.
+	// Ads/MoreLogin-style: sync is input-only — never closes user work tabs.
+	_ = a.getSyncProfilesLocal()
+	if snap, ok := a.readBrowserRuntimeSnapshot(); ok {
+		// Soft merge only — do not require the file to exist.
+		a.applyBrowserRuntimeSnapshotData(snap)
 	}
-	a.applyBrowserRuntimeSnapshotData(runtimeSnapshot)
-	snapshotEntries := make(map[string]browserRuntimeSnapshotEntry, len(runtimeSnapshot.Entries))
-	for _, entry := range runtimeSnapshot.Entries {
-		snapshotEntries[entry.ProfileID] = entry
+	snapshotEntries := make(map[string]browserRuntimeSnapshotEntry)
+	if snap, ok := a.readBrowserRuntimeSnapshot(); ok {
+		for _, entry := range snap.Entries {
+			snapshotEntries[entry.ProfileID] = entry
+		}
 	}
 
 	masterProfileId = strings.TrimSpace(masterProfileId)
@@ -356,7 +358,7 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	}
 	if !masterProfile.Running || masterProfile.Pid <= 0 {
 		a.browserMgr.Mutex.Unlock()
-		return fmt.Errorf("主控实例未在运行：%s", masterProfileId)
+		return fmt.Errorf("主控实例未在运行：%s（请确认该环境已在主客户端启动）", masterProfileId)
 	}
 	masterSnapshot := *masterProfile
 
@@ -439,39 +441,9 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 		return fmt.Errorf("没有可用的跟随实例")
 	}
 
-	// Per-env one-shot: brand-new processes only → one about:blank then stop.
-	// Already-handed-off envs keep user web tabs + extension pages untouched.
+	// Input sync only — never close/navigate user tabs or extension pages.
+	// (AdsPower/MoreLogin-style: profile owns session; sync does not wipe work.)
 	masterDebugPort := masterSnapshot.DebugPort
-	handoffTargets := make([]syncHandoffTarget, 0, 1+len(validFollowerIds))
-	handoffTargets = append(handoffTargets, syncHandoffTarget{
-		profileID: masterProfileId,
-		pid:       masterSnapshot.Pid,
-		debugPort: masterDebugPort,
-	})
-	// validFollowerIds[i] aligns with followerDebugPorts[i]; resolve pid by id.
-	pidByID := make(map[string]int, len(followers))
-	for _, c := range followers {
-		pidByID[c.id] = c.profile.Pid
-	}
-	for i, fid := range validFollowerIds {
-		port := 0
-		if i < len(followerDebugPorts) {
-			port = followerDebugPorts[i]
-		}
-		handoffTargets = append(handoffTargets, syncHandoffTarget{
-			profileID: fid,
-			pid:       pidByID[fid],
-			debugPort: port,
-		})
-	}
-	applied, skippedHandoff, handoffClosed := prepareEnvironmentsForSyncHandoff(handoffTargets)
-	if applied > 0 || skippedHandoff > 0 {
-		log.Info("同步前标签接管",
-			logger.F("applied_new", applied),
-			logger.F("skipped_already", skippedHandoff),
-			logger.F("closed_tabs", handoffClosed),
-		)
-	}
 
 	syncState.mu.Lock()
 	oldSyncer := syncState.syncer

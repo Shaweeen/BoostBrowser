@@ -95,18 +95,16 @@ func TestSyncPanelShutdownNeverStopsSharedBrowserRuntimes(t *testing.T) {
 	}
 }
 
-func TestFinalizeEnvironmentTabsHandoffPanelDelegatesToSyncStart(t *testing.T) {
-	// Canonical sole-blank handoff is StartInputSync; panel list API skips on Windows.
-	// Non-Windows stub also reports skipped (feature is Windows multi-open only).
+func TestFinalizeEnvironmentTabsHandoffNeverClosesUserTabs(t *testing.T) {
+	// Sync must not wipe work tabs (AdsPower/MoreLogin-style session ownership).
 	panel := NewApp(t.TempDir(), true)
 	panelResult := panel.FinalizeEnvironmentTabsForUserHandoff()
 	if panelResult["skipped"] != true {
-		t.Fatalf("panel must skip list-style handoff: %#v", panelResult)
+		t.Fatalf("handoff API must no-op: %#v", panelResult)
 	}
 	app := NewApp(t.TempDir(), false)
 	result := app.FinalizeEnvironmentTabsForUserHandoff()
-	// Windows main with zero running profiles: profiles=0; non-Windows: skipped stub.
-	if result["skipped"] != true && result["profiles"] != 0 {
-		t.Fatalf("idle handoff must be empty or skipped: %#v", result)
+	if result["skipped"] != true {
+		t.Fatalf("handoff API must no-op on main too: %#v", result)
 	}
 }

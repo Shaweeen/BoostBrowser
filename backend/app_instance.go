@@ -255,10 +255,11 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		)
 	}
 
-	// Always pin session foundation (idempotent when already about:blank).
-	// Skipping this on hot start let restore_on_startup drift to "continue" and
-	// reopened chrome-extension unlock tabs — stacked with any inject = two pages.
-	sanitizeChromeStartupPreferences(userDataDir)
+	// Profile foundation prefs (about:blank default). Wipe restorable session
+	// tabs ONLY when still first-adapting extensions (CLI may still inject).
+	// Hot-settled envs keep the user's last work tabs (AdsPower/MoreLogin-like).
+	wipeSessions := !hotSettled && (len(needingInject) > 0 || !extensionPrepReady)
+	sanitizeChromeStartupPreferencesOpts(userDataDir, wipeSessions)
 	if !hotSettled && assignmentFP == "" {
 		markStartPrepDone(userDataDir)
 	}

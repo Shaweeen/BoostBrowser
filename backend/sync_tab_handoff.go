@@ -12,22 +12,14 @@ import (
 	"boost-browser/backend/internal/logger"
 )
 
-// Sync-start tab handoff (sole about:blank) — once per environment process.
+// Optional sole-blank utilities (retained for API / diagnostics only).
 //
-// What it does (only once, only for brand-new env processes):
-//   - First StartInputSync for this profileID+pid → leave one about:blank page.
-//
-// What it never does (after that mark, or for already-marked envs):
-//   - Does NOT close user-opened web tabs, user-opened extension pages, or
-//     any later tabs the user creates while browsing.
-//   - Does NOT disable extensions, LES/wallets, service workers, or backgrounds.
-//   - Does NOT re-run when other environments join sync or when sync restarts.
-//   - Does NOT run on environment start/stop paths (start is prefs-only).
-//
-// Stop → start yields a new pid → that new process gets handoff once, then stops.
-//
-// Safety (from v1.7.63): navigate keep-tab to about:blank BEFORE closing
-// siblings. Closing Chromium's last page destroys the whole window.
+// Product policy (v1.7.80+, AdsPower/MoreLogin-aligned):
+//   - StartInputSync does NOT call collapse — never wipe user work tabs.
+//   - Extensions are Profile-native; hot start keeps last session tabs.
+//   - prepareEnvironmentsForSyncHandoff remains available but is not wired to
+//     StartInputSync. Safety: navigate keep-tab to about:blank BEFORE closing
+//     siblings if ever re-enabled behind an explicit user setting.
 
 const soleBlankCollapseTimeout = 800 * time.Millisecond
 
@@ -285,43 +277,14 @@ func prepareEnvironmentsForSyncHandoff(targets []syncHandoffTarget) (applied, sk
 	return applied, skipped, closedTabs
 }
 
-// FinalizeEnvironmentTabsForUserHandoff is API compatibility.
-// Canonical trigger is StartInputSync → prepareEnvironmentsForSyncHandoff.
-// Sync panel skips (handoff runs inside startInputSyncLocal).
+// FinalizeEnvironmentTabsForUserHandoff is a no-op API stub.
+// Auto sole-blank on sync was removed: it closed users' work tabs when they
+// used envs outside sync then later started sync. Keep binding for old clients.
 func (a *App) FinalizeEnvironmentTabsForUserHandoff() map[string]interface{} {
-	result := map[string]interface{}{
-		"skipped":    false,
-		"profiles":   0,
-		"closedTabs": 0,
-		"applied":    0,
+	return map[string]interface{}{
+		"skipped":  true,
+		"reason":   "sync_never_closes_user_tabs",
+		"profiles": 0,
+		"applied":  0,
 	}
-	if a != nil && a.panelMode {
-		result["skipped"] = true
-		result["reason"] = "panel_uses_sync_start_handoff"
-		return result
-	}
-	if a == nil || a.browserMgr == nil {
-		result["skipped"] = true
-		result["reason"] = "no_app"
-		return result
-	}
-	a.browserMgr.Mutex.Lock()
-	targets := make([]syncHandoffTarget, 0)
-	for id, p := range a.browserMgr.Profiles {
-		if p == nil || !p.Running || p.DebugPort <= 0 || p.Pid <= 0 {
-			continue
-		}
-		targets = append(targets, syncHandoffTarget{
-			profileID: id,
-			pid:       p.Pid,
-			debugPort: p.DebugPort,
-		})
-	}
-	a.browserMgr.Mutex.Unlock()
-	applied, skipped, closed := prepareEnvironmentsForSyncHandoff(targets)
-	result["applied"] = applied
-	result["skipped_already"] = skipped
-	result["profiles"] = applied + skipped
-	result["closedTabs"] = closed
-	return result
 }

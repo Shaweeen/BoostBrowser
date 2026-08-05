@@ -13,7 +13,7 @@ func clearSyncTabHandoffForProfile(profileID string) {}
 func (a *App) FinalizeEnvironmentTabsForUserHandoff() map[string]interface{} {
 	return map[string]interface{}{
 		"skipped":  true,
-		"reason":   "windows_only",
+		"reason":   "sync_never_closes_user_tabs",
 		"profiles": 0,
 	}
 }

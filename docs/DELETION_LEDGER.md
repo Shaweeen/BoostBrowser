@@ -300,3 +300,9 @@ behavior is intentionally retired.
 | ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
 | --- | --- | --- | --- | --- | --- | --- |
 | CLEAN-077 | Sync-panel list ownership that required main-client `browser-runtime.json` as the sole/authoritative running set | `v1.7.78` (`968a999`) | Snapshot lag/staleness under dense multi-open left assistant far below real open count | Live `discoverBoostBrowserProcesses` + DevToolsActivePort scan matched by user-data-dir; snapshot optional merge only; broadened process match to app data dir | Windows pack; manual 100+ multi-open refresh | `git show 968a999:backend/app_sync_api.go` snapshot-first getSyncProfilesLocal. Do not treat the JSON snapshot as the only discovery path. |
+
+## v1.7.80 Ads/MoreLogin-style session ownership
+
+| ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
+| --- | --- | --- | --- | --- | --- | --- |
+| CLEAN-078 | Auto sole-blank collapse on every `StartInputSync`; unconditional `discardChromeRestorableTabSessions` on every environment start | `v1.7.79` / handoff era | Sync wiped work tabs for envs used outside sync; every start wiped sessions and re-triggered extension surfaces | Input-only sync; session wipe only on first-adapt (`wipeSessions` when CLI still needed); live process scan for panel list | Close-behavior no-op handoff test; Windows pack | `git show 18f6a0c:backend/app_sync_api.go` prepareEnvironmentsForSyncHandoff call. Do not auto-close tabs on sync start. |

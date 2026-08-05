@@ -12,23 +12,27 @@ import (
 	"time"
 )
 
-// sanitizeChromeStartupPreferences sets the profile foundation so Chromium
-// itself opens a single about:blank tab on start (fast path: prefs only, no CDP).
+// sanitizeChromeStartupPreferences pins Profile-level session prefs (AdsPower /
+// MoreLogin style foundation). Fast path: prefs only, no CDP tab sweeps.
 //
 // Chrome session.restore_on_startup:
 //
 //	4 = open the URLs in session.startup_urls
 //	5 = open the New Tab Page (chrome://new-tab-page) — NOT what we want
 //
-// Also discards restorable Session/Tabs files so last-run extension pages do
-// not restore on reopen (wallet vaults / Cookies / LES are never touched).
-//
-// Tab policy after launch:
-//   - Start path: NO CDP close sweeps (user speed + respect open actions).
-//   - Sync start: sole about:blank only for brand-new env processes (once per
-//     profileID+pid); already-used envs keep user tabs/extensions untouched.
-//   - After handoff mark: never re-manage that process (user owns all opens).
+// Tab policy (aligned with commercial multi-account browsers):
+//   - Extensions live in the Profile (Scheme A); daily start must not re-CLI
+//     inject and must not wipe user work sessions after first adapt.
+//   - Session tab files are discarded ONLY on first-adapt starts (caller passes
+//     wipeRestorableSessions=true). Hot restarts keep user tabs.
+//   - Sync never closes tabs — input sync only.
 func sanitizeChromeStartupPreferences(userDataDir string) {
+	sanitizeChromeStartupPreferencesOpts(userDataDir, false)
+}
+
+// sanitizeChromeStartupPreferencesOpts allows a one-time restorable-session wipe
+// for first extension adapt (prevents double extension tabs with --load-extension).
+func sanitizeChromeStartupPreferencesOpts(userDataDir string, wipeRestorableSessions bool) {
 	if strings.TrimSpace(userDataDir) == "" {
 		return
 	}
@@ -41,9 +45,11 @@ func sanitizeChromeStartupPreferences(userDataDir string) {
 		path := filepath.Join(userDataDir, rel)
 		_ = patchChromePreferencesFile(path)
 	}
-	// Drop previous open-tab snapshots so restored extension pages cannot stack
-	// with a new --load-extension activation (all extensions, not only MetaMask).
-	discardChromeRestorableTabSessions(userDataDir)
+	if wipeRestorableSessions {
+		// First-adapt only: drop Session/Tabs so CLI load does not stack with
+		// restored chrome-extension unlock pages. Never touch LES/wallets.
+		discardChromeRestorableTabSessions(userDataDir)
+	}
 }
 
 // discardChromeRestorableTabSessions removes Chromium session tab files that

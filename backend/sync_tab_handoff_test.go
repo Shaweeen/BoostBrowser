@@ -66,13 +66,14 @@ func TestPlanCollapseRewritesNewTabPageInPlace(t *testing.T) {
 	}
 }
 
-func TestFinalizeHandoffPanelSkipsOwnCollapse(t *testing.T) {
+func TestFinalizeHandoffIsNoOp(t *testing.T) {
 	panel := NewApp(t.TempDir(), true)
 	result := panel.FinalizeEnvironmentTabsForUserHandoff()
 	if result["skipped"] != true {
-		t.Fatalf("panel must skip list-style handoff: %#v", result)
+		t.Fatalf("must no-op: %#v", result)
 	}
-	if result["reason"] != "panel_uses_sync_start_handoff" {
+	if result["reason"] != "sync_never_closes_user_tabs" && result["reason"] != "windows_only" {
+		// windows build uses product reason; !windows stub uses windows_only
 		t.Fatalf("unexpected reason: %#v", result)
 	}
 }
