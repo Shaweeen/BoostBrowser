@@ -25,8 +25,11 @@ func TestEnvironmentFrameLooksLikeMainAcceptsWalletTitledBrowser(t *testing.T) {
 	if !environmentFrameLooksLikeMain(900, 700, "MetaMask") {
 		t.Fatal("large wallet-titled browser must count as main frame")
 	}
-	if !environmentFrameLooksLikeMain(360, 300, "MetaMask") {
-		t.Fatal("tiled multi-open cell with wallet tab title must count as main")
+	// Compact exact-wallet-title surfaces are wallet confirm/popup band, not the
+	// environment main frame (see extension_window_classify_test.go). Only large
+	// frames or browser-suffixed titles qualify at this size.
+	if environmentFrameLooksLikeMain(360, 300, "MetaMask") {
+		t.Fatal("compact wallet-titled popup must not count as main frame")
 	}
 	// Classic tall notification host stays a popup.
 	if environmentFrameLooksLikeMain(360, 600, "MetaMask") {
