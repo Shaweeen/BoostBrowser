@@ -63,6 +63,27 @@ export async function getSyncSnapshot(): Promise<SyncSnapshot> {
   return { profiles, status, generation: 0 }
 }
 
+// refreshSyncSnapshot bypasses the backend's short-lived process-scan cache.
+// The refresh button uses it so a just-started environment is visible
+// immediately instead of returning the stale list from the previous 2s window.
+export async function refreshSyncSnapshot(): Promise<SyncSnapshot> {
+  const bindings: any = await getBindings()
+  if (bindings?.RefreshSyncSnapshot) {
+    try {
+      const snapshot = await bindings.RefreshSyncSnapshot()
+      return {
+        profiles: snapshot?.profiles || [],
+        status: snapshot?.status || null,
+        generation: Number(snapshot?.generation || 0),
+      }
+    } catch {
+      return { profiles: [], status: null, generation: 0 }
+    }
+  }
+  // Older locally generated bindings: fall back to the cached snapshot path.
+  return getSyncSnapshot()
+}
+
 export async function updateSyncRandomDelay(enabled: boolean, minMs: number, maxMs: number): Promise<string | null> {
   const bindings: any = await getBindings()
   try {

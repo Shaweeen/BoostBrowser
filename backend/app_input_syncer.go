@@ -1017,11 +1017,23 @@ func (s *InputSyncer) canDispatch() bool {
 		atomic.LoadInt32(&s.layoutUpdating) == 0
 }
 
-// ReplaceWindowHandles refreshes master/follower HWNDs after tile/layout so
-// sync keeps targeting the main browser frames (not stale or popup handles).
-// Callers must pass followers in the original sync followerIds order so CDP
-// debug ports remain index-aligned.
-func (s *InputSyncer) ReplaceWindowHandles(master windows.HWND, followers []windows.HWND) {
+// CurrentTargets returns the session's master/follower HWNDs and their
+// index-aligned CDP debug ports, so a live repair can detect what changed
+// without churning the syncer on every poll.
+func (s *InputSyncer) CurrentTargets() (windows.HWND, []windows.HWND, []int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	followers := append([]windows.HWND(nil), s.followerHwnds...)
+	ports := append([]int(nil), s.followerDebug...)
+	return s.masterHwnd, followers, ports
+}
+
+// ReplaceWindowTargets refreshes master/follower HWNDs and their index-aligned
+// CDP debug ports after tile/layout or a live-session repair. Callers must pass
+// followers in the original sync followerIds order; followerPorts[i] is the
+// debug port for followers[i]. A follower that is gone is dropped from BOTH
+// lists so CDP URL/key/scroll dispatch never targets the wrong environment.
+func (s *InputSyncer) ReplaceWindowTargets(master windows.HWND, followers []windows.HWND, followerPorts []int) {
 	if s == nil {
 		return
 	}
@@ -1029,10 +1041,27 @@ func (s *InputSyncer) ReplaceWindowHandles(master windows.HWND, followers []wind
 	if master != 0 && isWindow(master) {
 		s.masterHwnd = master
 	}
+	filtered, filteredPorts := syncFollowerTargetsAligned(s.masterHwnd, followers, followerPorts, isWindow)
+	s.followerHwnds = filtered
+	s.followerDebug = filteredPorts
+	s.mu.Unlock()
+
+	s.followerMu.Lock()
+	s.followerSnapshot = append([]windows.HWND(nil), filtered...)
+	s.followerMu.Unlock()
+}
+
+// syncFollowerTargetsAligned filters dead/duplicate follower handles while
+// keeping the CDP debug-port list index-aligned with the survivors: dropping a
+// follower also drops its port so URL/key/scroll dispatch never targets the
+// wrong environment after a close/reopen. alive may be nil to skip the Win32
+// window liveness check (unit tests).
+func syncFollowerTargetsAligned(master windows.HWND, followers []windows.HWND, followerPorts []int, alive func(windows.HWND) bool) ([]windows.HWND, []int) {
 	filtered := make([]windows.HWND, 0, len(followers))
+	filteredPorts := make([]int, 0, len(followers))
 	seen := map[windows.HWND]struct{}{}
-	for _, h := range followers {
-		if h == 0 || h == s.masterHwnd || !isWindow(h) {
+	for i, h := range followers {
+		if h == 0 || h == master || (alive != nil && !alive(h)) {
 			continue
 		}
 		if _, dup := seen[h]; dup {
@@ -1040,13 +1069,13 @@ func (s *InputSyncer) ReplaceWindowHandles(master windows.HWND, followers []wind
 		}
 		seen[h] = struct{}{}
 		filtered = append(filtered, h)
+		port := 0
+		if i < len(followerPorts) {
+			port = followerPorts[i]
+		}
+		filteredPorts = append(filteredPorts, port)
 	}
-	s.followerHwnds = filtered
-	s.mu.Unlock()
-
-	s.followerMu.Lock()
-	s.followerSnapshot = append([]windows.HWND(nil), filtered...)
-	s.followerMu.Unlock()
+	return filtered, filteredPorts
 }
 
 // BeginLayoutUpdate creates a hard boundary between window movement and input

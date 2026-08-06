@@ -48,8 +48,36 @@ func sanitizeChromeStartupPreferencesOpts(userDataDir string, wipeRestorableSess
 	if wipeRestorableSessions {
 		// First-adapt only: drop Session/Tabs so CLI load does not stack with
 		// restored chrome-extension unlock pages. Never touch LES/wallets.
-		discardChromeRestorableTabSessions(userDataDir)
+		// One-shot: once wiped, never wipe again — a profile that never completes
+		// extension adapt must not lose its user session on every start.
+		if !sessionWipeDone(userDataDir) {
+			discardChromeRestorableTabSessions(userDataDir)
+			markSessionWipeDone(userDataDir)
+		}
 	}
+}
+
+// One-time restorable-session wipe marker. Written after the first-adapt wipe
+// so repeated starts never discard user work tabs again, even when the
+// extension adapt never fully completes.
+const sessionWipeDoneMarkerName = ".boost_session_wipe_done"
+
+func sessionWipeDone(userDataDir string) bool {
+	userDataDir = strings.TrimSpace(userDataDir)
+	if userDataDir == "" {
+		return true
+	}
+	_, err := os.Stat(filepath.Join(userDataDir, sessionWipeDoneMarkerName))
+	return err == nil
+}
+
+func markSessionWipeDone(userDataDir string) {
+	userDataDir = strings.TrimSpace(userDataDir)
+	if userDataDir == "" {
+		return
+	}
+	_ = os.MkdirAll(userDataDir, 0755)
+	_ = os.WriteFile(filepath.Join(userDataDir, sessionWipeDoneMarkerName), []byte("1\n"), 0600)
 }
 
 // discardChromeRestorableTabSessions removes Chromium session tab files that
@@ -284,5 +312,3 @@ func listCDPTargets(debugPort int) ([]cdpTarget, error) {
 	}
 	return targets, nil
 }
-
-

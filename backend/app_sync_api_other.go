@@ -8,3 +8,13 @@ package backend
 func (a *App) StopInputSync() error {
 	return nil
 }
+
+// RefreshSyncSnapshot is a no-op outside Windows (the assistant is a Windows
+// feature). Kept so the Wails binding compiles on every platform.
+func (a *App) RefreshSyncSnapshot() SyncSnapshot {
+	return SyncSnapshot{
+		Profiles:   []SyncProfileInfo{},
+		Status:     map[string]interface{}{},
+		Generation: 0,
+	}
+}

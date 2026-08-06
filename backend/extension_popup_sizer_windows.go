@@ -4,7 +4,6 @@ package backend
 
 import (
 	"runtime"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -32,6 +31,7 @@ const (
 //   - only when the user starts an environment (caller is the start path);
 //   - skipped while an input-sync session is active so tile/stack/horizontal
 //     layouts fully follow the user-selected arrangement and confinement rules.
+//
 // There is no continuous worker: one SetWindowPos, then hand off.
 func enforceBrowserWindowBounds(pid, width, height int) {
 	if pid <= 0 || width <= 0 || height <= 0 {
@@ -154,162 +154,6 @@ func isMainEnvironmentBrowserFrame(hwnd windows.HWND, title string) bool {
 		return false
 	}
 	return environmentFrameLooksLikeMain(w, h, title)
-}
-
-// environmentFrameLooksLikeMain classifies a Chrome top-level by client size +
-// title. Size wins over title: a full browser frame whose tab title is
-// "MetaMask" / a wallet brand is still the environment main window. Only
-// tall portrait compact surfaces with popup titles are treated as extension hosts.
-//
-// Regression (1.7.72): title-first rejection made tile/sync return zero HWNDs
-// whenever users had a wallet page open in the main tab ("没有可用的运行实例窗口").
-func environmentFrameLooksLikeMain(w, h int, title string) bool {
-	if w < 80 || h < 8 {
-		return false
-	}
-	titlePopup := isCompactExtensionPopupTitle(title) || isDefinitiveExtensionPopupTitle(title)
-	// Wallet Notification / confirm: tall portrait (height clearly exceeds width).
-	// Landscape tile cells (e.g. 360×300 under 10-open) must NOT match this.
-	if titlePopup && h > w && h >= 400 && w <= 560 {
-		return false
-	}
-	// Tiny extension menus / attach chips.
-	if titlePopup && w < 280 && h < 280 {
-		return false
-	}
-	// Multi-open tile cells on 1080p are ~340–480×280+ — always main frames,
-	// including when the active tab title is a wallet product name.
-	if w >= 260 && h >= 120 {
-		return true
-	}
-	if looksLikeMainBrowserWindowTitle(title) && w >= 120 && h >= 80 {
-		return true
-	}
-	if titlePopup {
-		return false
-	}
-	return w >= 200 && h >= 100
-}
-
-func isStrongExtensionPopupTitle(title string) bool {
-	if title == "" {
-		return false
-	}
-
-	// Wallet web pages often include the wallet brand in their tab title, e.g.
-	// "Web3 入口，一个就够 - OKX Wallet" or
-	// "The crypto wallet for DeFi... | MetaMask". Treat a brand-only title as a
-	// popup, or require explicit popup cue words. Do not clamp every title that
-	// merely contains a wallet brand.
-	if isExactKnownWalletPopupTitle(title) {
-		return true
-	}
-	return hasExtensionPopupCue(title)
-}
-
-func isExactKnownWalletPopupTitle(title string) bool {
-	t := strings.TrimSpace(strings.ToLower(title))
-	knownTitles := []string{
-		"okx wallet",
-		"metamask",
-		"rabby",
-		"rabby wallet",
-		"phantom",
-		"phantom wallet",
-		"bitget wallet",
-		"keplr",
-		"keplr wallet",
-		"petra",
-		"petra wallet",
-	}
-	for _, known := range knownTitles {
-		if t == known {
-			return true
-		}
-	}
-	return false
-}
-
-func hasExtensionPopupCue(title string) bool {
-	t := strings.TrimSpace(strings.ToLower(title))
-	cuePhrases := []string{
-		"notification",
-		"prompt",
-		"login request",
-		"sign in request",
-		"connect request",
-		"signature request",
-		"登录请求",
-		"登录授权",
-		"sign request",
-		"confirm transaction",
-		"transaction request",
-		"approve",
-		"查看权限",
-		"连接请求",
-		"签名请求",
-		"确认交易",
-		"授权",
-		"request",
-		"permission",
-		"allow",
-	}
-	for _, cue := range cuePhrases {
-		if strings.Contains(t, cue) {
-			return true
-		}
-	}
-	return false
-}
-
-func looksLikeMainBrowserWindowTitle(title string) bool {
-	t := strings.TrimSpace(strings.ToLower(title))
-	if t == "" {
-		return false
-	}
-	return strings.Contains(t, " - browserstudio") ||
-		strings.HasSuffix(t, "browserstudio") ||
-		strings.Contains(t, " - boost browser") ||
-		strings.HasSuffix(t, "boost browser") ||
-		strings.Contains(t, " - chromium") ||
-		strings.HasSuffix(t, "chromium") ||
-		strings.Contains(t, " - google chrome") ||
-		strings.HasSuffix(t, "google chrome") ||
-		strings.Contains(t, " - chrome") ||
-		strings.HasSuffix(t, "chrome")
-}
-
-func isKnownWalletPopupProductTitle(title string) bool {
-	t := strings.TrimSpace(strings.ToLower(title))
-	for _, suffix := range []string{" - browserstudio", " - boost browser"} {
-		if !strings.HasSuffix(t, suffix) {
-			continue
-		}
-		product := strings.TrimSpace(strings.TrimSuffix(t, suffix))
-		product = strings.TrimSpace(strings.TrimSuffix(product, " notification"))
-		return isExactKnownWalletPopupTitle(product)
-	}
-	return false
-}
-
-func isCompactExtensionPopupTitle(title string) bool {
-	return looksLikeWalletExtensionPopup(title) ||
-		isStrongExtensionPopupTitle(title) ||
-		isKnownWalletPopupProductTitle(title)
-}
-
-func isDefinitiveExtensionPopupTitle(title string) bool {
-	return isStrongExtensionPopupTitle(title) || isKnownWalletPopupProductTitle(title)
-}
-
-func looksLikeServiceWorkerDevToolsTitle(title string) bool {
-	if title == "" {
-		return false
-	}
-	return strings.Contains(title, "service worker") ||
-		strings.Contains(title, "devtools") ||
-		strings.Contains(title, "developer tools") ||
-		strings.Contains(title, "开发者工具")
 }
 
 func getWindowClassName(hwnd windows.HWND) string {

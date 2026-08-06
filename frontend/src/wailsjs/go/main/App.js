@@ -410,6 +410,10 @@ export function GetSyncSnapshot() {
   return window['go']['main']['App']['GetSyncSnapshot']();
 }
 
+export function RefreshSyncSnapshot() {
+  return window['go']['main']['App']['RefreshSyncSnapshot']();
+}
+
 export function GetSyncStatus() {
   return window['go']['main']['App']['GetSyncStatus']();
 }

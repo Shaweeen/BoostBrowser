@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -62,11 +61,18 @@ func (a *App) persistBrowserRuntimeSnapshotLocked() {
 	sort.Slice(snapshot.Entries, func(i, j int) bool {
 		return snapshot.Entries[i].ProfileID < snapshot.Entries[j].ProfileID
 	})
+	writeBrowserRuntimeSnapshotFile(a.browserRuntimeSnapshotPath(), snapshot)
+}
+
+// writeBrowserRuntimeSnapshotFile atomically writes the registry file.
+func writeBrowserRuntimeSnapshotFile(path string, snapshot browserRuntimeSnapshot) {
+	if path == "" {
+		return
+	}
 	data, err := json.Marshal(snapshot)
 	if err != nil {
 		return
 	}
-	path := a.browserRuntimeSnapshotPath()
 	if os.MkdirAll(filepath.Dir(path), 0o755) != nil {
 		return
 	}
@@ -78,6 +84,69 @@ func (a *App) persistBrowserRuntimeSnapshotLocked() {
 		_ = os.Remove(path)
 		_ = os.Rename(tmp, path)
 	}
+}
+
+// updateBrowserRuntimeSnapshotEntryLocked refreshes one environment's registry
+// row (hwnd==0 removes it) without re-scanning the whole system. Caller must
+// hold browserMgr.Mutex. The registry file is tiny (atomic tmp+rename) and the
+// read retry is bounded (≈15ms worst case), so holding the manager lock for
+// this short write is acceptable and keeps the read-modify-write serialized.
+func (a *App) updateBrowserRuntimeSnapshotEntryLocked(profileID string, pid int, hwnd uintptr) {
+	if a == nil || a.panelMode || a.browserMgr == nil {
+		return
+	}
+	profile, ok := a.browserMgr.Profiles[profileID]
+	if !ok || profile == nil {
+		return
+	}
+	snapshot, _ := a.readBrowserRuntimeSnapshot()
+	entries := make([]browserRuntimeSnapshotEntry, 0, len(snapshot.Entries)+1)
+	for _, e := range snapshot.Entries {
+		if e.ProfileID != profileID {
+			entries = append(entries, e)
+		}
+	}
+	if hwnd != 0 && profile.Running && pid > 0 {
+		entries = append(entries, browserRuntimeSnapshotEntry{
+			ProfileID:   profileID,
+			ProfileName: profile.ProfileName,
+			PID:         pid,
+			DebugPort:   profile.DebugPort,
+			HWND:        int64(hwnd),
+			WindowPID:   int(windowPID(windows.HWND(hwnd))),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].ProfileID < entries[j].ProfileID
+	})
+	writeBrowserRuntimeSnapshotFile(a.browserRuntimeSnapshotPath(), browserRuntimeSnapshot{UpdatedAt: time.Now(), Entries: entries})
+}
+
+// publishProfileRuntimeSnapshotAsync records one environment's verified main
+// frame in the window-sync registry shortly after start, off the start critical
+// path. This is the authoritative “runtime tag” the assistant and tile prefer.
+// The main frame can appear a few hundred ms after the browser process spawns,
+// so the lookup retries briefly instead of silently dropping the entry.
+func (a *App) publishProfileRuntimeSnapshotAsync(profileID string, pid int) {
+	if a == nil || a.panelMode || profileID == "" || pid <= 0 {
+		return
+	}
+	go func() {
+		defer func() { _ = recover() }()
+		var hwnd windows.HWND
+		for attempt := 0; attempt < 4; attempt++ {
+			if hwnd = findMainEnvironmentBrowserWindow(pid); hwnd != 0 {
+				break
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		if hwnd == 0 {
+			return
+		}
+		a.browserMgr.Mutex.Lock()
+		defer a.browserMgr.Mutex.Unlock()
+		a.updateBrowserRuntimeSnapshotEntryLocked(profileID, pid, uintptr(hwnd))
+	}()
 }
 
 func (a *App) readBrowserRuntimeSnapshot() (browserRuntimeSnapshot, bool) {
@@ -143,62 +212,6 @@ func (a *App) PrepareWindowSyncRuntimeSnapshot() int {
 	}
 	a.browserMgr.Mutex.Unlock()
 	return count
-}
-
-func (a *App) applyBrowserRuntimeSnapshotData(snapshot browserRuntimeSnapshot) (int, int) {
-	if a == nil || a.browserMgr == nil {
-		return 0, 0
-	}
-	live := 0
-	a.browserMgr.Mutex.Lock()
-	defer a.browserMgr.Mutex.Unlock()
-	// The panel's browser manager is only a configuration reader. Clear every
-	// process-local runtime value before applying the main client's current
-	// list so an older panel scan can never override a later Start/Stop state.
-	for _, profile := range a.browserMgr.Profiles {
-		if profile == nil {
-			continue
-		}
-		profile.Running = false
-		profile.Pid = 0
-		profile.DebugPort = 0
-		profile.DebugReady = false
-	}
-	for _, entry := range snapshot.Entries {
-		if entry.PID <= 0 {
-			continue
-		}
-		// Accept snapshot row if process is alive OR published HWND is still a
-		// real window. Strict isProcessAlive-only dropped many multi-open envs
-		// under load and left the assistant stuck around ~30 while 100+ ran.
-		hwndOK := entry.HWND != 0 && isWindow(windows.HWND(entry.HWND))
-		if !isProcessAlive(entry.PID) && !hwndOK {
-			continue
-		}
-		profile := a.browserMgr.Profiles[entry.ProfileID]
-		if profile == nil {
-			// Snapshot can reference profiles the panel map has not loaded yet
-			// (panel opened before batch create finished). Surface them anyway.
-			name := strings.TrimSpace(entry.ProfileName)
-			if name == "" {
-				name = entry.ProfileID
-			}
-			profile = &BrowserProfile{
-				ProfileId:   entry.ProfileID,
-				ProfileName: name,
-			}
-			a.browserMgr.Profiles[entry.ProfileID] = profile
-		}
-		profile.Running = true
-		profile.Pid = entry.PID
-		profile.DebugPort = entry.DebugPort
-		profile.DebugReady = entry.DebugPort > 0
-		if strings.TrimSpace(profile.ProfileName) == "" && strings.TrimSpace(entry.ProfileName) != "" {
-			profile.ProfileName = entry.ProfileName
-		}
-		live++
-	}
-	return live, len(snapshot.Entries)
 }
 
 func validRuntimeSnapshotWindow(entry browserRuntimeSnapshotEntry) windows.HWND {

@@ -71,6 +71,11 @@ type App struct {
 	updateMu           sync.Mutex
 	verifiedUpdatePath string
 
+	// syncProfileReloadAt throttles the sync assistant's periodic SQLite
+	// profile-table reload (the panel process is a separate process whose
+	// in-memory profile map only loads once).
+	syncProfileReloadAt time.Time
+
 	// envPopup confines extension/wallet/secondary Chrome windows to each
 	// running environment's main window. Main client only; single owner.
 	envPopup *environmentPopupConfiner
@@ -1015,12 +1020,12 @@ type ProxyTestResult struct {
 	// Human-readable summary for UI toasts (zh).
 	Message string `json:"message"`
 	// Exit meta filled by BrowserProxyFullCheck (optional on speed-only calls).
-	ExitIP         string `json:"exitIP,omitempty"`
-	Country        string `json:"country,omitempty"`
-	City           string `json:"city,omitempty"`
-	TimezoneHint   string `json:"timezoneHint,omitempty"`
-	IsResidential  bool   `json:"isResidential,omitempty"`
-	DNSViaProxy    bool   `json:"dnsViaProxy"`
+	ExitIP        string `json:"exitIP,omitempty"`
+	Country       string `json:"country,omitempty"`
+	City          string `json:"city,omitempty"`
+	TimezoneHint  string `json:"timezoneHint,omitempty"`
+	IsResidential bool   `json:"isResidential,omitempty"`
+	DNSViaProxy   bool   `json:"dnsViaProxy"`
 }
 
 // ProxyIPHealthResult 代理出口 IP 健康信息（透传第三方接口结果）

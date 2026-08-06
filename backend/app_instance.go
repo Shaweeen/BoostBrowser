@@ -255,12 +255,18 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		)
 	}
 
-	// Integrity complete / hot-settled: zero CLI and never wipe user sessions.
+	// Integrity complete / hot-settled: zero CLI and never touch user sessions.
 	assignmentComplete := isExtensionAssignmentComplete(userDataDir, sanitizedProfileLaunchArgs)
-	// Wipe Session/Tabs ONLY when first-adapt still needs --load-extension.
-	// Do not wipe merely because prep marker is missing (that destroyed work tabs).
-	wipeSessions := !hotSettled && !assignmentComplete && len(needingInject) > 0
-	sanitizeChromeStartupPreferencesOpts(userDataDir, wipeSessions)
+	// Preferences sanitize + one-time session wipe run ONLY on non-hot starts.
+	// Hot-settled environments must not have their Preferences rewritten on every
+	// open (that touches user data and re-arms session restore each time).
+	if !hotSettled {
+		// Wipe Session/Tabs ONLY when first-adapt still needs --load-extension.
+		// Do not wipe merely because prep marker is missing (that destroyed work
+		// tabs). The wipe itself is marker-guarded and runs at most once.
+		wipeSessions := !assignmentComplete && len(needingInject) > 0
+		sanitizeChromeStartupPreferencesOpts(userDataDir, wipeSessions)
+	}
 	if !hotSettled && assignmentFP == "" {
 		markStartPrepDone(userDataDir)
 	}
@@ -667,6 +673,10 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			// One-shot main environment frame size on this user start only.
 			// Popups/extensions are never forced; sync tile/stack uses user layout.
 			enforceMainEnvironmentWindowOnStart(profile.Pid)
+			// Publish this environment's verified main frame to the window-sync
+			// registry so the assistant and tile prefer it instead of re-guessing
+			// from window heuristics (avoids tiling a wallet/OAuth popup).
+			a.publishProfileRuntimeSnapshotAsync(profileId, profile.Pid)
 
 			// crashprobe: 临时停用实例启动后的 Turnstile 自动点击监控，继续收缩每实例后台
 			// CDP 监控/注入链路，验证是否仍会出现 watchdog exit_code=2。
@@ -832,9 +842,6 @@ func (a *App) BrowserInstanceStop(profileId string) (*BrowserProfile, error) {
 	a.browserCloseMu.Lock()
 	defer a.browserCloseMu.Unlock()
 
-	// Allow a future start of this profile to receive sole-blank handoff once.
-	clearSyncTabHandoffForProfile(profileId)
-
 	a.rabbyImportMu.Lock()
 	blocked := a.rabbyImportActive[profileId]
 	a.rabbyImportMu.Unlock()
@@ -914,6 +921,9 @@ func (a *App) BrowserInstanceStop(profileId string) (*BrowserProfile, error) {
 	if current.Running || current.DebugPort > 0 || current.Pid > 0 || a.browserMgr.BrowserProcesses[profileId] != nil {
 		a.markProfileStoppedLocked(profileId, current)
 	}
+	// Remove this environment from the window-sync registry (stopped) so a stale
+	// main-window pointer cannot be tiled after the environment is closed.
+	a.updateBrowserRuntimeSnapshotEntryLocked(profileId, 0, 0)
 	// Prefer the confirmed flush timestamp as last-usage close/save time.
 	closedAtStr := closedAt.Format(time.RFC3339)
 	current.LastStopAt = closedAtStr

@@ -106,6 +106,55 @@ func (m *Manager) loadProfiles() {
 	log.Info("浏览器配置从文件加载完成", logger.F("count", len(m.Profiles)))
 }
 
+// ReloadProfilesFromDAO re-reads the authoritative profile table from the
+// database and merges rows that appeared or disappeared since the in-memory map
+// was loaded. Existing entries keep their live runtime state; only identity
+// fields are refreshed. Used by the sync assistant so environments created in
+// the main client become visible without a process restart.
+func (m *Manager) ReloadProfilesFromDAO() {
+	if m.ProfileDAO == nil {
+		return
+	}
+	profiles, err := m.ProfileDAO.List()
+	if err != nil {
+		return
+	}
+	m.Mutex.Lock()
+	defer m.Mutex.Unlock()
+	if m.Profiles == nil {
+		m.Profiles = make(map[string]*Profile)
+	}
+	seen := make(map[string]struct{}, len(profiles))
+	for _, p := range profiles {
+		p.CoreId = normalizeProfileCoreID(p.CoreId)
+		seen[p.ProfileId] = struct{}{}
+		existing, ok := m.Profiles[p.ProfileId]
+		if !ok {
+			m.Profiles[p.ProfileId] = p
+			continue
+		}
+		existing.ProfileName = p.ProfileName
+		existing.UserDataDir = p.UserDataDir
+		existing.CoreId = p.CoreId
+		existing.FingerprintArgs = p.FingerprintArgs
+		existing.ProxyId = p.ProxyId
+		existing.ProxyConfig = p.ProxyConfig
+		existing.LaunchArgs = p.LaunchArgs
+		existing.Tags = p.Tags
+		existing.Keywords = p.Keywords
+		existing.GroupId = p.GroupId
+		existing.CreatedAt = p.CreatedAt
+		existing.UpdatedAt = p.UpdatedAt
+	}
+	for id := range m.Profiles {
+		if _, ok := seen[id]; !ok {
+			// Deleted in the main client: drop it so a stale record cannot
+			// resurrect a removed environment in the sync list.
+			delete(m.Profiles, id)
+		}
+	}
+}
+
 // SaveProfiles 保存所有实例配置（DAO 模式：逐条 upsert）
 func (m *Manager) SaveProfiles() error {
 	log := logger.New("Browser")
@@ -479,7 +528,9 @@ func (m *Manager) Update(profileId string, input ProfileInput) (*Profile, error)
 	next.ProfileName = input.ProfileName
 	next.UserDataDir = profile.UserDataDir
 	next.CoreId = normalizeProfileCoreID(input.CoreId)
-	next.FingerprintArgs = append([]string{}, input.FingerprintArgs...)
+	// 编辑保存时若前端/旧客户端丢失了 --fingerprint= 种子，把旧种子带回来，
+	// 绝不让一次普通编辑悄悄改变浏览器身份（否则社交平台登录状态会失效）。
+	next.FingerprintArgs = mergeFingerprintSeedPreserved(profile.FingerprintArgs, input.FingerprintArgs)
 	next.ProxyId = strings.TrimSpace(input.ProxyId)
 	if next.ProxyId != "" {
 		if proxyItem, ok := m.GetProxyByID(next.ProxyId); ok {
@@ -501,6 +552,30 @@ func (m *Manager) Update(profileId string, input ProfileInput) (*Profile, error)
 		return nil, err
 	}
 	return &next, nil
+}
+
+// mergeFingerprintSeedPreserved carries the existing --fingerprint=<seed> over
+// when the incoming args lost it. A profile's seed is its browser-identity
+// anchor: silently replacing it on edit logs every social platform session out.
+// Explicit identity changes still go through RandomizeFingerprint.
+func mergeFingerprintSeedPreserved(existing, incoming []string) []string {
+	for _, a := range incoming {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(a)), "--fingerprint=") {
+			return append([]string{}, incoming...)
+		}
+	}
+	seed := ""
+	for _, a := range existing {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(a)), "--fingerprint=") {
+			seed = strings.TrimSpace(a)
+			break
+		}
+	}
+	out := append([]string{}, incoming...)
+	if seed != "" {
+		out = append(out, seed)
+	}
+	return out
 }
 
 func (m *Manager) findProfileNameConflictLocked(name, excludeProfileID string) string {
@@ -618,7 +693,9 @@ func (m *Manager) ApplyDefaults(profile *Profile) bool {
 		profile.FingerprintArgs = append([]string{}, m.Config.Browser.DefaultFingerprintArgs...)
 		changed = true
 	}
-	// 完整指纹种子：缺失时整组随机身份 + 种子一次写入，后续启动复用。
+	// 完整指纹种子：缺失时只用 ProfileId 派生一个稳定种子补齐，绝不重新随机整套
+	// 身份。种子是网站的“浏览器身份锚点”——每次启动若指纹不同，站点会判定为
+	// 全新浏览器，导致登录状态每次关闭即失效。只有显式「随机指纹」才换身份。
 	hasSeed := false
 	for _, a := range profile.FingerprintArgs {
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(a)), "--fingerprint=") {
@@ -627,18 +704,11 @@ func (m *Manager) ApplyDefaults(profile *Profile) bool {
 		}
 	}
 	if !hasSeed {
-		// 保留未识别的自定义开关，重建基础身份（与 RandomizeFingerprint 一致）。
-		rest := StripIdentityArgs(profile.FingerprintArgs)
-		platform := PlatformFromArgs(profile.FingerprintArgs)
-		if platform == "" {
-			platform = "windows"
-		}
-		rest = append(rest, RandomFingerprintIdentityForPlatform(platform)...)
-		seed := fmt.Sprintf("--fingerprint=%d", rand.Int31n(2147483647)+1)
-		rest = append(rest, seed)
-		profile.FingerprintArgs = rest
+		// 保留已有身份字段与未识别开关，只补稳定种子（跨会话一致）。
+		seed := DeriveStableFingerprintSeed(profile.ProfileId)
+		profile.FingerprintArgs = append(profile.FingerprintArgs, fmt.Sprintf("--fingerprint=%s", seed))
 		changed = true
-		log.Info("启动前自动生成并落库随机指纹（后续按此指纹匹配启动）",
+		log.Info("启动前补齐稳定指纹种子（由环境 ID 派生，保持跨会话一致）",
 			logger.F("profile_id", profile.ProfileId),
 			logger.F("seed", seed),
 		)

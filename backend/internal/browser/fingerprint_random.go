@@ -1,6 +1,7 @@
 package browser
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -91,6 +92,25 @@ var fpFamilies = []fpFamily{
 		},
 		touchPoints: []string{"0"},
 	},
+}
+
+// DeriveStableFingerprintSeed returns a deterministic seed derived from the
+// profile identity. When a profile loses its stored --fingerprint=<seed> (old
+// migration, external edit, corrupted row), the start path must NOT re-randomize
+// the whole identity — that makes websites treat the environment as a brand-new
+// browser on every session, which invalidates login state. A derived seed keeps
+// the fingerprint stable across sessions; only an explicit RandomizeFingerprint
+// replaces the seed.
+func DeriveStableFingerprintSeed(identity string) string {
+	sum := sha256.Sum256([]byte("boost-browser:fingerprint-seed:v1:" + strings.TrimSpace(identity)))
+	var v uint32
+	for i := 0; i < 4; i++ {
+		v = v<<8 | uint32(sum[i])
+	}
+	if v == 0 {
+		v = 1
+	}
+	return fmt.Sprintf("%d", v)
 }
 
 func pick(rng *rand.Rand, opts []string) string {

@@ -214,6 +214,18 @@ var discoverProcessCache struct {
 	list []browserRuntimeProcess
 }
 
+// invalidateBrowserProcessDiscoveryCache drops the short-lived process list so
+// an explicit panel refresh scans once and sees processes that started within
+// the cache window (closing one environment and immediately opening another
+// previously returned the stale list and made the refresh button look broken).
+func invalidateBrowserProcessDiscoveryCache() {
+	discoverProcessCache.mu.Lock()
+	discoverProcessCache.root = ""
+	discoverProcessCache.at = time.Time{}
+	discoverProcessCache.list = nil
+	discoverProcessCache.mu.Unlock()
+}
+
 func discoverBoostBrowserProcessesCached(appRoot string) ([]browserRuntimeProcess, error) {
 	root := filepath.Clean(strings.TrimSpace(appRoot))
 	discoverProcessCache.mu.Lock()

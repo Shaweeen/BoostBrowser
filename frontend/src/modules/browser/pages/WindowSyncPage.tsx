@@ -20,6 +20,7 @@ import { EventsOn, ScreenGetAll, WindowCenter, WindowGetPosition, WindowSetAlway
 import {
   getSyncSnapshot,
   getSyncStatus,
+  refreshSyncSnapshot,
   startInputSync,
   stopInputSync,
   syncTileWindows,
@@ -92,11 +93,16 @@ export function WindowSyncPage() {
   const loadProfilesSeq = useRef(0)
   const startingRef = useRef(false)
   const stoppingRef = useRef(false)
-  const loadProfiles = useCallback((): Promise<SyncProfileInfo[]> => {
+  const loadProfiles = useCallback((force = false, silent = false): Promise<SyncProfileInfo[]> => {
     const seq = ++loadProfilesSeq.current
-    setRefreshing(true)
+    // Background polls run silently: they must not flash the refresh button
+    // spinner or prune the user's in-progress selection when a window is
+    // transiently resolving.
+    if (!silent) setRefreshing(true)
     const request = (async () => {
-      const snapshot = await getSyncSnapshot()
+      // force = explicit refresh: bypass the backend's 2s process-scan cache so
+      // a just-started environment is visible immediately.
+      const snapshot = force ? await refreshSyncSnapshot() : await getSyncSnapshot()
       const list = snapshot.profiles
       const status = snapshot.status
       const sorted = [...list].sort(compareProfileName)
@@ -117,21 +123,23 @@ export function WindowSyncPage() {
         return sorted
       }
 
-      // This is an explicit collection boundary, not a polling snapshot. Drop
-      // selections whose current top-level window no longer exists so a closed
-      // environment cannot poison the next master/follower configuration.
-      const availableIds = new Set(sorted.filter(item => item.status === 'running').map(item => item.profileId))
-      setSelectedIds(prev => {
-        const next = new Set<string>()
-        prev.forEach(id => {
-          if (availableIds.has(id)) next.add(id)
+      if (!silent) {
+        // This is an explicit collection boundary (manual refresh only). Drop
+        // selections whose current top-level window no longer exists so a closed
+        // environment cannot poison the next master/follower configuration.
+        const availableIds = new Set(sorted.filter(item => item.status === 'running').map(item => item.profileId))
+        setSelectedIds(prev => {
+          const next = new Set<string>()
+          prev.forEach(id => {
+            if (availableIds.has(id)) next.add(id)
+          })
+          return next
         })
-        return next
-      })
-      setMasterId(prev => (prev && availableIds.has(prev) ? prev : null))
+        setMasterId(prev => (prev && availableIds.has(prev) ? prev : null))
+      }
       return sorted
     })().finally(() => {
-      if (seq === loadProfilesSeq.current) setRefreshing(false)
+      if (seq === loadProfilesSeq.current && !silent) setRefreshing(false)
     })
     return request
   }, [])
@@ -255,6 +263,18 @@ export function WindowSyncPage() {
       setShowSyncControls(false)
     }
   }, [isSyncing])
+
+  // Auto-refresh the live environment list while the assistant is open and not
+  // actively syncing. A closed/reopened environment then appears without a
+  // manual refresh. Silent mode keeps the refresh button idle and never prunes
+  // the user's in-progress selection.
+  useEffect(() => {
+    if (isSyncing) return
+    const timer = window.setInterval(() => {
+      void loadProfiles(false, true)
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [isSyncing, loadProfiles])
 
   useEffect(() => {
     if (!compactPanelInteractive) {
@@ -653,7 +673,7 @@ export function WindowSyncPage() {
             <button
               type="button"
               className="inline-flex h-9 items-center justify-center self-center rounded-full border border-[#c8d0dc] bg-white px-3 text-sm font-medium text-[#344054] shadow-[0_8px_18px_rgba(16,24,40,0.08)] transition hover:bg-[#eef2f7] hover:text-[#111827]"
-              onClick={() => void loadProfiles()}
+              onClick={() => void loadProfiles(true)}
               disabled={refreshing || starting || stopping}
               style={{ ['--wails-draggable' as any]: 'no-drag' }}
             >
@@ -1070,7 +1090,7 @@ export function WindowSyncPage() {
               </button>
 
               <div className="flex items-center gap-2">
-                <Button variant="secondary" size="sm" onClick={() => void loadProfiles()} loading={refreshing} disabled={starting || stopping}>
+                <Button variant="secondary" size="sm" onClick={() => void loadProfiles(true)} loading={refreshing} disabled={starting || stopping}>
                   <RefreshCw className="h-4 w-4" />刷新
                 </Button>
 

@@ -56,6 +56,104 @@ func TestGetFollowerSnapshotReturnsCopy(t *testing.T) {
 	}
 }
 
+func TestSyncFollowerTargetsAlignedKeepsPortsWithSurvivors(t *testing.T) {
+	// A closed follower (dead handle) must be dropped together with its debug
+	// port so CDP URL/key dispatch never shifts onto the next environment.
+	followers, ports := syncFollowerTargetsAligned(
+		windows.HWND(1),
+		[]windows.HWND{10, 0, 30, 40, 10},
+		[]int{9221, 9222, 9223, 9224, 9225},
+		func(windows.HWND) bool { return true },
+	)
+	want := []windows.HWND{10, 30, 40}
+	if len(followers) != len(want) {
+		t.Fatalf("followers=%v want %v", followers, want)
+	}
+	for i := range want {
+		if followers[i] != want[i] {
+			t.Fatalf("followers=%v want %v", followers, want)
+		}
+	}
+	wantPorts := []int{9221, 9223, 9224}
+	if len(ports) != len(wantPorts) {
+		t.Fatalf("ports=%v want %v", ports, wantPorts)
+	}
+	for i := range wantPorts {
+		if ports[i] != wantPorts[i] {
+			t.Fatalf("ports must stay index-aligned with survivors: got %v want %v", ports, wantPorts)
+		}
+	}
+
+	// Master handle itself is never a follower target.
+	followers2, ports2 := syncFollowerTargetsAligned(
+		windows.HWND(7),
+		[]windows.HWND{7, 8},
+		[]int{9001, 9002},
+		nil,
+	)
+	if len(followers2) != 1 || followers2[0] != windows.HWND(8) || len(ports2) != 1 || ports2[0] != 9002 {
+		t.Fatalf("master must be excluded with its port: %v %v", followers2, ports2)
+	}
+}
+
+func TestPlanSyncSessionTargetsRepairsClosedReopenedFollower(t *testing.T) {
+	// Follower closed and reopened: the fresh scan carries a new pid/hwnd/port,
+	// and the session must adopt them so sync continues without a restart.
+	byID := map[string]syncProfileCandidate{
+		"master":   {profileID: "master", pid: 1, debugPort: 9001, hintHWND: windows.HWND(101)},
+		"follower": {profileID: "follower", pid: 2, debugPort: 9002, hintHWND: windows.HWND(202)},
+	}
+	resolved := map[int]windows.HWND{1: 101, 2: 202}
+	master, followers, ports, next, ok := planSyncSessionTargets("master", []string{"follower"}, nil, byID, resolved)
+	if !ok || master != windows.HWND(101) {
+		t.Fatalf("ok=%v master=%v", ok, master)
+	}
+	if len(followers) != 1 || followers[0] != windows.HWND(202) || len(ports) != 1 || ports[0] != 9002 {
+		t.Fatalf("followers=%v ports=%v", followers, ports)
+	}
+	if len(next) != 1 || next[0] != windows.HWND(202) {
+		t.Fatalf("next=%v", next)
+	}
+}
+
+func TestPlanSyncSessionTargetsDropsClosedKeepsUnresolvedAlive(t *testing.T) {
+	// A closed follower must be dropped; an alive follower whose frame is
+	// temporarily unresolved keeps its previous target instead of flapping out.
+	byID := map[string]syncProfileCandidate{
+		"master": {profileID: "master", pid: 1, debugPort: 9001, hintHWND: windows.HWND(101)},
+		"gone":   {profileID: "gone", pid: 0},                    // closed
+		"flappy": {profileID: "flappy", pid: 3, debugPort: 9003}, // alive, window unresolved
+	}
+	resolved := map[int]windows.HWND{1: 101}
+	prev := []windows.HWND{windows.HWND(101), 0, windows.HWND(303)}
+	master, followers, ports, next, ok := planSyncSessionTargets("master", []string{"master", "gone", "flappy"}, prev, byID, resolved)
+	if !ok {
+		t.Fatal("session must stay repairable")
+	}
+	if master != windows.HWND(101) {
+		t.Fatalf("master=%v", master)
+	}
+	if len(followers) != 1 || followers[0] != windows.HWND(303) {
+		t.Fatalf("followers=%v want [303]", followers)
+	}
+	if len(ports) != 1 || ports[0] != 9003 {
+		t.Fatalf("ports=%v want [9003]", ports)
+	}
+	if next[1] != 0 || next[2] != windows.HWND(303) {
+		t.Fatalf("next=%v", next)
+	}
+}
+
+func TestPlanSyncSessionTargetsMasterGoneReturnsNotOK(t *testing.T) {
+	byID := map[string]syncProfileCandidate{
+		"master": {profileID: "master", pid: 0},
+	}
+	_, _, _, _, ok := planSyncSessionTargets("master", nil, nil, byID, map[int]windows.HWND{})
+	if ok {
+		t.Fatal("master gone must not repair the session")
+	}
+}
+
 func TestEscapePauseKeepsSessionAndTogglesImmediately(t *testing.T) {
 	s := NewInputSyncer()
 	atomic.StoreInt32(&s.active, 1)
@@ -628,58 +726,5 @@ func TestMainProcessPersistsBrowserRuntimeSnapshot(t *testing.T) {
 	}
 	if len(snapshot.Entries) != 1 || snapshot.Entries[0].ProfileID != "profile-1" || snapshot.Entries[0].PID != 4321 {
 		t.Fatalf("unexpected runtime snapshot: %+v", snapshot)
-	}
-}
-
-func TestPanelSnapshotReplacesProcessLocalRuntimeWithMainClientState(t *testing.T) {
-	currentPID := os.Getpid()
-	root := t.TempDir()
-	app := NewApp(root, true)
-	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
-	app.browserMgr.Profiles["profile-1"] = &browser.Profile{
-		ProfileId: "profile-1",
-		Running:   true,
-		Pid:       currentPID + 100000,
-		DebugPort: 32124,
-	}
-	snapshot := browserRuntimeSnapshot{Entries: []browserRuntimeSnapshotEntry{{
-		ProfileID: "profile-1",
-		PID:       currentPID,
-		DebugPort: 32123,
-	}}}
-	live, total := app.applyBrowserRuntimeSnapshotData(snapshot)
-	if live != 1 || total != 1 {
-		t.Fatalf("unexpected snapshot counts: live=%d total=%d", live, total)
-	}
-	profile := app.browserMgr.Profiles["profile-1"]
-	if profile.Pid != currentPID || profile.DebugPort != 32123 || !profile.Running {
-		t.Fatalf("panel did not inherit main-client runtime: %+v", profile)
-	}
-
-	app.applyBrowserRuntimeSnapshotData(browserRuntimeSnapshot{})
-	if profile.Running || profile.Pid != 0 || profile.DebugPort != 0 {
-		t.Fatalf("an empty main-client snapshot must clear panel runtime state: %+v", profile)
-	}
-}
-
-func TestApplySnapshotCreatesMissingProfileForDenseMultiOpen(t *testing.T) {
-	// Panel may not yet have every profile row when main publishes 100+ runtimes.
-	root := t.TempDir()
-	app := NewApp(root, true)
-	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
-	currentPID := os.Getpid()
-	snap := browserRuntimeSnapshot{Entries: []browserRuntimeSnapshotEntry{{
-		ProfileID:   "missing-profile",
-		ProfileName: "环境-140",
-		PID:         currentPID,
-		DebugPort:   39999,
-	}}}
-	live, total := app.applyBrowserRuntimeSnapshotData(snap)
-	if live != 1 || total != 1 {
-		t.Fatalf("live=%d total=%d", live, total)
-	}
-	p := app.browserMgr.Profiles["missing-profile"]
-	if p == nil || !p.Running || p.Pid != currentPID || p.ProfileName != "环境-140" {
-		t.Fatalf("must upsert ephemeral runtime profile: %+v", p)
 	}
 }
