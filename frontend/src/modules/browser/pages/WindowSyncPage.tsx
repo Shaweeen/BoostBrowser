@@ -18,9 +18,11 @@ import { Button, Input, Select, toast } from '../../../shared/components'
 import { ExitWindowSyncPanel, IsWindowSyncPanelMode } from '../../../wailsjs/go/main/App'
 import { EventsOn, ScreenGetAll, WindowCenter, WindowGetPosition, WindowSetAlwaysOnTop, WindowSetMinSize, WindowSetPosition, WindowSetSize, WindowShow, WindowUnminimise } from '../../../wailsjs/runtime/runtime'
 import {
+  addFollowerToSync,
   getSyncSnapshot,
   getSyncStatus,
   refreshSyncSnapshot,
+  removeFollowerFromSync,
   startInputSync,
   stopInputSync,
   syncTileWindows,
@@ -607,9 +609,61 @@ export function WindowSyncPage() {
     setPanelPresentation('full')
   }
 
+  // Dynamic follower management during active sync
+  const [followerUpdating, setFollowerUpdating] = useState(false)
+
+  const handleAddFollower = async (profileId: string) => {
+    if (followerUpdating) return
+    setFollowerUpdating(true)
+    try {
+      const err = await addFollowerToSync(profileId)
+      if (err) {
+        toast.error(`添加跟随失败：${err}`)
+        return
+      }
+      toast.success('已添加跟随环境')
+      // Refresh status to update the UI
+      const status = await getSyncStatus().catch(() => null)
+      if (status) {
+        setSyncStatus(status)
+      }
+    } finally {
+      setFollowerUpdating(false)
+    }
+  }
+
+  const handleRemoveFollower = async (profileId: string) => {
+    if (followerUpdating) return
+    setFollowerUpdating(true)
+    try {
+      const err = await removeFollowerFromSync(profileId)
+      if (err) {
+        toast.error(`移除跟随失败：${err}`)
+        return
+      }
+      toast.success('已移除跟随环境')
+      // Refresh status to update the UI
+      const status = await getSyncStatus().catch(() => null)
+      if (status) {
+        setSyncStatus(status)
+      }
+    } finally {
+      setFollowerUpdating(false)
+    }
+  }
+
+  // Profiles that can be added as followers (running, not master, not already follower)
+  const availableFollowers = useMemo(() => {
+    if (!isSyncing) return []
+    const followerSet = new Set(syncStatus?.followerIds || [])
+    return displayProfiles.filter(
+      p => p.status === 'running' && p.profileId !== syncStatus?.masterId && !followerSet.has(p.profileId)
+    )
+  }, [displayProfiles, isSyncing, syncStatus?.followerIds, syncStatus?.masterId])
+
   if (minimizedPanelMode) {
     return (
-      <div className="relative flex h-11 w-[136px] items-center overflow-hidden bg-[#f8fafc] px-1.5 shadow-[0_8px_22px_rgba(30,58,110,.18)]">
+      <div className="relative flex h-11 w-[160px] items-center overflow-hidden bg-[#f8fafc] px-1.5 shadow-[0_8px_22px_rgba(30,58,110,.18)]">
         {resumeNoticeVisible && (
           <div className="absolute inset-1 z-20 flex items-center justify-center rounded-[8px] bg-[#16a34a] px-1 text-center text-[9px] font-bold leading-3 text-white shadow-[0_4px_12px_rgba(22,163,74,.3)]">
             同步已恢复
@@ -631,7 +685,13 @@ export function WindowSyncPage() {
         >
           <span className="min-w-0 flex-1">
             <span className="block text-[11px] font-semibold leading-4">同步工具</span>
-            <span className="block truncate text-[8px] leading-3 text-[#738199]">{isSyncPaused ? 'Esc 已暂停' : isSyncing ? `${activeSyncCount} 个同步中` : '点击展开'}</span>
+            <span className="block truncate text-[8px] leading-3 text-[#738199]">
+              {isSyncPaused 
+                ? `已暂停 · ${followerCount}个跟随` 
+                : isSyncing 
+                  ? `${followerCount}个跟随 · ${statusLayoutLabel}` 
+                  : '点击展开'}
+            </span>
           </span>
         </button>
       </div>
@@ -1156,10 +1216,43 @@ export function WindowSyncPage() {
                           <div className="truncate text-sm font-semibold text-[var(--color-text-primary)]">{profile.badgeNumber > 0 ? `#${profile.badgeNumber} · ` : ''}{profile.profileName || profile.profileId}</div>
                           <div className="mt-1 text-xs text-[var(--color-text-muted)]">PID {profile.pid || '-'} · 正在跟随主控输入</div>
                         </div>
+                        <button
+                          type="button"
+                          className="inline-flex h-7 shrink-0 items-center justify-center rounded-lg border border-red-200 bg-red-50 px-2 text-xs font-medium text-red-600 transition hover:bg-red-100 disabled:opacity-50"
+                          onClick={() => void handleRemoveFollower(profile.profileId)}
+                          disabled={followerUpdating}
+                          title="移除此跟随环境"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
                       </div>
                     ))
                   )}
                 </div>
+                {availableFollowers.length > 0 && (
+                  <div className="border-t border-[var(--color-border)] px-4 py-3">
+                    <div className="text-xs font-medium text-[var(--color-text-secondary)] mb-2">添加更多跟随环境</div>
+                    <div className="flex flex-wrap gap-2">
+                      {availableFollowers.slice(0, 5).map(profile => (
+                        <button
+                          key={profile.profileId}
+                          type="button"
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-[var(--color-border)] bg-[var(--color-bg-muted)] px-2.5 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-50"
+                          onClick={() => void handleAddFollower(profile.profileId)}
+                          disabled={followerUpdating}
+                        >
+                          <span className="text-[10px]">+</span>
+                          {profile.badgeNumber > 0 ? `#${profile.badgeNumber}` : (profile.profileName || profile.profileId).slice(0, 8)}
+                        </button>
+                      ))}
+                      {availableFollowers.length > 5 && (
+                        <span className="inline-flex items-center px-2 text-xs text-[var(--color-text-muted)]">
+                          +{availableFollowers.length - 5} 更多
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           ) : (
@@ -1235,16 +1328,57 @@ export function WindowSyncPage() {
               </div>
             ) : null}
 
-            {isSyncing && followerProfiles.length > 0 && !compactRunningMode ? (
+            {isSyncing && !compactRunningMode ? (
               <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-4 py-4">
-                <div className="text-sm font-semibold text-[var(--color-text-primary)]">当前跟随列表</div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {followerProfiles.map(profile => (
-                    <span key={profile.profileId} className="inline-flex max-w-full items-center rounded-full bg-[#eefbf3] px-3 py-1 text-xs font-medium text-[#2c9c59]">
-                      <span className="truncate">{profile.profileName || profile.profileId}</span>
-                    </span>
-                  ))}
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold text-[var(--color-text-primary)]">当前跟随列表</div>
+                  <div className="rounded-full bg-[#eefbf3] px-2.5 py-1 text-xs font-semibold text-[#2c9c59]">{followerCount} 个</div>
                 </div>
+                {followerProfiles.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {followerProfiles.map(profile => (
+                      <span key={profile.profileId} className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-[#eefbf3] px-3 py-1 text-xs font-medium text-[#2c9c59]">
+                        <span className="truncate">{profile.profileName || profile.profileId}</span>
+                        <button
+                          type="button"
+                          className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-500 transition hover:bg-red-200 disabled:opacity-50"
+                          onClick={() => void handleRemoveFollower(profile.profileId)}
+                          disabled={followerUpdating}
+                          title="移除此跟随环境"
+                        >
+                          <X className="h-2.5 w-2.5" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {followerProfiles.length === 0 && (
+                  <div className="mt-2 text-xs text-[var(--color-text-muted)]">暂无跟随环境</div>
+                )}
+                {availableFollowers.length > 0 && (
+                  <div className="mt-3 border-t border-[var(--color-border)] pt-3">
+                    <div className="text-xs font-medium text-[var(--color-text-secondary)] mb-2">添加更多跟随环境</div>
+                    <div className="flex flex-wrap gap-2">
+                      {availableFollowers.slice(0, 8).map(profile => (
+                        <button
+                          key={profile.profileId}
+                          type="button"
+                          className="inline-flex items-center gap-1.5 rounded-full border border-dashed border-[var(--color-border)] bg-[var(--color-bg-muted)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-50"
+                          onClick={() => void handleAddFollower(profile.profileId)}
+                          disabled={followerUpdating}
+                        >
+                          <span className="text-[10px]">+</span>
+                          {profile.badgeNumber > 0 ? `#${profile.badgeNumber}` : (profile.profileName || profile.profileId).slice(0, 10)}
+                        </button>
+                      ))}
+                      {availableFollowers.length > 8 && (
+                        <span className="inline-flex items-center px-2 text-xs text-[var(--color-text-muted)]">
+                          +{availableFollowers.length - 8} 更多
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : null}
 

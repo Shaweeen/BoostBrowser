@@ -671,11 +671,12 @@ type BrowserCoreExtendedInfo = browser.CoreExtendedInfo
 // 浏览器配置 API
 // ============================================================================
 
-// BrowserProfileList 获取所有实例列表
+// BrowserProfileList 获取所有实例列表。
+// 运行时状态由启动时的 watchdog 恢复 + 环境 start/stop 事件 + 显式
+// RefreshBrowserRuntimeState（见 browser_runtime_recovery_windows.go）维护；
+// 这里不再做全系统进程扫描，否则每次列表加载/窗口聚焦/生命周期事件都会
+// 触发一次 PowerShell CIM + 窗口枚举，环境越多界面越卡。
 func (a *App) BrowserProfileList() []BrowserProfile {
-	if !a.panelMode {
-		a.reconcileBrowserRuntimeStateOnce()
-	}
 	return a.browserMgr.List()
 }
 

@@ -39,6 +39,32 @@ let mockProxies: BrowserProxy[] = []
 // Profile API
 // ============================================================================
 
+/**
+ * Explicitly re-scan the system for still-running browser instances and take
+ * them over (watchdog-restart recovery / manual refresh). The ordinary profile
+ * list deliberately does NOT do this on every load — that used to trigger a
+ * full PowerShell process scan on every focus/visibility/lifecycle event.
+ */
+export async function refreshBrowserRuntimeState(): Promise<boolean> {
+  const bindings: any = await getBindings()
+  if (bindings?.RefreshBrowserRuntimeState) {
+    try {
+      return (await bindings.RefreshBrowserRuntimeState()) === true
+    } catch {
+      return false
+    }
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.RefreshBrowserRuntimeState) {
+    try {
+      return (await goApp.RefreshBrowserRuntimeState()) === true
+    } catch {
+      return false
+    }
+  }
+  return false
+}
+
 export async function fetchBrowserProfiles(): Promise<BrowserProfile[]> {
   const bindings: any = await getBindings()
   if (bindings?.BrowserProfileList) {

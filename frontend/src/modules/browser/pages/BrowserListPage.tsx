@@ -16,6 +16,7 @@ import {
   copyBrowserProfile,
   deleteBrowserCore,
   deleteBrowserProfile,
+  refreshBrowserRuntimeState,
   fetchBrowserCores,
   fetchBrowserProfiles,
   fetchBrowserProxies,
@@ -1395,7 +1396,18 @@ export function BrowserListPage() {
         </div>
         <div className="flex gap-2">
           <Button variant="secondary" size="sm" onClick={() => setHeaderCollapsed(prev => !prev)}>{headerCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}{headerCollapsed ? '展开面板' : '收起面板'}</Button>
-          <Button variant="secondary" size="sm" onClick={() => { void loadProfiles() }}><RefreshCw className="w-4 h-4" />刷新</Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={async () => {
+              // 显式重新扫描系统进程并接管仍在运行的实例，然后刷新列表。
+              const recovered = await refreshBrowserRuntimeState()
+              if (recovered) toast.success('已接管仍在运行的浏览器实例')
+              await loadProfiles()
+            }}
+          >
+            <RefreshCw className="w-4 h-4" />刷新
+          </Button>
           <Button variant="secondary" size="sm" onClick={handleCleanCache} loading={cleaningCache} title="只清理可再生缓存和调试日志；保留 Cookies、登录状态、钱包扩展数据、指纹和配置">
             <Trash2 className="w-4 h-4" />清理缓存
           </Button>

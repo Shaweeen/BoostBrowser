@@ -257,6 +257,23 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 
 	// Integrity complete / hot-settled: zero CLI and never touch user sessions.
 	assignmentComplete := isExtensionAssignmentComplete(userDataDir, sanitizedProfileLaunchArgs)
+	// Scheme A 注册兜底：仍需要 CLI 注入的包（注册缺失）先补写 Preferences
+	// unpacked 注册，Chrome 从 profile 加载扩展，不再每次触发
+	// onInstalled(install) 弹扩展欢迎页。仅在环境未运行（冷启动）且非钱包
+	// 批量导入启动时执行；注册成功后重新评估，能剥离 CLI 就剥离。
+	if !allowRabbyImport && !hotSettled && len(needingInject) > 0 {
+		if registered := a.registerAssignedExtensionsIntoProfile(userDataDir, needingInject); registered > 0 {
+			needingInject = loadExtensionDirsNeedingInject(userDataDir, sanitizedProfileLaunchArgs)
+			hotSettled = isEnvironmentHotStartSettled(userDataDir, sanitizedProfileLaunchArgs)
+			assignmentComplete = isExtensionAssignmentComplete(userDataDir, sanitizedProfileLaunchArgs)
+			if hotSettled {
+				log.Info("补写注册后转为热启动：本次不再注入扩展，避免每次启动弹扩展主页",
+					logger.F("profile_id", profileId),
+					logger.F("registered", registered),
+				)
+			}
+		}
+	}
 	// Preferences sanitize + one-time session wipe run ONLY on non-hot starts.
 	// Hot-settled environments must not have their Preferences rewritten on every
 	// open (that touches user data and re-arms session restore each time).
@@ -677,6 +694,13 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			// registry so the assistant and tile prefer it instead of re-guessing
 			// from window heuristics (avoids tiling a wallet/OAuth popup).
 			a.publishProfileRuntimeSnapshotAsync(profileId, profile.Pid)
+			// 扩展自动页兜底清扫：分配了扩展的普通启动，关闭扩展在启动时自动
+			// 打开的欢迎/解锁/通知页，保持单一空白初始页。钱包批量导入启动
+			// （allowRabbyImport）需要扩展页面完成导入，跳过。
+			if assignmentFP != "" && !allowRabbyImport {
+				cleanupLaunchArgs := append([]string{}, sanitizedProfileLaunchArgs...)
+				go closeAssignedExtensionAutoPagesAfterStart(stableDebugPort, cleanupLaunchArgs)
+			}
 
 			// crashprobe: 临时停用实例启动后的 Turnstile 自动点击监控，继续收缩每实例后台
 			// CDP 监控/注入链路，验证是否仍会出现 watchdog exit_code=2。

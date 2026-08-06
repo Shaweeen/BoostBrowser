@@ -510,18 +510,21 @@ func (a *App) backupStopRuntimeForMaintenance() {
 }
 
 func (a *App) backupReloadAfterMutation() error {
-	if err := a.ReloadConfig(); err != nil {
-		return err
-	}
-
+	// 导入/重置会重建数据库与文件树，内存中的旧环境 map 必须先丢弃：
+	// ReloadConfig 内部的 reconcileProfileProxyBindings 会遍历 Profiles 并在
+	// 代理绑定变化时 SaveProfiles，若在清空前执行，resetFirst 场景会把旧环境
+	// 重新写回刚清空的数据库，导致导入结果被旧数据污染。
 	if a.browserMgr != nil {
-		a.browserMgr.Config = a.config
 		a.browserMgr.Mutex.Lock()
 		a.browserMgr.Profiles = make(map[string]*browser.Profile)
 		a.browserMgr.BrowserProcesses = make(map[string]*exec.Cmd)
 		a.browserMgr.XrayBridges = make(map[string]*browser.XrayBridge)
 		a.browserMgr.Mutex.Unlock()
 	}
+	if err := a.ReloadConfig(); err != nil {
+		return err
+	}
+
 	if a.xrayMgr != nil {
 		a.xrayMgr.Config = a.config
 	}
@@ -535,6 +538,9 @@ func (a *App) backupReloadAfterMutation() error {
 	a.migrateToSQLite()
 	if a.browserMgr != nil {
 		a.browserMgr.InitData()
+		// ReloadConfig 内部的代理绑定修复作用在空 map 上，这里对新加载的数据
+		// 再做一次幂等修复，保持“重载后绑定对齐”的原有语义。
+		a.reconcileProfileProxyBindings()
 	}
 	a.autoDetectCores()
 	a.loadProxies()

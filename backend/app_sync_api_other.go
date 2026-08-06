@@ -18,3 +18,18 @@ func (a *App) RefreshSyncSnapshot() SyncSnapshot {
 		Generation: 0,
 	}
 }
+
+// AddFollowerToSync is a no-op outside Windows.
+func (a *App) AddFollowerToSync(profileId string) error {
+	return nil
+}
+
+// RemoveFollowerFromSync is a no-op outside Windows.
+func (a *App) RemoveFollowerFromSync(profileId string) error {
+	return nil
+}
+
+// GetSyncFollowerIds returns nil outside Windows.
+func (a *App) GetSyncFollowerIds() []string {
+	return nil
+}

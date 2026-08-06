@@ -38,7 +38,6 @@ const TagManagementPage = lazyNamed(() => import('./modules/browser/pages/TagMan
 import { UpdateChecker } from './modules/updater/UpdateChecker'
 const WindowSyncPage = lazyNamed(() => import('./modules/browser/pages/WindowSyncPage'), 'WindowSyncPage')
 const ExtensionManagementPage = lazyNamed(() => import('./modules/browser/pages/ExtensionManagementPage'), 'ExtensionManagementPage')
-const AutomationPage = lazyNamed(() => import('./modules/browser/pages/AutomationPage'), 'AutomationPage')
 const UsageTutorialPage = lazyNamed(() => import('./modules/browser/pages/UsageTutorialPage'), 'UsageTutorialPage')
 const QuickLaunchModal = lazyNamed(() => import('./modules/browser/components/QuickLaunchModal'), 'QuickLaunchModal')
 
@@ -726,7 +725,8 @@ function App() {
                   <Route path="/browser/proxy-pool" element={<ProxyPoolPage />} />
                   <Route path="/browser/cores" element={<CoreManagementPage />} />
                   <Route path="/browser/bookmarks" element={<BookmarkSettingsPage />} />
-                  <Route path="/browser/automation" element={<AutomationPage />} />
+                  {/* Old experimental automation page was superseded by the full API docs (LaunchApiDocsPage). */}
+                  <Route path="/browser/automation" element={<Navigate to="/browser/launch-api" replace />} />
                   <Route path="/browser/launch-api" element={<LaunchApiDocsPage />} />
                   <Route path="/browser/tags" element={<TagManagementPage />} />
                   <Route path="/browser/sync" element={<Navigate to="/browser/list" replace />} />

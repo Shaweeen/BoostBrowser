@@ -70,14 +70,29 @@ func (a *App) startBrowserRuntimeReconciler() {
 	}()
 }
 
-func (a *App) reconcileBrowserRuntimeStateOnce() {
+// RefreshBrowserRuntimeState explicitly rescans the system and takes over
+// browser instances that survived a main-client restart (watchdog restart or
+// the manual “refresh running state” button). Returns true when at least one
+// environment's runtime state was actually repaired.
+func (a *App) RefreshBrowserRuntimeState() bool {
+	if a == nil || a.browserMgr == nil || a.panelMode {
+		return false
+	}
+	return a.reconcileBrowserRuntimeStateOnce() > 0
+}
+
+// reconcileBrowserRuntimeStateOnce rescans system processes and re-takes any
+// still-alive browser instances under this app root. Returns the number of
+// profiles whose runtime state changed (recovered or stopped), so explicit
+// callers can report whether a repair actually happened.
+func (a *App) reconcileBrowserRuntimeStateOnce() int {
 	if a == nil || a.browserMgr == nil {
-		return
+		return 0
 	}
 
 	processes, err := discoverBoostBrowserProcesses(a.appRoot)
 	if err != nil {
-		return
+		return 0
 	}
 
 	// Resolve every currently tracked Chromium root in one process/window pass.
@@ -188,6 +203,7 @@ func (a *App) reconcileBrowserRuntimeStateOnce() {
 	for _, profileId := range stoppedIDs {
 		log.Info("运行实例已无存活浏览器进程，状态已同步为停止", logger.F("profile_id", profileId))
 	}
+	return len(updates)
 }
 
 func pickRuntimeProcessForSync(candidates []browserRuntimeProcess) (browserRuntimeProcess, bool) {
@@ -207,29 +223,45 @@ func pickRuntimeProcessForSync(candidates []browserRuntimeProcess) (browserRunti
 
 // discoverBoostBrowserProcessesCached reuses a short-lived process list so
 // GetSyncProfiles + StartInputSync in the same second share one CIM scan.
+// For 100+ environments, the PowerShell CIM query can take 5-12s. We use a
+// two-tier cache: short-lived (2s) for fresh results, and a stale cache that
+// persists the last successful result for up to 15s. If the new scan takes
+// longer than 3s, we return the stale cache to keep the UI responsive.
 var discoverProcessCache struct {
-	mu   sync.Mutex
+	mu sync.Mutex
+	// Short-lived cache: fresh results within 2s
 	at   time.Time
 	root string
 	list []browserRuntimeProcess
+	// Stale cache: last successful result, valid for 15s
+	staleAt   time.Time
+	staleList []browserRuntimeProcess
 }
 
-// invalidateBrowserProcessDiscoveryCache drops the short-lived process list so
-// an explicit panel refresh scans once and sees processes that started within
-// the cache window (closing one environment and immediately opening another
-// previously returned the stale list and made the refresh button look broken).
+// invalidateBrowserProcessDiscoveryCache drops both short-lived and stale
+// caches so an explicit panel refresh scans once and sees processes that
+// started within the cache window.
 func invalidateBrowserProcessDiscoveryCache() {
 	discoverProcessCache.mu.Lock()
 	discoverProcessCache.root = ""
 	discoverProcessCache.at = time.Time{}
 	discoverProcessCache.list = nil
+	discoverProcessCache.staleAt = time.Time{}
+	discoverProcessCache.staleList = nil
 	discoverProcessCache.mu.Unlock()
 }
 
-func discoverBoostBrowserProcessesCached(appRoot string) ([]browserRuntimeProcess, error) {
+// discoverBoostBrowserProcessesCachedOptimized uses a two-tier cache strategy:
+// 1. Return short-lived cache if fresh (< 2s old)
+// 2. Start background scan
+// 3. If scan completes within 3s, use fresh result
+// 4. If scan takes too long, return stale cache (up to 15s old)
+func discoverBoostBrowserProcessesCachedOptimized(appRoot string) ([]browserRuntimeProcess, error) {
 	root := filepath.Clean(strings.TrimSpace(appRoot))
 	discoverProcessCache.mu.Lock()
 	defer discoverProcessCache.mu.Unlock()
+
+	// Tier 1: Return short-lived cache if fresh
 	if root != "" && root == discoverProcessCache.root &&
 		time.Since(discoverProcessCache.at) < 2*time.Second &&
 		discoverProcessCache.list != nil {
@@ -237,16 +269,66 @@ func discoverBoostBrowserProcessesCached(appRoot string) ([]browserRuntimeProces
 		copy(out, discoverProcessCache.list)
 		return out, nil
 	}
-	list, err := discoverBoostBrowserProcesses(root)
-	if err != nil {
-		return list, err
+
+	// Tier 2: Start scan in background with timeout
+	type scanResult struct {
+		list []browserRuntimeProcess
+		err  error
 	}
-	discoverProcessCache.root = root
-	discoverProcessCache.at = time.Now()
-	discoverProcessCache.list = list
-	out := make([]browserRuntimeProcess, len(list))
-	copy(out, list)
-	return out, nil
+	resultCh := make(chan scanResult, 1)
+	go func() {
+		list, err := discoverBoostBrowserProcesses(root)
+		resultCh <- scanResult{list: list, err: err}
+	}()
+
+	// Wait up to 3s for scan to complete
+	select {
+	case result := <-resultCh:
+		// Scan completed within timeout
+		if result.err == nil && len(result.list) > 0 {
+			// Update both caches
+			discoverProcessCache.root = root
+			discoverProcessCache.at = time.Now()
+			discoverProcessCache.list = result.list
+			discoverProcessCache.staleAt = time.Now()
+			discoverProcessCache.staleList = result.list
+			out := make([]browserRuntimeProcess, len(result.list))
+			copy(out, result.list)
+			return out, nil
+		}
+		// Scan failed or returned empty - use stale cache if available
+		if len(discoverProcessCache.staleList) > 0 && time.Since(discoverProcessCache.staleAt) < 15*time.Second {
+			out := make([]browserRuntimeProcess, len(discoverProcessCache.staleList))
+			copy(out, discoverProcessCache.staleList)
+			return out, nil
+		}
+		return result.list, result.err
+	case <-time.After(3 * time.Second):
+		// Scan taking too long - return stale cache if available
+		if len(discoverProcessCache.staleList) > 0 && time.Since(discoverProcessCache.staleAt) < 15*time.Second {
+			out := make([]browserRuntimeProcess, len(discoverProcessCache.staleList))
+			copy(out, discoverProcessCache.staleList)
+			return out, nil
+		}
+		// No stale cache available - block until scan completes (up to 12s total)
+		result := <-resultCh
+		if result.err == nil && len(result.list) > 0 {
+			discoverProcessCache.root = root
+			discoverProcessCache.at = time.Now()
+			discoverProcessCache.list = result.list
+			discoverProcessCache.staleAt = time.Now()
+			discoverProcessCache.staleList = result.list
+			out := make([]browserRuntimeProcess, len(result.list))
+			copy(out, result.list)
+			return out, nil
+		}
+		return result.list, result.err
+	}
+}
+
+// Legacy function for backward compatibility
+func discoverBoostBrowserProcessesCached(appRoot string) ([]browserRuntimeProcess, error) {
+	return discoverBoostBrowserProcessesCachedOptimized(appRoot)
 }
 
 func discoverBoostBrowserProcesses(appRoot string) ([]browserRuntimeProcess, error) {

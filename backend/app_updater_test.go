@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -54,6 +55,23 @@ func TestIsWindowsPEFile(t *testing.T) {
 	}
 	if !isWindowsPEFile(valid) || isWindowsPEFile(invalid) || isWindowsPEFile(filepath.Join(dir, "missing.exe")) {
 		t.Fatal("PE header validation returned an unexpected result")
+	}
+}
+
+func TestPrepareApplyUpdateQuitUnblocksCloseFlow(t *testing.T) {
+	app := NewApp(t.TempDir())
+	app.prepareApplyUpdateQuit()
+
+	if !app.forceQuit {
+		t.Fatal("apply-update 必须设置 forceQuit，否则 Windows OnBeforeClose 会拦截 runtime.Quit")
+	}
+	if app.quitMode != quitModeFull {
+		t.Fatalf("apply-update 应使用 quitModeFull，got %v", app.quitMode)
+	}
+	// 设置 forceQuit 后，关闭流程必须放行：updater 在等待主进程退出替换 exe，
+	// 若被关闭确认框拦截，主程序不退出，updater 只能等 30s 强杀，升级卡住。
+	if ShouldBlockClose(app, context.Background()) {
+		t.Fatal("apply-update 后 ShouldBlockClose 必须放行")
 	}
 }
 

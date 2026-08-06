@@ -192,3 +192,56 @@ export async function syncCloseAll(profileIds: string[]): Promise<string[]> {
   }
   return []
 }
+
+// ============================================================================
+// Dynamic follower management (hot-add/remove during active sync)
+// ============================================================================
+
+/**
+ * Add a follower environment to an active sync session.
+ * The syncer will immediately start dispatching input to the new follower.
+ */
+export async function addFollowerToSync(profileId: string): Promise<string | null> {
+  const bindings: any = await getBindings()
+  if (bindings?.AddFollowerToSync) {
+    try {
+      await bindings.AddFollowerToSync(profileId)
+      return null
+    } catch (e: any) {
+      return e?.message || String(e)
+    }
+  }
+  return 'Wails 绑定不可用'
+}
+
+/**
+ * Remove a follower environment from an active sync session.
+ * The syncer will stop dispatching input to the removed follower.
+ */
+export async function removeFollowerFromSync(profileId: string): Promise<string | null> {
+  const bindings: any = await getBindings()
+  if (bindings?.RemoveFollowerFromSync) {
+    try {
+      await bindings.RemoveFollowerFromSync(profileId)
+      return null
+    } catch (e: any) {
+      return e?.message || String(e)
+    }
+  }
+  return 'Wails 绑定不可用'
+}
+
+/**
+ * Get the list of follower profile IDs in the current sync session.
+ */
+export async function getSyncFollowerIds(): Promise<string[]> {
+  const bindings: any = await getBindings()
+  if (bindings?.GetSyncFollowerIds) {
+    try {
+      return (await bindings.GetSyncFollowerIds()) || []
+    } catch {
+      return []
+    }
+  }
+  return []
+}

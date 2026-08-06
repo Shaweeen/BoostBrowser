@@ -1211,3 +1211,226 @@ func (a *App) SyncCloseAll(profileIds []string) []string {
 	wg.Wait()
 	return closed
 }
+
+// ============================================================================
+// 动态增减跟随环境（运行中同步会话热修改）
+// ============================================================================
+
+// AddFollowerToSync 向运行中的同步会话添加一个跟随环境。
+// 返回 error 表示添加失败（环境未运行、已是主控等）。
+func (a *App) AddFollowerToSync(profileId string) error {
+	if !a.panelMode {
+		return fmt.Errorf("动态增减只能在同步面板中操作")
+	}
+	return a.addFollowerToSyncLocal(profileId)
+}
+
+func (a *App) addFollowerToSyncLocal(profileId string) error {
+	syncSessionMu.Lock()
+	defer syncSessionMu.Unlock()
+	log := logger.New("SyncAPI")
+
+	profileId = strings.TrimSpace(profileId)
+	if profileId == "" {
+		return fmt.Errorf("环境 ID 不能为空")
+	}
+
+	// 获取当前同步状态（一次性读取，避免竞态）
+	syncState.mu.Lock()
+	if !syncState.active || syncState.syncer == nil {
+		syncState.mu.Unlock()
+		return fmt.Errorf("同步未启动")
+	}
+	masterId := strings.TrimSpace(syncState.masterId)
+	followerIds := append([]string(nil), syncState.followerIds...)
+	syncState.mu.Unlock()
+
+	if profileId == masterId {
+		return fmt.Errorf("主控环境不能同时作为跟随者")
+	}
+
+	// 检查是否已在跟随列表
+	for _, fid := range followerIds {
+		if fid == profileId {
+			return fmt.Errorf("环境 %s 已在跟随列表中", profileId)
+		}
+	}
+
+	// 查找环境并验证状态
+	a.browserMgr.Mutex.Lock()
+	profile, ok := a.browserMgr.Profiles[profileId]
+	if !ok || profile == nil {
+		a.browserMgr.Mutex.Unlock()
+		return fmt.Errorf("未找到环境：%s", profileId)
+	}
+	if !profile.Running || profile.Pid <= 0 {
+		a.browserMgr.Mutex.Unlock()
+		return fmt.Errorf("环境 %s 未在运行", profileId)
+	}
+	profileSnapshot := *profile
+	a.browserMgr.Mutex.Unlock()
+
+	// 解析窗口句柄
+	resolvedWindows := findProcessTreeWindows([]int{profileSnapshot.Pid})
+	hwnd := resolvedWindows[profileSnapshot.Pid]
+	if hwnd == 0 {
+		if snapshot, ok := a.readBrowserRuntimeSnapshot(); ok {
+			for _, snapEntry := range snapshot.Entries {
+				if snapEntry.ProfileID == profileId {
+					hwnd = validRuntimeSnapshotWindow(snapEntry)
+					break
+				}
+			}
+		}
+	}
+	if hwnd == 0 {
+		return fmt.Errorf("未找到环境 %s 的窗口", profileId)
+	}
+
+	// 原子更新同步状态：一次性获取锁，完成所有更新
+	syncState.mu.Lock()
+	// 再次检查状态（可能在等待锁期间被其他操作修改）
+	if !syncState.active || syncState.syncer == nil {
+		syncState.mu.Unlock()
+		return fmt.Errorf("同步已停止")
+	}
+	// 再次检查是否已存在（避免竞态）
+	for _, fid := range syncState.followerIds {
+		if fid == profileId {
+		syncState.mu.Unlock()
+			return fmt.Errorf("环境 %s 已在跟随列表中", profileId)
+		}
+	}
+	syncState.followerIds = append(syncState.followerIds, profileId)
+	syncState.followerTargets = append(syncState.followerTargets, hwnd)
+	// 构建新的 follower HWNDs 和 ports
+	newFollowerIds := append([]string(nil), syncState.followerIds...)
+	syncState.mu.Unlock()
+
+	// 重建 follower HWNDs 和 ports
+	followerHwnds := make([]windows.HWND, 0, len(newFollowerIds))
+	followerPorts := make([]int, 0, len(newFollowerIds))
+	a.browserMgr.Mutex.Lock()
+	for _, fid := range newFollowerIds {
+		if fid == masterId {
+			continue
+		}
+		fp, ok := a.browserMgr.Profiles[fid]
+		if !ok || fp == nil || !fp.Running || fp.Pid <= 0 {
+			continue
+		}
+		resolved := findProcessTreeWindows([]int{fp.Pid})
+		fHwnd := resolved[fp.Pid]
+		if fHwnd == 0 {
+			continue
+		}
+		followerHwnds = append(followerHwnds, fHwnd)
+		followerPorts = append(followerPorts, fp.DebugPort)
+	}
+	a.browserMgr.Mutex.Unlock()
+
+	// 更新同步器目标
+	curMaster, _, _ := syncState.syncer.CurrentTargets()
+	syncState.syncer.ReplaceWindowTargets(curMaster, followerHwnds, followerPorts)
+
+	atomic.AddUint64(&syncSnapshotGeneration, 1)
+	log.Info("已添加跟随环境",
+		logger.F("profile_id", profileId),
+		logger.F("total_followers", fmt.Sprintf("%d", len(newFollowerIds)-1)),
+	)
+	return nil
+}
+
+// RemoveFollowerFromSync 从运行中的同步会话移除一个跟随环境。
+func (a *App) RemoveFollowerFromSync(profileId string) error {
+	if !a.panelMode {
+		return fmt.Errorf("动态增减只能在同步面板中操作")
+	}
+	return a.removeFollowerFromSyncLocal(profileId)
+}
+
+func (a *App) removeFollowerFromSyncLocal(profileId string) error {
+	syncSessionMu.Lock()
+	defer syncSessionMu.Unlock()
+	log := logger.New("SyncAPI")
+
+	profileId = strings.TrimSpace(profileId)
+	if profileId == "" {
+		return fmt.Errorf("环境 ID 不能为空")
+	}
+
+	// 原子更新同步状态：一次性获取锁，完成查找和更新
+	syncState.mu.Lock()
+	if !syncState.active || syncState.syncer == nil {
+		syncState.mu.Unlock()
+		return fmt.Errorf("同步未启动")
+	}
+	masterId := strings.TrimSpace(syncState.masterId)
+	oldFollowerIds := syncState.followerIds
+	oldFollowerTargets := syncState.followerTargets
+
+	// 查找并移除
+	found := false
+	newFollowerIds := make([]string, 0, len(oldFollowerIds))
+	newTargets := make([]windows.HWND, 0, len(oldFollowerIds))
+	for i, fid := range oldFollowerIds {
+		if fid == profileId {
+			found = true
+			continue
+		}
+		newFollowerIds = append(newFollowerIds, fid)
+		if i < len(oldFollowerTargets) {
+			newTargets = append(newTargets, oldFollowerTargets[i])
+		}
+	}
+	if !found {
+		syncState.mu.Unlock()
+		return fmt.Errorf("环境 %s 不在跟随列表中", profileId)
+	}
+	syncState.followerIds = newFollowerIds
+	syncState.followerTargets = newTargets
+	syncState.mu.Unlock()
+
+	// 重建 follower HWNDs 和 ports
+	followerHwnds := make([]windows.HWND, 0, len(newFollowerIds))
+	followerPorts := make([]int, 0, len(newFollowerIds))
+	a.browserMgr.Mutex.Lock()
+	for _, fid := range newFollowerIds {
+		if fid == masterId {
+			continue
+		}
+		fp, ok := a.browserMgr.Profiles[fid]
+		if !ok || fp == nil || !fp.Running || fp.Pid <= 0 {
+			continue
+		}
+		resolved := findProcessTreeWindows([]int{fp.Pid})
+		fHwnd := resolved[fp.Pid]
+		if fHwnd == 0 {
+			continue
+		}
+		followerHwnds = append(followerHwnds, fHwnd)
+		followerPorts = append(followerPorts, fp.DebugPort)
+	}
+	a.browserMgr.Mutex.Unlock()
+
+	// 更新同步器目标
+	curMaster, _, _ := syncState.syncer.CurrentTargets()
+	syncState.syncer.ReplaceWindowTargets(curMaster, followerHwnds, followerPorts)
+
+	atomic.AddUint64(&syncSnapshotGeneration, 1)
+	log.Info("已移除跟随环境",
+		logger.F("profile_id", profileId),
+		logger.F("total_followers", fmt.Sprintf("%d", len(newFollowerIds))),
+	)
+	return nil
+}
+
+// GetSyncFollowerIds 获取当前同步会话中的跟随环境 ID 列表
+func (a *App) GetSyncFollowerIds() []string {
+	syncState.mu.Lock()
+	defer syncState.mu.Unlock()
+	if !syncState.active {
+		return nil
+	}
+	return append([]string(nil), syncState.followerIds...)
+}

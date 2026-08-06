@@ -426,6 +426,10 @@ export function GetRunningInstances() {
   return window['go']['main']['App']['GetRunningInstances']();
 }
 
+export function RefreshBrowserRuntimeState() {
+  return window['go']['main']['App']['RefreshBrowserRuntimeState']();
+}
+
 export function GetSyncProfiles() {
   return window['go']['main']['App']['GetSyncProfiles']();
 }
@@ -568,6 +572,18 @@ export function UpdateSyncConfig(arg1, arg2) {
 
 export function UpdateSyncRandomDelay(arg1, arg2, arg3) {
   return window['go']['main']['App']['UpdateSyncRandomDelay'](arg1, arg2, arg3);
+}
+
+export function AddFollowerToSync(arg1) {
+  return window['go']['main']['App']['AddFollowerToSync'](arg1);
+}
+
+export function RemoveFollowerFromSync(arg1) {
+  return window['go']['main']['App']['RemoveFollowerFromSync'](arg1);
+}
+
+export function GetSyncFollowerIds() {
+  return window['go']['main']['App']['GetSyncFollowerIds']();
 }
 
 export function ValidateProxyConfig(arg1, arg2) {

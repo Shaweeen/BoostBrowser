@@ -486,10 +486,7 @@ func (a *App) ApplyUpdate(newExePath string) error {
 
 	// 清理可能残留的成功标记
 	_ = os.Remove(a.resolveAppPath(filepath.Join("data", successMarker)))
-	// 本次退出是为了交给 updater 替换主程序，不是崩溃。提前写 intentional-exit，
-	// 避免常驻 watchdog 在 updater 替换窗口期把旧进程重新拉起，和新版启动/marker
-	// 检测互相竞争，最终被误判失败并回滚。
-	a.markIntentionalExit("apply-update")
+	a.prepareApplyUpdateQuit()
 
 	pid := os.Getpid()
 	cmd := exec.Command(updaterPath, strconv.Itoa(pid), currentExe, newExePath)
@@ -529,6 +526,16 @@ func (a *App) ApplyUpdate(newExePath string) error {
 		os.Exit(0)
 	}()
 	return nil
+}
+
+// prepareApplyUpdateQuit 把本次退出标记为交给 updater 的受控退出：
+//  1. intentional-exit 标记阻止 watchdog 在 updater 替换窗口期把旧进程重新拉起；
+//  2. forceQuit + quitModeFull 放行 Windows OnBeforeClose 拦截——否则 runtime.Quit
+//     会被关闭确认框挡住，主程序不退出，updater 只能等 30 秒后强杀（升级卡住、
+//     且浏览器数据无法被正常关闭）。
+func (a *App) prepareApplyUpdateQuit() {
+	a.markIntentionalExit("apply-update")
+	a.setQuitMode(quitModeFull)
 }
 
 // WriteUpdateSuccessMarker 升级后第一次启动时调用，告诉 updater 升级成功

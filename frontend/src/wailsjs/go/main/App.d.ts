@@ -214,7 +214,9 @@ export function GetLogLevel():Promise<string>;
 
 export function GetMemoryStats():Promise<Record<string, any>>;
 
-export function GetRunningInstances():Promise<Array<browser.Profile>>;export function GetSyncProfiles():Promise<Array<backend.SyncProfileInfo>>;
+export function GetRunningInstances():Promise<Array<browser.Profile>>;
+export function RefreshBrowserRuntimeState():Promise<boolean>;
+export function GetSyncProfiles():Promise<Array<backend.SyncProfileInfo>>;
 export function GetSyncSnapshot():Promise<backend.SyncSnapshot>;
 export function RefreshSyncSnapshot():Promise<backend.SyncSnapshot>;
 export function GetSyncStatus():Promise<Record<string, any>>;
@@ -281,6 +283,12 @@ export function UpdateGroup(arg1:string,arg2:browser.GroupInput):Promise<browser
 
 export function UpdateSyncConfig(arg1:boolean,arg2:boolean):Promise<void>;
 export function UpdateSyncRandomDelay(arg1:boolean,arg2:number,arg3:number):Promise<void>;
+
+export function AddFollowerToSync(arg1:string):Promise<void>;
+
+export function RemoveFollowerFromSync(arg1:string):Promise<void>;
+
+export function GetSyncFollowerIds():Promise<Array<string>>;
 
 export function ValidateProxyConfig(arg1:string,arg2:string):Promise<backend.ProxyValidationResult>;
 
