@@ -46,3 +46,7 @@ config.yaml.bak*
 # (profile UUID folders with .boost-browser-import-cookies.json).
 # Real environment data must live under the app data root, never backend/.
 backend/*-*-*-*-*/
+
+# config.yaml written by Go tests running with the backend package as CWD.
+# The real client config lives at the app root (config.yaml / config.public.yaml).
+backend/config.yaml

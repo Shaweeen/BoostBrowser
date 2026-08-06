@@ -27,14 +27,15 @@ type extensionIntegrityMarker struct {
 
 // ExtensionIntegrityScanResult is returned by the one-shot client-open scan.
 type ExtensionIntegrityScanResult struct {
-	TotalProfiles      int      `json:"totalProfiles"`
-	Complete           int      `json:"complete"`
-	Incomplete         int      `json:"incomplete"`
-	Repaired           int      `json:"repaired"`
-	SkippedRunning     int      `json:"skippedRunning"`
-	IncompleteIDs      []string `json:"incompleteIds"`
-	Message            string   `json:"message"`
-	AlreadyScanned     bool     `json:"alreadyScanned"`
+	TotalProfiles       int      `json:"totalProfiles"`
+	Complete            int      `json:"complete"`
+	Incomplete          int      `json:"incomplete"`
+	Repaired            int      `json:"repaired"`
+	SkippedRunning      int      `json:"skippedRunning"`
+	IncompleteIDs       []string `json:"incompleteIds"`
+	DismissedIncomplete int      `json:"dismissedIncomplete"`
+	Message             string   `json:"message"`
+	AlreadyScanned      bool     `json:"alreadyScanned"`
 }
 
 var (
@@ -226,6 +227,8 @@ func (a *App) BrowserExtensionIntegrityScanAll(force bool) *ExtensionIntegritySc
 	log := logger.New("Extension")
 	log.Info("开始扩展完整性巡检（客户端打开一次）")
 
+	dismissed := a.dismissedExtensionIncompleteSet()
+
 	profiles := a.browserMgr.List()
 	result.TotalProfiles = len(profiles)
 	for i := range profiles {
@@ -237,8 +240,7 @@ func (a *App) BrowserExtensionIntegrityScanAll(force bool) *ExtensionIntegritySc
 			if isExtensionAssignmentComplete(ud, p.LaunchArgs) {
 				result.Complete++
 			} else {
-				result.Incomplete++
-				result.IncompleteIDs = append(result.IncompleteIDs, p.ProfileId)
+				result.appendIncomplete(p.ProfileId, dismissed)
 			}
 			continue
 		}
@@ -262,8 +264,7 @@ func (a *App) BrowserExtensionIntegrityScanAll(force bool) *ExtensionIntegritySc
 			}
 			continue
 		}
-		result.Incomplete++
-		result.IncompleteIDs = append(result.IncompleteIDs, p.ProfileId)
+		result.appendIncomplete(p.ProfileId, dismissed)
 	}
 
 	extensionIntegrityScanMu.Lock()
@@ -280,12 +281,32 @@ func (a *App) BrowserExtensionIntegrityScanAll(force bool) *ExtensionIntegritySc
 	return result
 }
 
+// appendIncomplete records one unfinished environment. Environments the user
+// explicitly dismissed stay counted in stats but are excluded from the warning
+// list, so the yellow banner stops repeating for acknowledged environments
+// while genuinely new ones are still surfaced.
+func (r *ExtensionIntegrityScanResult) appendIncomplete(profileID string, dismissed map[string]bool) {
+	r.Incomplete++
+	if dismissed[profileID] {
+		r.DismissedIncomplete++
+		return
+	}
+	r.IncompleteIDs = append(r.IncompleteIDs, profileID)
+}
+
 func formatIntegrityScanMessage(r *ExtensionIntegrityScanResult) string {
 	if r == nil {
 		return ""
 	}
-	if r.Incomplete == 0 {
+	reported := len(r.IncompleteIDs)
+	if reported == 0 {
+		if r.Incomplete > 0 && r.DismissedIncomplete == r.Incomplete {
+			return fmt.Sprintf("有 %d 个环境扩展尚未首次适配（已按你的选择不再提醒）", r.Incomplete)
+		}
 		return "所有环境扩展数据完整，已停止重复验证"
+	}
+	if r.DismissedIncomplete > 0 {
+		return fmt.Sprintf("部分环境扩展尚未完成首次适配；已忽略 %d 个，剩余 %d 个待打开一次完成适配", r.DismissedIncomplete, reported)
 	}
 	return "部分环境扩展尚未完成首次适配；打开对应环境一次即可，完整后不再巡检"
 }
@@ -381,9 +402,9 @@ func (a *App) BrowserExtensionListKnownPackages() []map[string]string {
 		id := resolveExtensionPackageID(dir)
 		name := readManifestNameFromDir(dir)
 		out = append(out, map[string]string{
-			"extensionId":   id,
-			"name":          name,
-			"packagePath":   dir,
+			"extensionId": id,
+			"name":        name,
+			"packagePath": dir,
 		})
 	}
 	return out

@@ -3,11 +3,17 @@ import { create } from 'zustand'
 
 type ToastType = 'success' | 'error' | 'warning' | 'info'
 
+interface ToastAction {
+  label: string
+  onClick: () => void
+}
+
 interface Toast {
   id: string
   type: ToastType
   message: string
   duration?: number
+  action?: ToastAction
 }
 
 interface ToastStore {
@@ -50,6 +56,9 @@ export const toast = {
     useToastStore.getState().addToast({ type: 'warning', message, duration }),
   info: (message: string, duration?: number) =>
     useToastStore.getState().addToast({ type: 'info', message, duration }),
+  /** Warning with an action button (e.g. “不再提醒”); auto-dismiss after 8s. */
+  warningWithAction: (message: string, actionLabel: string, onClick: () => void) =>
+    useToastStore.getState().addToast({ type: 'warning', message, duration: 8000, action: { label: actionLabel, onClick } }),
 }
 
 const icons = {
@@ -70,12 +79,25 @@ function ToastItem({ toast: t }: { toast: Toast }) {
   const removeToast = useToastStore((state) => state.removeToast)
   const Icon = icons[t.type]
 
+  const handleAction = () => {
+    t.action?.onClick()
+    removeToast(t.id)
+  }
+
   return (
     <div
       className={`flex items-start gap-3 px-4 py-3 rounded-lg border shadow-lg animate-slide-in-right ${styles[t.type]}`}
     >
       <Icon className="w-5 h-5 flex-shrink-0 mt-0.5" />
-      <p className="flex-1 text-sm font-medium">{t.message}</p>
+      <p className="flex-1 text-sm font-medium leading-relaxed">{t.message}</p>
+      {t.action && (
+        <button
+          onClick={handleAction}
+          className="flex-shrink-0 rounded-md border border-current px-2.5 py-1 text-xs font-semibold hover:opacity-70 transition-opacity"
+        >
+          {t.action.label}
+        </button>
+      )}
       <button
         onClick={() => removeToast(t.id)}
         className="p-0.5 rounded hover:bg-black/10 transition-colors"

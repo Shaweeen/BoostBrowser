@@ -120,13 +120,26 @@ function useExtensionIntegrityScanOnOpen() {
     let cancelled = false
     const run = async () => {
       try {
-        const { scanExtensionIntegrityAll } = await import('./modules/browser/api')
+        const {
+          scanExtensionIntegrityAll,
+          dismissExtensionIntegrityNotice,
+        } = await import('./modules/browser/api')
         const result = await scanExtensionIntegrityAll(false)
         if (cancelled || result?.alreadyScanned) return
         if (result?.message && (result.incomplete > 0 || result.repaired > 0)) {
           const { toast } = await import('./shared/components')
           if (result.incomplete > 0) {
-            toast.warning(result.message)
+            const incompleteIds = Array.isArray(result.incompleteIds) ? result.incompleteIds : []
+            if (incompleteIds.length > 0) {
+              // 用户确认“不再提醒”后持久化，重启/升级后不再重复弹出。
+              toast.warningWithAction(result.message, '不再提醒', () => {
+                void dismissExtensionIntegrityNotice(incompleteIds).then((ok) => {
+                  if (ok) toast.success('已记住，不再提醒这些环境')
+                })
+              })
+            } else {
+              toast.warning(result.message, 6000)
+            }
           } else {
             toast.success(result.message)
           }
@@ -379,6 +392,143 @@ type StartupDataStatus = {
   message?: string
 }
 
+type LegacyDataAutoFolder = {
+  folderKey: string
+  folderName: string
+  profileName: string
+  sizeBytes: number
+}
+
+type LegacyDataAutoPreview = {
+  folders: LegacyDataAutoFolder[]
+  dismissed: number
+  message: string
+}
+
+// LegacyDataAutoNotice: client self-identification of leftover Chrome data
+// folders inside the active data root. Surfaced once at startup; the user can
+// import a folder as an environment or dismiss it (dismissal is remembered in
+// backend data/.boost_notice_dismissed.json and never repeats). No data is
+// deleted — dismissed folders stay on disk untouched.
+function LegacyDataAutoNotice() {
+  const [preview, setPreview] = useState<LegacyDataAutoPreview | null>(null)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    const run = async () => {
+      try {
+        const { scanLegacyDataAuto } = await import('./modules/browser/api')
+        const result = await scanLegacyDataAuto()
+        if (!cancelled && Array.isArray(result?.folders) && result.folders.length > 0) {
+          setPreview(result)
+          setSelected(new Set(result.folders.map((f) => f.folderKey)))
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+    const t = window.setTimeout(run, 2500)
+    return () => {
+      cancelled = true
+      window.clearTimeout(t)
+    }
+  }, [])
+
+  const toggle = (key: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const handleImport = async () => {
+    if (busy || selected.size === 0) return
+    setBusy(true)
+    try {
+      const { importLegacyDataFolders } = await import('./modules/browser/api')
+      const result = await importLegacyDataFolders(Array.from(selected))
+      const { toast } = await import('./shared/components')
+      toast.success(result?.message || '旧数据已导入')
+      setPreview(null)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleDismissAll = async () => {
+    if (busy || !preview) return
+    setBusy(true)
+    try {
+      const { dismissLegacyDataFolders } = await import('./modules/browser/api')
+      const keys = preview.folders.map((f) => f.folderKey)
+      const ok = await dismissLegacyDataFolders(keys)
+      const { toast } = await import('./shared/components')
+      if (ok) {
+        toast.success('已记录忽略，这些旧数据不再提醒（文件保留在磁盘）')
+        setPreview(null)
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!preview) return null
+
+  return (
+    <Modal
+      open
+      onClose={() => setPreview(null)}
+      title="识别到未关联的浏览器数据"
+      width="600px"
+      footer={
+        <div className="flex items-center gap-2 w-full">
+          <Button variant="secondary" className="flex-1" onClick={handleDismissAll} disabled={busy}>
+            全部忽略（不再提醒）
+          </Button>
+          <Button className="flex-1" onClick={handleImport} loading={busy} disabled={selected.size === 0}>
+            导入勾选的环境
+          </Button>
+        </div>
+      }
+    >
+      <div className="space-y-3 text-sm text-[var(--color-text-secondary)]">
+        <p>{preview.message}</p>
+        <div className="max-h-64 overflow-y-auto rounded-lg border border-[var(--color-border-default)] divide-y divide-[var(--color-border-default)]">
+          {preview.folders.map((f) => (
+            <label
+              key={f.folderKey}
+              className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-[var(--color-bg-secondary)] transition-colors"
+            >
+              <input
+                type="checkbox"
+                checked={selected.has(f.folderKey)}
+                onChange={() => toggle(f.folderKey)}
+                className="accent-[var(--color-accent)]"
+              />
+              <div className="flex-1 min-w-0">
+                <p className="truncate font-medium text-[var(--color-text-primary)]">{f.folderName}</p>
+                {f.profileName && f.profileName !== f.folderName && (
+                  <p className="truncate text-xs text-[var(--color-text-muted)]">识别名：{f.profileName}</p>
+                )}
+              </div>
+              <span className="flex-shrink-0 text-xs text-[var(--color-text-muted)]">
+                {(f.sizeBytes / (1024 * 1024)).toFixed(1)} MB
+              </span>
+            </label>
+          ))}
+        </div>
+        <p className="text-xs text-[var(--color-text-muted)]">
+          导入为环境是原地挂载，不复制、不覆盖现有环境；勾选后 Cookies、扩展与钱包本地存储保持原样。忽略的文件不会被删除，之后可在设置页重新启用提醒。
+        </p>
+      </div>
+    </Modal>
+  )
+}
+
 function StartupDataCompatibilityNotice() {
   const [status, setStatus] = useState<StartupDataStatus | null>(null)
 
@@ -590,6 +740,7 @@ function App() {
         <ToastContainer />
         {!syncPanelMode && <CloseConfirmModal />}
         {!syncPanelMode && <StartupDataCompatibilityNotice />}
+        {!syncPanelMode && <LegacyDataAutoNotice />}
         {!syncPanelMode && <UpdateChecker />}
         {!syncPanelMode && (
           <Suspense fallback={null}>

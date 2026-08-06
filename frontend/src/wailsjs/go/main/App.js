@@ -234,6 +234,30 @@ export function BrowserExtensionIntegrityScanAll(arg1) {
   return window['go']['main']['App']['BrowserExtensionIntegrityScanAll'](arg1);
 }
 
+export function BrowserExtensionIntegrityDismissNotice(arg1) {
+  return window['go']['main']['App']['BrowserExtensionIntegrityDismissNotice'](arg1);
+}
+
+export function BrowserExtensionIntegrityClearDismissed() {
+  return window['go']['main']['App']['BrowserExtensionIntegrityClearDismissed']();
+}
+
+export function BrowserLegacyDataAutoScan() {
+  return window['go']['main']['App']['BrowserLegacyDataAutoScan']();
+}
+
+export function BrowserLegacyDataImportFolders(arg1) {
+  return window['go']['main']['App']['BrowserLegacyDataImportFolders'](arg1);
+}
+
+export function BrowserLegacyDataDismissFolders(arg1) {
+  return window['go']['main']['App']['BrowserLegacyDataDismissFolders'](arg1);
+}
+
+export function BrowserLegacyDataClearDismissed() {
+  return window['go']['main']['App']['BrowserLegacyDataClearDismissed']();
+}
+
 export function BrowserExtensionSyncKnownToProfiles(arg1) {
   return window['go']['main']['App']['BrowserExtensionSyncKnownToProfiles'](arg1);
 }

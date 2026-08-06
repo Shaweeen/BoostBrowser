@@ -3,6 +3,8 @@ import { Save, RotateCcw, Upload, Download, RefreshCw, HardDriveDownload } from 
 import { Card, Button, FormItem, Input, Select, Switch, ThemeSwitcher, toast, Modal, Progress } from '../../shared/components'
 import { fetchSettings, saveSettings, resetSettings, initializeSystemData, exportSystemConfig, importSystemConfig, prepareLegacyDataRecovery, executeLegacyDataRecovery, cancelLegacyDataRecovery } from './api'
 import type { LegacyDataRecoveryPreview } from './api'
+import { scanLegacyDataAuto, importLegacyDataFolders, dismissLegacyDataFolders, clearLegacyDataDismissed } from '../browser/api'
+import type { LegacyDataAutoPreview } from '../browser/api'
 import type { AppSettings } from './types'
 import { defaultSettings } from './types'
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
@@ -380,6 +382,74 @@ export function SettingsPage() {
 
   const importRunning = actionLoading === 'import-reset' || actionLoading === 'import-merge'
 
+  // 遗留数据自动识别（data 根目录内未关联的 Chrome 数据文件夹）
+  const [autoLegacyPreview, setAutoLegacyPreview] = useState<LegacyDataAutoPreview | null>(null)
+  const [autoLegacyModalOpen, setAutoLegacyModalOpen] = useState(false)
+  const [autoLegacySelected, setAutoLegacySelected] = useState<Set<string>>(new Set())
+  const [autoLegacyBusy, setAutoLegacyBusy] = useState(false)
+
+  const handleScanLegacyData = async () => {
+    setAutoLegacyBusy(true)
+    try {
+      const preview = await scanLegacyDataAuto()
+      setAutoLegacyPreview(preview)
+      if (Array.isArray(preview.folders) && preview.folders.length > 0) {
+        setAutoLegacySelected(new Set(preview.folders.map(f => f.folderKey)))
+        setAutoLegacyModalOpen(true)
+      } else {
+        toast.info(preview.message || '未发现需要导入的旧数据')
+      }
+    } catch (error: any) {
+      toast.error(error?.message || '旧数据识别失败')
+    } finally {
+      setAutoLegacyBusy(false)
+    }
+  }
+
+  const toggleAutoLegacy = (key: string) => {
+    setAutoLegacySelected(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const handleAutoLegacyImport = async () => {
+    if (autoLegacyBusy || autoLegacySelected.size === 0) return
+    setAutoLegacyBusy(true)
+    try {
+      const result = await importLegacyDataFolders(Array.from(autoLegacySelected))
+      toast.success(result.message || '旧数据已导入')
+      setAutoLegacyModalOpen(false)
+      setAutoLegacyPreview(null)
+    } catch (error: any) {
+      toast.error(error?.message || '旧数据导入失败')
+    } finally {
+      setAutoLegacyBusy(false)
+    }
+  }
+
+  const handleAutoLegacyDismissAll = async () => {
+    if (autoLegacyBusy || !autoLegacyPreview) return
+    setAutoLegacyBusy(true)
+    try {
+      const ok = await dismissLegacyDataFolders(autoLegacyPreview.folders.map(f => f.folderKey))
+      if (ok) {
+        toast.success('已记录忽略，不再提醒（文件保留在磁盘）')
+        setAutoLegacyModalOpen(false)
+        setAutoLegacyPreview(null)
+      }
+    } finally {
+      setAutoLegacyBusy(false)
+    }
+  }
+
+  const handleAutoLegacyReenable = async () => {
+    const ok = await clearLegacyDataDismissed()
+    if (ok) toast.success('已重新开启旧数据提醒，重启客户端后生效')
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -571,6 +641,31 @@ export function SettingsPage() {
               ]}
             />
           </FormItem>
+        </div>
+      </Card>
+
+      <Card title="遗留数据自动识别" subtitle="扫描 data 目录内未关联的 Chrome 数据文件夹，可原地导入为环境或记录忽略">
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-4">
+            <div className="text-sm text-[var(--color-text-secondary)]">
+              导入是原地挂载，不复制不覆盖；忽略的文件夹不会被删除，随时可重新开启提醒。
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="secondary" size="sm" onClick={handleScanLegacyData} loading={autoLegacyBusy}>
+                <HardDriveDownload className="w-4 h-4" />
+                立即扫描识别
+              </Button>
+              <Button variant="secondary" size="sm" onClick={handleAutoLegacyReenable}>
+                <RotateCcw className="w-4 h-4" />
+                重新开启提醒
+              </Button>
+            </div>
+          </div>
+          {autoLegacyPreview && autoLegacyPreview.dismissed > 0 && (
+            <p className="text-xs text-[var(--color-text-muted)]">
+              已按你的选择忽略 {autoLegacyPreview.dismissed} 个旧数据文件夹。
+            </p>
+          )}
         </div>
       </Card>
 
@@ -797,6 +892,55 @@ export function SettingsPage() {
           {legacyProgress && (
             <div className="space-y-2"><div className="text-xs text-[var(--color-text-secondary)]">{legacyProgress.message}</div><Progress percent={legacyProgress.progress} size="sm" status={legacyProgress.phase === 'error' ? 'error' : legacyProgress.phase === 'done' ? 'success' : 'normal'} /></div>
           )}
+        </div>
+      </Modal>
+
+      <Modal
+        open={autoLegacyModalOpen}
+        onClose={() => setAutoLegacyModalOpen(false)}
+        title="识别到未关联的浏览器数据"
+        width="600px"
+        closable={!autoLegacyBusy}
+        footer={
+          <>
+            <Button variant="secondary" onClick={handleAutoLegacyDismissAll} disabled={autoLegacyBusy}>
+              全部忽略（不再提醒）
+            </Button>
+            <Button onClick={handleAutoLegacyImport} loading={autoLegacyBusy} disabled={autoLegacySelected.size === 0}>
+              导入勾选的环境
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3 text-sm text-[var(--color-text-secondary)]">
+          <p>{autoLegacyPreview?.message}</p>
+          <div className="max-h-64 overflow-y-auto rounded-lg border border-[var(--color-border-default)] divide-y divide-[var(--color-border-default)]">
+            {autoLegacyPreview?.folders.map(f => (
+              <label
+                key={f.folderKey}
+                className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-[var(--color-bg-secondary)] transition-colors"
+              >
+                <input
+                  type="checkbox"
+                  checked={autoLegacySelected.has(f.folderKey)}
+                  onChange={() => toggleAutoLegacy(f.folderKey)}
+                  className="accent-[var(--color-accent)]"
+                />
+                <div className="flex-1 min-w-0">
+                  <p className="truncate font-medium text-[var(--color-text-primary)]">{f.folderName}</p>
+                  {f.profileName && f.profileName !== f.folderName && (
+                    <p className="truncate text-xs text-[var(--color-text-muted)]">识别名：{f.profileName}</p>
+                  )}
+                </div>
+                <span className="flex-shrink-0 text-xs text-[var(--color-text-muted)]">
+                  {(f.sizeBytes / (1024 * 1024)).toFixed(1)} MB
+                </span>
+              </label>
+            ))}
+          </div>
+          <p className="text-xs text-[var(--color-text-muted)]">
+            导入为环境是原地挂载，不复制、不覆盖现有环境；Cookies、扩展与钱包本地存储保持原样。忽略的文件不会被删除，之后可在本页重新开启提醒。
+          </p>
         </div>
       </Modal>
 

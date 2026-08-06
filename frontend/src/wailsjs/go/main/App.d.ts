@@ -118,6 +118,18 @@ export function BrowserProfileImportExtension(arg1:Array<string>,arg2:string):Pr
 
 export function BrowserExtensionIntegrityScanAll(arg1:boolean):Promise<Record<string, any>>;
 
+export function BrowserExtensionIntegrityDismissNotice(arg1:Array<string>):Promise<void>;
+
+export function BrowserExtensionIntegrityClearDismissed():Promise<void>;
+
+export function BrowserLegacyDataAutoScan():Promise<Record<string, any>>;
+
+export function BrowserLegacyDataImportFolders(arg1:Array<string>):Promise<Record<string, any>>;
+
+export function BrowserLegacyDataDismissFolders(arg1:Array<string>):Promise<void>;
+
+export function BrowserLegacyDataClearDismissed():Promise<void>;
+
 export function BrowserExtensionSyncKnownToProfiles(arg1:Array<string>):Promise<backend.ExtensionImportResult>;
 
 export function BrowserExtensionListKnownPackages():Promise<Array<Record<string, string>>>;

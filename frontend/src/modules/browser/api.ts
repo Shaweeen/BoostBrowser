@@ -283,6 +283,7 @@ export interface ExtensionIntegrityScanResult {
   repaired: number
   skippedRunning: number
   incompleteIds: string[]
+  dismissedIncomplete: number
   message: string
   alreadyScanned: boolean
 }
@@ -304,12 +305,156 @@ export async function scanExtensionIntegrityAll(force = false): Promise<Extensio
     repaired: 0,
     skippedRunning: 0,
     incompleteIds: [],
+    dismissedIncomplete: 0,
     message: '扩展巡检不可用（开发预览）',
     alreadyScanned: true,
   }
 }
 
 /** Sync all known managed packages onto the given environments. */
+/** Permanently stop reporting the given environments' first-adapt notice. */
+export async function dismissExtensionIntegrityNotice(profileIds: string[]): Promise<boolean> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserExtensionIntegrityDismissNotice) {
+    try {
+      await bindings.BrowserExtensionIntegrityDismissNotice(profileIds)
+      return true
+    } catch {
+      return false
+    }
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.BrowserExtensionIntegrityDismissNotice) {
+    try {
+      await goApp.BrowserExtensionIntegrityDismissNotice(profileIds)
+      return true
+    } catch {
+      return false
+    }
+  }
+  return true
+}
+
+/** Re-enable the first-adapt notice for all previously dismissed environments. */
+export async function clearExtensionIntegrityDismissed(): Promise<boolean> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserExtensionIntegrityClearDismissed) {
+    try {
+      await bindings.BrowserExtensionIntegrityClearDismissed()
+      return true
+    } catch {
+      return false
+    }
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.BrowserExtensionIntegrityClearDismissed) {
+    try {
+      await goApp.BrowserExtensionIntegrityClearDismissed()
+      return true
+    } catch {
+      return false
+    }
+  }
+  return true
+}
+
+// ============================================================================
+// Legacy-data auto scan (leftover folders self-identification)
+// ============================================================================
+
+export interface LegacyDataAutoFolder {
+  folderKey: string
+  folderName: string
+  profileName: string
+  sizeBytes: number
+}
+
+export interface LegacyDataAutoPreview {
+  folders: LegacyDataAutoFolder[]
+  dismissed: number
+  message: string
+}
+
+/** Scan the active data root for Chrome data folders not attached to any environment. */
+export async function scanLegacyDataAuto(): Promise<LegacyDataAutoPreview> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserLegacyDataAutoScan) {
+    try {
+      return (await bindings.BrowserLegacyDataAutoScan()) || { folders: [], dismissed: 0, message: '' }
+    } catch {
+      return { folders: [], dismissed: 0, message: '' }
+    }
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.BrowserLegacyDataAutoScan) {
+    try {
+      return (await goApp.BrowserLegacyDataAutoScan()) || { folders: [], dismissed: 0, message: '' }
+    } catch {
+      return { folders: [], dismissed: 0, message: '' }
+    }
+  }
+  return { folders: [], dismissed: 0, message: '' }
+}
+
+/** Import unregistered data folders as new environments (in place, no copy). */
+export async function importLegacyDataFolders(folderKeys: string[]): Promise<LegacyDataAutoPreview> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserLegacyDataImportFolders) {
+    return (await bindings.BrowserLegacyDataImportFolders(folderKeys)) || { folders: [], dismissed: 0, message: '' }
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.BrowserLegacyDataImportFolders) {
+    return (await goApp.BrowserLegacyDataImportFolders(folderKeys)) || { folders: [], dismissed: 0, message: '' }
+  }
+  return { folders: [], dismissed: 0, message: '旧数据导入不可用（当前为开发预览）' }
+}
+
+/** Record folders the user chose not to import; never suggest them again. */
+export async function dismissLegacyDataFolders(folderKeys: string[]): Promise<boolean> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserLegacyDataDismissFolders) {
+    try {
+      await bindings.BrowserLegacyDataDismissFolders(folderKeys)
+      return true
+    } catch {
+      return false
+    }
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.BrowserLegacyDataDismissFolders) {
+    try {
+      await goApp.BrowserLegacyDataDismissFolders(folderKeys)
+      return true
+    } catch {
+      return false
+    }
+  }
+  return true
+}
+
+/** Re-enable leftover-data suggestions previously ignored. */
+export async function clearLegacyDataDismissed(): Promise<boolean> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserLegacyDataClearDismissed) {
+    try {
+      await bindings.BrowserLegacyDataClearDismissed()
+      return true
+    } catch {
+      return false
+    }
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.BrowserLegacyDataClearDismissed) {
+    try {
+      await goApp.BrowserLegacyDataClearDismissed()
+      return true
+    } catch {
+      return false
+    }
+  }
+  return true
+}
+
 export async function syncKnownExtensionsToProfiles(profileIds: string[]): Promise<ExtensionImportResult> {
   const bindings: any = await getBindings()
   if (bindings?.BrowserExtensionSyncKnownToProfiles) {

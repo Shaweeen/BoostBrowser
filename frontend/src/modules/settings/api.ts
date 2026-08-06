@@ -156,3 +156,6 @@ export async function cancelLegacyDataRecovery(sessionId: string): Promise<void>
     await bindings.LegacyDataRecoveryCancel(sessionId)
   }
 }
+
+// 遗留数据自动识别（data 根目录内未关联的 Chrome 数据文件夹）
+// 实现位于 ../browser/api，SettingsPage 直接复用，避免两处实现漂移。
