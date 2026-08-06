@@ -94,6 +94,10 @@ type InputSyncer struct {
 	// Keyed by debugPort so 10-follower bursts reuse one evaluate per env.
 	cssViewportCache sync.Map // int port -> cssViewportCacheEntry
 
+	// 跟随侧 CDP target 缓存：同一 master target + 同一 follower debugPort
+	// 在短 TTL 内复用匹配结果，避免每个鼠标事件都查询每个 follower 的 /json + Runtime.evaluate。
+	followerCDPTargetCache sync.Map // followerCDPTargetCacheKey -> followerCDPTargetCacheEntry
+
 	// 跟随窗口列表原子快照
 	followerSnapshot []windows.HWND
 	followerMu       sync.RWMutex
@@ -163,6 +167,19 @@ type pageInputEvent struct {
 }
 
 const focusedMasterCDPTargetCacheTTL = 120 * time.Millisecond
+
+// followerCDPTargetCacheKey uniquely identifies one master→follower target resolution.
+type followerCDPTargetCacheKey struct {
+	masterTargetURL string // master's focused page URL (the navigation baseline)
+	followerPort    int    // follower's debug port
+}
+
+type followerCDPTargetCacheEntry struct {
+	target    cdpTarget
+	expiresAt time.Time
+}
+
+const followerCDPTargetCacheTTL = 250 * time.Millisecond
 
 func pageCDPTargets(debugPort int) []cdpTarget {
 	targets, err := listCDPTargets(debugPort)
@@ -536,6 +553,39 @@ func popupLikeCDPTarget(target cdpTarget) bool {
 	// Any remaining chrome-extension page (unknown wallet) still needs follower
 	// target matching rather than falling through to the first /json tab.
 	return true
+}
+
+// cachedMatchingFollowerCDPTarget wraps matchingFollowerCDPTarget with a short
+// per-(masterURL, followerPort) cache. During mouse-move storms the same master
+// URL is repeated for every event; re-querying every follower's /json endpoint
+// on each tick dominates CDP cost with 10+ followers.
+func (s *InputSyncer) cachedMatchingFollowerCDPTarget(master cdpTarget, debugPort int, waitForPopup bool) (cdpTarget, bool) {
+	if s == nil || debugPort <= 0 {
+		return matchingFollowerCDPTarget(master, debugPort, waitForPopup)
+	}
+	// Popup lookups need fresh results (wallet unlock pages appear/disappear fast).
+	if waitForPopup {
+		return matchingFollowerCDPTarget(master, debugPort, true)
+	}
+	key := followerCDPTargetCacheKey{
+		masterTargetURL: cdpTargetURLWithoutFragment(master.URL),
+		followerPort:    debugPort,
+	}
+	now := time.Now()
+	if raw, hit := s.followerCDPTargetCache.Load(key); hit {
+		if entry, ok := raw.(followerCDPTargetCacheEntry); ok && now.Before(entry.expiresAt) {
+			return entry.target, true
+		}
+	}
+	target, ok := matchingFollowerCDPTarget(master, debugPort, false)
+	if !ok {
+		return cdpTarget{}, false
+	}
+	s.followerCDPTargetCache.Store(key, followerCDPTargetCacheEntry{
+		target:    target,
+		expiresAt: now.Add(followerCDPTargetCacheTTL),
+	})
+	return target, true
 }
 
 func matchingFollowerCDPTarget(master cdpTarget, debugPort int, waitForPopup bool) (cdpTarget, bool) {
@@ -927,6 +977,12 @@ func (s *InputSyncer) clearRuntimeState() {
 	clear(s.randomDelayNext)
 	s.randomDelayMu.Unlock()
 
+	// Clear follower CDP target cache.
+	s.followerCDPTargetCache.Range(func(key, _ any) bool {
+		s.followerCDPTargetCache.Delete(key)
+		return true
+	})
+
 	atomic.StoreInt32(&s.paused, 0)
 	atomic.StoreInt32(&s.urlSyncReseed, 0)
 	atomic.StoreInt32(&s.escapeDown, 0)
@@ -991,6 +1047,10 @@ func (s *InputSyncer) togglePausedFromEscape() bool {
 			// urlSyncLoop tick without Page.navigate / value push — followers keep
 			// whatever page they had while the user was paused.
 			s.invalidateMasterCDPTargetCache()
+			s.followerCDPTargetCache.Range(func(key, _ any) bool {
+				s.followerCDPTargetCache.Delete(key)
+				return true
+			})
 			s.mu.Lock()
 			s.lastSyncURL = ""
 			s.lastFocusedEditableState = ""
@@ -2665,7 +2725,7 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
 								s.dispatchPageKeyFallback(follower, event)
 								return
 							}
-							followerTarget, ok := matchingFollowerCDPTarget(masterTarget, debugPort, waitPopup)
+							followerTarget, ok := s.cachedMatchingFollowerCDPTarget(masterTarget, debugPort, waitPopup)
 							if !ok {
 								// Never silently drop password/auth digits when the
 								// follower wallet surface is still attaching.
@@ -2836,7 +2896,7 @@ func (s *InputSyncer) dispatchPageMouseViaCDPNow(msg uint32, screenX, screenY in
 			}
 			s.dispatchWithRandomDelay(hwnd, func() {
 				s.withCDPPortLock(port, func() {
-					followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, waitPopup)
+					followerTarget, ok := s.cachedMatchingFollowerCDPTarget(masterTarget, port, waitPopup)
 					if !ok {
 						s.dispatchPageMouseFallback(hwnd, msg, screenX, screenY)
 						return
@@ -2954,7 +3014,7 @@ func (s *InputSyncer) dispatchPageMouseMoveViaCDPNow(screenX, screenY int, butto
 			}
 			s.dispatchWithRandomDelay(hwnd, func() {
 				s.withCDPPortLock(port, func() {
-					followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, false)
+					followerTarget, ok := s.cachedMatchingFollowerCDPTarget(masterTarget, port, false)
 					if !ok {
 						return
 					}
@@ -3063,7 +3123,7 @@ func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY in
 			fW, fH := int(fr-fl), int(fb-ft)
 			s.dispatchWithRandomDelay(hwnd, func() {
 				s.withCDPPortLock(port, func() {
-					followerTarget, ok := matchingFollowerCDPTarget(masterTarget, port, waitPopup)
+					followerTarget, ok := s.cachedMatchingFollowerCDPTarget(masterTarget, port, waitPopup)
 					if !ok {
 						// Never drop wheel silently — Win32 path still moves most pages.
 						s.dispatchPageWheelFallback(hwnd, msg, screenX, screenY, delta, keyState)

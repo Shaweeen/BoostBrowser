@@ -1183,13 +1183,31 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	}, nil
 }
 
-// SyncCloseAll 关闭所有已选中实例
+// SyncCloseAll 关闭所有已选中实例。并发关闭以加速批量操作，semaphore 限制并发数
+// 避免同时关闭过多浏览器导致系统资源争抢。
 func (a *App) SyncCloseAll(profileIds []string) []string {
-	closed := make([]string, 0)
-	for _, profileID := range profileIds {
-		if _, err := a.BrowserInstanceStop(profileID); err == nil {
-			closed = append(closed, profileID)
-		}
+	if len(profileIds) == 0 {
+		return nil
 	}
+	// 并发关闭：限制最大 5 个并发，避免同时打开过多 CDP 连接和文件句柄。
+	const maxConcurrent = 5
+	sem := make(chan struct{}, maxConcurrent)
+	var mu sync.Mutex
+	closed := make([]string, 0, len(profileIds))
+	var wg sync.WaitGroup
+	for _, profileID := range profileIds {
+		wg.Add(1)
+		sem <- struct{}{} // 获取信号量
+		go func(id string) {
+			defer wg.Done()
+			defer func() { <-sem }() // 释放信号量
+			if _, err := a.BrowserInstanceStop(id); err == nil {
+				mu.Lock()
+				closed = append(closed, id)
+				mu.Unlock()
+			}
+		}(profileID)
+	}
+	wg.Wait()
 	return closed
 }
