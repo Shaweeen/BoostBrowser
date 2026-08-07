@@ -112,19 +112,21 @@ func appendUniqueString(items []string, value string) []string {
 	return append(items, value)
 }
 
-// appendChromeTestingInfobarSuppressArg 追加 Chrome for Testing 的 infobar 抑制参数。
+// appendChromeTestingInfobarSuppressArg 追加浏览器 infobar 抑制参数。
 //
-// 同时加 --test-type 和 --disable-infobars 来压两条 infobar：
-//   - "您使用的是不受支持的命令行标记: --no-sandbox" 黄色安全警告
-//   - Chrome for Testing 自带的 non-closeable infobar
+// --disable-infobars 两条路径都保留：压掉 "您使用的是不受支持的命令行标记:
+// --no-sandbox" 黄色安全警告和 Chrome for Testing 自带的 non-closeable infobar。
 //
-// cloak 内核也走同一路径：用户已接受 fingerprint.com 把 Bot type 识别成
-// "google"（来源 --test-type）的 3 红灯，infobar 用户体验更重要。
-// 真实业务站（CF Turnstile 等）不看 --test-type，对通过率无影响。
-//
-// 参数 cloakOnly 保留用于以后可能的差异化处理，当前逻辑两条路径相同。
+// --test-type 只追加到非 cloak 路径。它是自动化/测试专用标志，X（Twitter）等
+// 严格反自动化站点会把它与浏览器身份异常关联，触发「页面无法完整加载 / 登录
+// 提醒 / 临时登录限制」。CloakBrowser 内核已在源码层消除 infobar，不再需要
+// --test-type 的压制作用；去掉它可移除一个 Bot 检测信号（fingerprint.com 曾把
+// --test-type 识别为 "Bot: google" 红灯），同时 --disable-infobars 仍足够压住
+// --no-sandbox 黄条。
 func appendChromeTestingInfobarSuppressArg(args []string, cloakOnly bool) []string {
-	args = appendLaunchArgIfMissing(args, chromeTestingInfobarSuppressArg)
+	if !cloakOnly {
+		args = appendLaunchArgIfMissing(args, chromeTestingInfobarSuppressArg)
+	}
 	args = appendLaunchArgIfMissing(args, chromeTestingDisableInfobarsArg)
 	return args
 }

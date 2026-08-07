@@ -3,7 +3,7 @@ import { Save, RotateCcw, Upload, Download, RefreshCw, HardDriveDownload } from 
 import { Card, Button, FormItem, Input, Select, Switch, ThemeSwitcher, toast, Modal, Progress } from '../../shared/components'
 import { fetchSettings, saveSettings, resetSettings, initializeSystemData, exportSystemConfig, importSystemConfig, prepareLegacyDataRecovery, executeLegacyDataRecovery, cancelLegacyDataRecovery } from './api'
 import type { LegacyDataRecoveryPreview } from './api'
-import { scanLegacyDataAuto, importLegacyDataFolders, dismissLegacyDataFolders, clearLegacyDataDismissed } from '../browser/api'
+import { scanLegacyDataAuto, importLegacyDataFolders, dismissLegacyDataFolders, clearLegacyDataDismissed, cleanBrowserCache } from '../browser/api'
 import type { LegacyDataAutoPreview } from '../browser/api'
 import type { AppSettings } from './types'
 import { defaultSettings } from './types'
@@ -387,6 +387,21 @@ export function SettingsPage() {
   const [autoLegacyModalOpen, setAutoLegacyModalOpen] = useState(false)
   const [autoLegacySelected, setAutoLegacySelected] = useState<Set<string>>(new Set())
   const [autoLegacyBusy, setAutoLegacyBusy] = useState(false)
+  const [cleaningCache, setCleaningCache] = useState(false)
+
+  const handleCleanCacheNow = async () => {
+    if (cleaningCache) return
+    setCleaningCache(true)
+    try {
+      const result = await cleanBrowserCache(false)
+      toast.success(result.message || '缓存清理完成')
+      await loadSettings()
+    } catch (error: any) {
+      toast.error(error?.message || '缓存清理失败')
+    } finally {
+      setCleaningCache(false)
+    }
+  }
 
   const handleScanLegacyData = async () => {
     setAutoLegacyBusy(true)
@@ -450,6 +465,19 @@ export function SettingsPage() {
     if (ok) toast.success('已重新开启旧数据提醒，重启客户端后生效')
   }
 
+  // 周期选择器最低 30 天（每月一次），提供 30/60/90 天三个预设；
+  // 若配置中保存了其它合法值，补一个“自定义”选项避免下拉框空选。
+  const cacheIntervalOptions = (() => {
+    const preset = [
+      { value: '30', label: '每月（30 天）' },
+      { value: '60', label: '每两个月（60 天）' },
+      { value: '90', label: '每季度（90 天）' },
+    ]
+    const current = Number(settings.cacheAutoCleanIntervalDays) || 30
+    if (preset.some(option => Number(option.value) === current)) return preset
+    return [{ value: String(current), label: `${current} 天（自定义）` }, ...preset]
+  })()
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -500,9 +528,9 @@ export function SettingsPage() {
         <div className="space-y-4">
           <div className="flex items-center justify-between gap-4">
             <div>
-              <p className="text-sm font-medium text-[var(--color-text-primary)]">每7天自动清理</p>
+              <p className="text-sm font-medium text-[var(--color-text-primary)]">自动清理缓存</p>
               <p className="text-xs text-[var(--color-text-muted)] mt-0.5">
-                固定周期 7 天；延迟到客户端稳定启动后执行，并跳过正在运行的浏览器环境。
+                默认关闭；开启后按所选周期在客户端稳定启动后执行，并跳过正在运行的浏览器环境。
               </p>
             </div>
             <Switch
@@ -510,10 +538,34 @@ export function SettingsPage() {
               onChange={v => handleChange('cacheAutoCleanEnabled', v)}
             />
           </div>
+          {settings.cacheAutoCleanEnabled && (
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-sm font-medium text-[var(--color-text-primary)]">清理周期</p>
+                <p className="text-xs text-[var(--color-text-muted)] mt-0.5">最低 30 天（每月一次）；更频繁的清理不必要地占用磁盘 IO。</p>
+              </div>
+              <Select
+                value={String(Number(settings.cacheAutoCleanIntervalDays) || 30)}
+                onChange={e => handleChange('cacheAutoCleanIntervalDays', Number(e.target.value) || 30)}
+                options={cacheIntervalOptions}
+                className="w-40"
+              />
+            </div>
+          )}
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium text-[var(--color-text-primary)]">立即手动清理</p>
+              <p className="text-xs text-[var(--color-text-muted)] mt-0.5">立即扫描并清理所有已关闭环境的可再生缓存；运行中的环境自动跳过。</p>
+            </div>
+            <Button variant="secondary" size="sm" onClick={() => void handleCleanCacheNow()} loading={cleaningCache}>
+              <HardDriveDownload className="w-4 h-4" />
+              立即清理
+            </Button>
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-[var(--color-text-muted)] rounded-lg border border-[var(--color-border-muted)] bg-[var(--color-bg-secondary)] p-3">
-            <div>清理周期：{settings.cacheAutoCleanIntervalDays || 7} 天</div>
+            <div>清理周期：{settings.cacheAutoCleanIntervalDays || 30} 天（最低 30 天）</div>
             <div>上次清理：{settings.cacheLastCleanAt ? new Date(settings.cacheLastCleanAt).toLocaleString('zh-CN') : '尚未清理'}</div>
-            <div>下次自动清理：{settings.cacheNextCleanAt ? new Date(settings.cacheNextCleanAt).toLocaleString('zh-CN') : '开启后按7天计算'}</div>
+            <div>下次自动清理：{settings.cacheNextCleanAt ? new Date(settings.cacheNextCleanAt).toLocaleString('zh-CN') : settings.cacheAutoCleanEnabled ? '开启后按所选周期计算' : '自动清理未开启'}</div>
             <div>保留：Cookies / 登录状态 / IndexedDB / Local Storage / 钱包扩展数据</div>
           </div>
         </div>

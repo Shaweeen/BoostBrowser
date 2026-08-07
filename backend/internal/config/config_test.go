@@ -57,8 +57,8 @@ browser: {}
 	if len(cfg.Browser.DefaultFingerprintArgs) == 0 || len(cfg.Browser.DefaultLaunchArgs) == 0 {
 		t.Fatalf("Browser 默认启动参数未补齐")
 	}
-	if !cfg.Browser.CacheAutoCleanEnabled || cfg.Browser.CacheAutoCleanIntervalDays != 7 || cfg.Browser.CacheCleanupPolicyVersion != 1 {
-		t.Fatalf("安全缓存清理策略未迁移: got=%+v", cfg.Browser)
+	if cfg.Browser.CacheAutoCleanEnabled || cfg.Browser.CacheAutoCleanIntervalDays != 30 || cfg.Browser.CacheCleanupPolicyVersion != 1 {
+		t.Fatalf("安全缓存清理策略未迁移（默认不应自动清理、周期最低 30 天）: got=%+v", cfg.Browser)
 	}
 	if cfg.Browser.Cores == nil || cfg.Browser.Proxies == nil || cfg.Browser.Profiles == nil {
 		t.Fatalf("Browser 列表字段应初始化为空切片")

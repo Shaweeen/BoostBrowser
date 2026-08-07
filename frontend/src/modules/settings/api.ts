@@ -84,7 +84,7 @@ export async function fetchSettings(): Promise<AppSettings> {
     settings = {
       ...settings,
       cacheAutoCleanEnabled: !!cache.autoCleanEnabled,
-      cacheAutoCleanIntervalDays: Number(cache.intervalDays) || 7,
+      cacheAutoCleanIntervalDays: Number(cache.intervalDays) || 30,
       cacheLastCleanAt: cache.lastCleanAt || '',
       cacheNextCleanAt: cache.nextCleanAt || '',
     }
@@ -97,7 +97,7 @@ export async function fetchSettings(): Promise<AppSettings> {
 export async function saveSettings(settings: AppSettings): Promise<boolean> {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
-    await saveCacheCleanSettings(!!settings.cacheAutoCleanEnabled)
+    await saveCacheCleanSettings(!!settings.cacheAutoCleanEnabled, Number(settings.cacheAutoCleanIntervalDays) || 30)
     return true
   } catch {
 	return false

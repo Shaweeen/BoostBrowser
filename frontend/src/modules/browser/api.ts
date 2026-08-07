@@ -1096,12 +1096,12 @@ export async function getCacheCleanSettings(): Promise<CacheCleanSettings> {
   return { autoCleanEnabled: false, intervalDays: 30 }
 }
 
-export async function saveCacheCleanSettings(enabled: boolean): Promise<CacheCleanSettings> {
+export async function saveCacheCleanSettings(enabled: boolean, intervalDays?: number): Promise<CacheCleanSettings> {
   const bindings: any = await getBindings()
   if (bindings?.BrowserSaveCacheCleanSettings) {
-    return await bindings.BrowserSaveCacheCleanSettings(enabled)
+    return await bindings.BrowserSaveCacheCleanSettings(enabled, Number(intervalDays) || 30)
   }
-  return { autoCleanEnabled: enabled, intervalDays: 30 }
+  return { autoCleanEnabled: enabled, intervalDays: Number(intervalDays) || 30 }
 }
 
 // ============================================================================

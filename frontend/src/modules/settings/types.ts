@@ -48,8 +48,9 @@ export const defaultSettings: AppSettings = {
   logLevel: 'info',
   maxMemoryMB: 1024,
   gcPercent: 100,
-  cacheAutoCleanEnabled: true,
-  cacheAutoCleanIntervalDays: 7,
+  // 默认不自动清理缓存：由用户在设置中显式开启并选择周期（最低 30 天/每月），或手动清理。
+  cacheAutoCleanEnabled: false,
+  cacheAutoCleanIntervalDays: 30,
   cacheLastCleanAt: '',
   cacheNextCleanAt: '',
 }

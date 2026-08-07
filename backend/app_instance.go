@@ -4,7 +4,10 @@ import (
 	"boost-browser/backend/internal/browser"
 	"boost-browser/backend/internal/logger"
 	"boost-browser/backend/internal/proxy"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1129,21 +1132,79 @@ func (a *App) BrowserInstanceStatus(profileId string) (*BrowserProfile, error) {
 	return copyBrowserProfileSnapshot(profile), nil
 }
 
+// BrowserInstanceOpenUrl 通过 CDP 在运行中的实例里打开指定 URL。CloakBrowser 内核
+// 走其无注入的 Target.createTarget 路径，其余内核走 blank→注入→navigate 路径；
+// 具体差异由 navigateToTargetURLs 按内核类型决定。返回 false 仅表示实例未运行或
+// 调试接口未就绪；命令已派发时返回 true，导航的具体成败由 navigateToTargetURLs
+// 写入日志，前端提示语是“已发送打开指令”。
 func (a *App) BrowserInstanceOpenUrl(profileId string, targetUrl string) bool {
-	a.browserMgr.Mutex.Lock()
-	profile, exists := a.browserMgr.Profiles[profileId]
-	a.browserMgr.Mutex.Unlock()
-	if !exists || !profile.Running {
+	targetUrl = strings.TrimSpace(targetUrl)
+	if targetUrl == "" {
 		return false
 	}
+	a.browserMgr.Mutex.Lock()
+	profile, exists := a.browserMgr.Profiles[profileId]
+	debugPort := 0
+	running := false
+	if exists && profile != nil {
+		debugPort = profile.DebugPort
+		running = profile.Running && profile.DebugReady && debugPort > 0
+	}
+	a.browserMgr.Mutex.Unlock()
+	if !running {
+		return false
+	}
+	navigateToTargetURLs(debugPort, []string{targetUrl}, profileId, a.isProfileUsingCloakCore(profileId))
 	return true
 }
 
+// BrowserInstanceGetTabs 通过 CDP /json 读取实例当前所有页面标签，返回真实数据。
+// 实例未运行、调试接口未就绪或读取失败时返回空列表，不再返回占位假数据。
 func (a *App) BrowserInstanceGetTabs(profileId string) []BrowserTab {
-	return []BrowserTab{
-		{TabId: "tab-1", Title: "新标签页", Url: "about:blank", Active: true},
-		{TabId: "tab-2", Title: "示例站点", Url: "https://example.com", Active: false},
+	a.browserMgr.Mutex.Lock()
+	profile, exists := a.browserMgr.Profiles[profileId]
+	debugPort := 0
+	if exists && profile != nil {
+		debugPort = profile.DebugPort
 	}
+	a.browserMgr.Mutex.Unlock()
+	if debugPort <= 0 {
+		return nil
+	}
+	return fetchBrowserPageTabs(debugPort)
+}
+
+// fetchBrowserPageTabs 读取 DevTools /json 的 page 目标列表并映射为标签。
+// 复用 app_cookie.go 的 cdpTarget 与 cdpHTTPClient，不建立长连接。
+func fetchBrowserPageTabs(debugPort int) []BrowserTab {
+	resp, err := cdpHTTPClient.Get(fmt.Sprintf("http://127.0.0.1:%d/json", debugPort))
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return nil
+	}
+	var targets []cdpTarget
+	if err := json.Unmarshal(body, &targets); err != nil {
+		return nil
+	}
+	tabs := make([]BrowserTab, 0, len(targets))
+	for _, t := range targets {
+		if t.Type != "page" {
+			continue
+		}
+		title := strings.TrimSpace(t.Title)
+		if title == "" {
+			title = "新标签页"
+		}
+		tabs = append(tabs, BrowserTab{TabId: t.ID, Title: title, Url: t.URL})
+	}
+	return tabs
 }
 
 func (a *App) waitBrowserProcess(profileId string, monitor *browserProcessMonitor) {

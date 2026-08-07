@@ -11,9 +11,12 @@ import (
 )
 
 const (
-	cacheAutoCleanFixedIntervalDays = 7
-	cacheAutoCleanInitialDelay      = 2 * time.Minute
-	cacheAutoCleanPollInterval      = 6 * time.Hour
+	// 自动清理周期最低 30 天（每月一次），不允许更频繁；上限 90 天（季度）。
+	cacheAutoCleanDefaultIntervalDays = 30
+	cacheAutoCleanMinIntervalDays     = 30
+	cacheAutoCleanMaxIntervalDays     = 90
+	cacheAutoCleanInitialDelay        = 2 * time.Minute
+	cacheAutoCleanPollInterval        = 6 * time.Hour
 )
 
 type CacheCleanResult struct {
@@ -104,17 +107,39 @@ func (a *App) BrowserCleanCache(_ bool) (*CacheCleanResult, error) {
 
 func (a *App) BrowserGetCacheCleanSettings() CacheCleanSettings {
 	if a == nil || a.config == nil {
-		return CacheCleanSettings{IntervalDays: cacheAutoCleanFixedIntervalDays}
+		return CacheCleanSettings{IntervalDays: cacheAutoCleanDefaultIntervalDays}
 	}
 	return a.cacheCleanSettings()
 }
 
-func (a *App) BrowserSaveCacheCleanSettings(enabled bool) (CacheCleanSettings, error) {
+// sanitizeCacheAutoCleanIntervalDays 归一化用户选择的清理周期：
+// 最低 30 天（每月一次，已删除每周 7 天选项），上限 90 天（季度）。
+func sanitizeCacheAutoCleanIntervalDays(intervalDays int) int {
+	if intervalDays < cacheAutoCleanMinIntervalDays {
+		return cacheAutoCleanMinIntervalDays
+	}
+	if intervalDays > cacheAutoCleanMaxIntervalDays {
+		return cacheAutoCleanMaxIntervalDays
+	}
+	return intervalDays
+}
+
+func (a *App) cacheAutoCleanIntervalDays() int {
+	interval := 0
+	if a != nil && a.config != nil {
+		interval = a.config.Browser.CacheAutoCleanIntervalDays
+	}
+	return sanitizeCacheAutoCleanIntervalDays(interval)
+}
+
+// BrowserSaveCacheCleanSettings 保存缓存自动清理设置。enabled 控制是否开启；
+// intervalDays 为清理周期（7=每周，30=每月），仅 enabled 时生效。
+func (a *App) BrowserSaveCacheCleanSettings(enabled bool, intervalDays int) (CacheCleanSettings, error) {
 	if a == nil || a.config == nil {
 		return CacheCleanSettings{}, fmt.Errorf("应用未完成初始化")
 	}
 	a.config.Browser.CacheAutoCleanEnabled = enabled
-	a.config.Browser.CacheAutoCleanIntervalDays = cacheAutoCleanFixedIntervalDays
+	a.config.Browser.CacheAutoCleanIntervalDays = sanitizeCacheAutoCleanIntervalDays(intervalDays)
 	if err := a.config.Save(a.resolveAppPath("config.yaml")); err != nil {
 		return CacheCleanSettings{}, err
 	}
@@ -129,7 +154,7 @@ func (a *App) BrowserRunDueCacheAutoClean() (*CacheAutoCleanResult, error) {
 		return &CacheAutoCleanResult{Ran: false, Reason: "未开启自动清理"}, nil
 	}
 	if !a.cacheAutoCleanDue(time.Now()) {
-		return &CacheAutoCleanResult{Ran: false, Reason: "未到7天清理周期"}, nil
+		return &CacheAutoCleanResult{Ran: false, Reason: fmt.Sprintf("未到 %d 天清理周期", a.cacheAutoCleanIntervalDays())}, nil
 	}
 	res, err := a.BrowserCleanCache(false)
 	if err != nil {
@@ -188,13 +213,14 @@ func (a *App) cacheCleanProfileRoot(profile *browser.Profile) string {
 
 func (a *App) cacheCleanSettings() CacheCleanSettings {
 	last := strings.TrimSpace(a.config.Browser.CacheLastCleanAt)
+	interval := a.cacheAutoCleanIntervalDays()
 	settings := CacheCleanSettings{
 		AutoCleanEnabled: a.config.Browser.CacheAutoCleanEnabled,
-		IntervalDays:     cacheAutoCleanFixedIntervalDays,
+		IntervalDays:     interval,
 		LastCleanAt:      last,
 	}
 	if parsed, err := time.Parse(time.RFC3339, last); err == nil {
-		settings.NextCleanAt = parsed.Add(cacheAutoCleanFixedIntervalDays * 24 * time.Hour).Format(time.RFC3339)
+		settings.NextCleanAt = parsed.Add(time.Duration(interval) * 24 * time.Hour).Format(time.RFC3339)
 	}
 	return settings
 }
@@ -208,7 +234,8 @@ func (a *App) cacheAutoCleanDue(now time.Time) bool {
 	if err != nil {
 		return true
 	}
-	return !now.Before(parsed.Add(cacheAutoCleanFixedIntervalDays * 24 * time.Hour))
+	interval := a.cacheAutoCleanIntervalDays()
+	return !now.Before(parsed.Add(time.Duration(interval) * 24 * time.Hour))
 }
 
 func (a *App) markCacheCleanedNow() {
@@ -216,6 +243,6 @@ func (a *App) markCacheCleanedNow() {
 		return
 	}
 	a.config.Browser.CacheLastCleanAt = time.Now().Format(time.RFC3339)
-	a.config.Browser.CacheAutoCleanIntervalDays = cacheAutoCleanFixedIntervalDays
+	// 保留用户选择的周期，不再回写固定 7 天。
 	_ = a.config.Save(a.resolveAppPath("config.yaml"))
 }

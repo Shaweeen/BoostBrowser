@@ -89,8 +89,8 @@ func TestCacheAutoCleanRunsOnlyWhenEnabledAndDue(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Browser.UserDataRoot = "data"
 	cfg.Browser.CacheAutoCleanEnabled = true
-	cfg.Browser.CacheAutoCleanIntervalDays = 7
-	cfg.Browser.CacheLastCleanAt = time.Now().Add(-8 * 24 * time.Hour).Format(time.RFC3339)
+	cfg.Browser.CacheAutoCleanIntervalDays = 30
+	cfg.Browser.CacheLastCleanAt = time.Now().Add(-31 * 24 * time.Hour).Format(time.RFC3339)
 	app := NewApp(root)
 	app.config = cfg
 	app.browserMgr = browser.NewManager(cfg, root)
@@ -109,6 +109,58 @@ func TestCacheAutoCleanRunsOnlyWhenEnabledAndDue(t *testing.T) {
 	}
 	if cfg.Browser.CacheLastCleanAt == "" {
 		t.Fatal("expected last clean timestamp to be saved")
+	}
+}
+
+func TestSanitizeCacheAutoCleanIntervalDaysClampsToSafeRange(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		in, want int
+	}{
+		{0, 30}, {1, 30}, {-5, 30}, {7, 30}, {29, 30}, {30, 30}, {60, 60}, {90, 90}, {365, 90},
+	}
+	for _, c := range cases {
+		if got := sanitizeCacheAutoCleanIntervalDays(c.in); got != c.want {
+			t.Fatalf("sanitizeCacheAutoCleanIntervalDays(%d)=%d want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestBrowserSaveCacheCleanSettingsPersistsMonthlyInterval(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	app := NewApp(root)
+	app.config = cfg
+
+	got, err := app.BrowserSaveCacheCleanSettings(true, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.AutoCleanEnabled || got.IntervalDays != 30 {
+		t.Fatalf("unexpected settings: %+v", got)
+	}
+	if !app.config.Browser.CacheAutoCleanEnabled || app.config.Browser.CacheAutoCleanIntervalDays != 30 {
+		t.Fatalf("config not persisted in memory: %+v", app.config.Browser)
+	}
+	if _, err := os.Stat(filepath.Join(root, "config.yaml")); err != nil {
+		t.Fatalf("config.yaml not written: %v", err)
+	}
+}
+
+func TestCacheAutoCleanDueUsesConfiguredMonthlyInterval(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	app := NewApp(root)
+	app.config = cfg
+	cfg.Browser.CacheAutoCleanIntervalDays = 30
+	cfg.Browser.CacheLastCleanAt = time.Now().Add(-20 * 24 * time.Hour).Format(time.RFC3339)
+	if app.cacheAutoCleanDue(time.Now()) {
+		t.Fatal("20 days must not be due for a 30-day interval")
+	}
+	cfg.Browser.CacheLastCleanAt = time.Now().Add(-31 * 24 * time.Hour).Format(time.RFC3339)
+	if !app.cacheAutoCleanDue(time.Now()) {
+		t.Fatal("31 days must be due for a 30-day interval")
 	}
 }
 

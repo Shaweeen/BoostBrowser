@@ -266,15 +266,20 @@ export function WindowSyncPage() {
     }
   }, [isSyncing])
 
-  // Auto-refresh the live environment list while the assistant is open and not
-  // actively syncing. A closed/reopened environment then appears without a
-  // manual refresh. Silent mode keeps the refresh button idle and never prunes
-  // the user's in-progress selection.
+  // Auto-refresh the live environment list while the assistant is open, both
+  // idle and during an active sync session. A closed/reopened or newly opened
+  // environment then appears without a manual refresh — so a just-started
+  // environment can be added as a follower and arranged through the sync tool
+  // right away. Silent mode keeps the refresh button idle and never prunes the
+  // user's in-progress selection (while syncing, selection mirrors the session).
+  // During an active session the interval is longer: the panel's live process
+  // scan is serialized with sync start/stop/tile actions, so a slow scan on
+  // dense multi-open must not stall input-sync actions on every tick.
   useEffect(() => {
-    if (isSyncing) return
+    const intervalMs = isSyncing ? 10000 : 3000
     const timer = window.setInterval(() => {
       void loadProfiles(false, true)
-    }, 3000)
+    }, intervalMs)
     return () => window.clearInterval(timer)
   }, [isSyncing, loadProfiles])
 

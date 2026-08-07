@@ -572,15 +572,29 @@ func TestAppendChromeTestingInfobarSuppressArgDoesNotDuplicateSuppressArgs(t *te
 	}
 }
 
-func TestAppendChromeTestingInfobarSuppressArgCloakIncludesTestType(t *testing.T) {
+func TestAppendChromeTestingInfobarSuppressArgCloakOmitsTestType(t *testing.T) {
 	t.Parallel()
 
-	// 用户接受 fingerprint.com Bot type=google 红灯换 infobar 体验，
-	// cloak 路径也加 --test-type 压住 "unsupported command line" 黄条。
+	// --test-type 是自动化/测试专用标志，X 等严格反自动化站点会把它与浏览器
+	// 身份异常关联（登录提醒 / 临时登录限制）。CloakBrowser 内核在源码层已消除
+	// infobar，不再需要它；--disable-infobars 足够压住 --no-sandbox 黄条。
 	got := appendChromeTestingInfobarSuppressArg([]string{"--user-data-dir=D:\\profiles\\demo"}, true)
+	want := []string{"--user-data-dir=D:\\profiles\\demo", "--disable-infobars"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cloak path should omit --test-type: got=%v want=%v", got, want)
+	}
+}
+
+func TestAppendChromeTestingInfobarSuppressArgCloakPreservesExistingTestType(t *testing.T) {
+	t.Parallel()
+
+	// 用户显式配置的 --test-type 属于 profile/API 启动参数，系统接管逻辑只负责
+	// 补齐/去重，不应主动删除用户输入。
+	input := []string{"--user-data-dir=D:\\profiles\\demo", "--test-type"}
+	got := appendChromeTestingInfobarSuppressArg(input, true)
 	want := []string{"--user-data-dir=D:\\profiles\\demo", "--test-type", "--disable-infobars"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("cloak path should include --test-type: got=%v want=%v", got, want)
+		t.Fatalf("cloak path should preserve an explicitly configured --test-type: got=%v want=%v", got, want)
 	}
 }
 
@@ -598,6 +612,67 @@ func TestAppendDefaultSearchProviderLaunchArgsEnabled(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("appendDefaultSearchProviderLaunchArgs mismatch: got=%v want=%v", got, want)
+	}
+}
+
+func TestFetchBrowserPageTabsReturnsRealPageTargets(t *testing.T) {
+	t.Parallel()
+
+	server := startDevToolsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/json":
+			_, _ = w.Write([]byte(`[
+				{"id":"page-1","type":"page","title":"X 首页","url":"https://x.com/home","webSocketDebuggerUrl":"ws://127.0.0.1/devtools/page-1"},
+				{"id":"bg-1","type":"background_page","title":"Wallet","url":"chrome-extension://abc/background.html","webSocketDebuggerUrl":"ws://127.0.0.1/devtools/bg-1"},
+				{"id":"page-2","type":"page","title":"","url":"about:blank","webSocketDebuggerUrl":"ws://127.0.0.1/devtools/page-2"}
+			]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	tabs := fetchBrowserPageTabs(server.port)
+	if len(tabs) != 2 {
+		t.Fatalf("expected only type=page targets, got=%d %+v", len(tabs), tabs)
+	}
+	if tabs[0].TabId != "page-1" || tabs[0].Title != "X 首页" || tabs[0].Url != "https://x.com/home" {
+		t.Fatalf("unexpected first tab: %+v", tabs[0])
+	}
+	if tabs[1].TabId != "page-2" || tabs[1].Title != "新标签页" || tabs[1].Url != "about:blank" {
+		t.Fatalf("unexpected second tab (blank title should fall back): %+v", tabs[1])
+	}
+}
+
+func TestFetchBrowserPageTabsReturnsNilWhenUnreachable(t *testing.T) {
+	t.Parallel()
+
+	if tabs := fetchBrowserPageTabs(freeLoopbackPort(t)); tabs != nil {
+		t.Fatalf("expected nil tabs for unreachable debug port, got=%+v", tabs)
+	}
+}
+
+func TestBrowserInstanceOpenUrlGatesOnRunningReadyProfile(t *testing.T) {
+	app := NewApp("")
+	app.browserMgr = browser.NewManager(config.DefaultConfig(), "")
+	app.browserMgr.Profiles = map[string]*BrowserProfile{}
+
+	if app.BrowserInstanceOpenUrl("missing", "https://x.com/home") {
+		t.Fatal("unknown profile must return false")
+	}
+
+	app.browserMgr.Profiles["p1"] = &BrowserProfile{ProfileId: "p1", Running: true, DebugReady: false}
+	if app.BrowserInstanceOpenUrl("p1", "https://x.com/home") {
+		t.Fatal("profile without a ready debug port must return false")
+	}
+
+	app.browserMgr.Profiles["p1"].DebugPort = freeLoopbackPort(t)
+	app.browserMgr.Profiles["p1"].DebugReady = true
+	if app.BrowserInstanceOpenUrl("p1", "") {
+		t.Fatal("empty target URL must return false")
+	}
+	if !app.BrowserInstanceOpenUrl("p1", "https://x.com/home") {
+		t.Fatal("ready profile must dispatch the open command")
 	}
 }
 

@@ -356,13 +356,16 @@ func normalizeConfig(config *Config) {
 		config.Browser.StartStableWindowMs = defaultConfig.Browser.StartStableWindowMs
 	}
 	// Policy v1 replaces the legacy destructive cleaner with a conservative,
-	// cache-only weekly cleaner. Enable it once for upgraded installations;
-	// subsequent user choices are preserved because the policy version is saved.
+	// cache-only cleaner. Automatic cleaning is OFF unless the user explicitly
+	// enables it in settings; the interval has a 30-day floor (monthly minimum,
+	// the weekly 7-day preset was removed). Older configs with a smaller saved
+	// interval are raised to the minimum. Subsequent user choices are preserved
+	// because the policy version is saved.
 	if config.Browser.CacheCleanupPolicyVersion < 1 {
-		config.Browser.CacheAutoCleanEnabled = true
+		config.Browser.CacheAutoCleanEnabled = false
 		config.Browser.CacheAutoCleanIntervalDays = defaultConfig.Browser.CacheAutoCleanIntervalDays
 		config.Browser.CacheCleanupPolicyVersion = 1
-	} else if config.Browser.CacheAutoCleanIntervalDays <= 0 {
+	} else if config.Browser.CacheAutoCleanIntervalDays < defaultConfig.Browser.CacheAutoCleanIntervalDays {
 		config.Browser.CacheAutoCleanIntervalDays = defaultConfig.Browser.CacheAutoCleanIntervalDays
 	}
 	if config.Browser.DefaultBookmarks == nil {
@@ -428,8 +431,10 @@ func DefaultConfig() *Config {
 			DefaultProxy:               "",
 			StartReadyTimeoutMs:        3000,
 			StartStableWindowMs:        450,
-			CacheAutoCleanEnabled:      true,
-			CacheAutoCleanIntervalDays: 7,
+			// 默认不自动清理缓存：清理周期与是否开启由用户在设置中显式选择
+			// （最低 30 天，即每月一次），也可以随时手动清理。
+			CacheAutoCleanEnabled:      false,
+			CacheAutoCleanIntervalDays: 30,
 			CacheCleanupPolicyVersion:  1,
 			CacheLastCleanAt:           "",
 		},
