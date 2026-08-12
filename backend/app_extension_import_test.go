@@ -678,13 +678,31 @@ func TestGlobalExtensionDistributionChecksOnlyNewProfilesOnExplicitAction(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	absPkg, err := filepath.Abs(extDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Loadable registration (ENABLED + valid package path): distribution must skip.
 	existingPrefs := filepath.Join(app.browserMgr.ResolveUserDataDir(existing), "Default", "Preferences")
 	if err := os.MkdirAll(filepath.Dir(existingPrefs), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(existingPrefs, []byte(`{"extensions":{"settings":{"nkbihfbeogaeaoehlefnkodbefgpgknn":{"manifest":{"name":"MetaMask"}}}}}`), 0644); err != nil {
+	loadablePrefs := map[string]any{
+		"extensions": map[string]any{
+			"settings": map[string]any{
+				extID: map[string]any{
+					"state":    float64(1),
+					"path":     absPkg,
+					"manifest": map[string]any{"name": "MetaMask"},
+				},
+			},
+		},
+	}
+	raw, _ := json.Marshal(loadablePrefs)
+	if err := os.WriteFile(existingPrefs, raw, 0644); err != nil {
 		t.Fatal(err)
 	}
+	beforePrefs, _ := os.ReadFile(existingPrefs)
 
 	first, err := app.BrowserGlobalExtensionImport(extID)
 	if err != nil {
@@ -693,8 +711,12 @@ func TestGlobalExtensionDistributionChecksOnlyNewProfilesOnExplicitAction(t *tes
 	if !reflect.DeepEqual(first.UpdatedProfiles, []string{missing.ProfileId}) {
 		t.Fatalf("explicit distribution should bind only the missing profile: %#v", first.UpdatedProfiles)
 	}
-	if prefs, err := os.ReadFile(existingPrefs); err != nil || strings.Contains(string(prefs), "developer_mode") {
-		t.Fatalf("existing extension preferences were modified: %s err=%v", prefs, err)
+	afterPrefs, err := os.ReadFile(existingPrefs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(beforePrefs) != string(afterPrefs) {
+		t.Fatalf("loadable existing profile Preferences must not be rewritten: before=%s after=%s", beforePrefs, afterPrefs)
 	}
 
 	second, err := app.BrowserGlobalExtensionImport(extID)
