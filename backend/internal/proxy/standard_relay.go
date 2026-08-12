@@ -22,6 +22,8 @@ type StandardRelayManager struct {
 	refs              map[string]string
 	detected          map[string]detectedStandardProxy
 	detectedGateways  map[string]detectedLocalGateway
+	// Full local network snapshots (ports/protocols) for adaptive path selection.
+	localEnvs map[string]cachedLocalNetworkEnv
 }
 
 type detectedStandardProxy struct {
@@ -32,6 +34,11 @@ type detectedStandardProxy struct {
 
 type detectedLocalGateway struct {
 	url       string
+	expiresAt time.Time
+}
+
+type cachedLocalNetworkEnv struct {
+	env       LocalNetworkEnvironment
 	expiresAt time.Time
 }
 
@@ -50,6 +57,7 @@ func NewStandardRelayManager() *StandardRelayManager {
 		refs:             make(map[string]string),
 		detected:         make(map[string]detectedStandardProxy),
 		detectedGateways: make(map[string]detectedLocalGateway),
+		localEnvs:        make(map[string]cachedLocalNetworkEnv),
 	}
 }
 
@@ -81,8 +89,8 @@ func (m *StandardRelayManager) Acquire(profileID, src string, routeOptions ...St
 	if err == nil {
 		return localURL, working, nil
 	}
-	// One automatic recovery: drop sticky detection and re-probe. Required so a
-	// cached dead endpoint does not brick environment starts until TTL expires.
+	// One automatic recovery: drop sticky detection + local-env cache and re-probe
+	// when the machine's network path changed (local port up/down, system tunnel).
 	return m.acquireOnce(profileID, src, detectionKey, options, true)
 }
 
@@ -97,6 +105,12 @@ func (m *StandardRelayManager) acquireOnce(
 	m.mu.Lock()
 	if forceRedetect {
 		delete(m.detected, detectionKey)
+		// Invalidate local network snapshot so the next start re-scans ports /
+		// protocols instead of sticking to a dead first hop.
+		delete(m.detectedGateways, options.LocalGatewayURL)
+		delete(m.detectedGateways, "")
+		delete(m.detectedGateways, "__env__"+options.LocalGatewayURL)
+		delete(m.localEnvs, strings.TrimSpace(options.LocalGatewayURL))
 	}
 	if cached, ok := m.detected[detectionKey]; ok {
 		if now.Before(cached.expiresAt) {
@@ -116,37 +130,19 @@ func (m *StandardRelayManager) acquireOnce(
 	m.mu.Unlock()
 
 	if working == "" {
-		// Protocol-labelled provider lists are frequently wrong. Probe declared
-		// scheme first, then alternates under a short bounded timeout (kept on
-		// every start for connectivity — not a disposable check).
-		var upstreamDialer C.Dialer
-		if options.Mode == ProxyNetworkModeAuto || options.Mode == ProxyNetworkModeLocalGateway {
-			gateway = m.discoverLocalGatewayCached(options.LocalGatewayURL)
-			if gateway != "" {
-				upstreamDialer, _ = newUpstreamGatewayDialer(gateway)
-			}
-			if options.Mode == ProxyNetworkModeLocalGateway && upstreamDialer == nil {
-				return "", "", fmt.Errorf("未检测到可用的本地 VPN HTTP/SOCKS 网关；请确认非 TUN 模式端口并填写本地 VPN 网关")
-			}
-		}
+		// Tool-agnostic path selection:
+		//   1) inspect local network (open ports + HTTP/SOCKS handshake)
+		//   2) try candidate first hops that fit the mode
+		//   3) keep the path where the environment's IP proxy actually works
+		//
+		// Modes:
+		//   direct / tun → system route only (no local port chaining)
+		//   local_gateway → require a healthy local HTTP/SOCKS first hop
+		//   auto → compare system route + live local gateways; pick best E2E path
 		var err error
-		working, err = detectWorkingStandardProxyConfigWithDialer(src, &SpeedTestConfig{
-			Timeout:    6 * time.Second,
-			TCPTimeout: 3 * time.Second,
-			URLs:       []string{defaultTestURL},
-		}, upstreamDialer)
-		if err != nil && options.Mode == ProxyNetworkModeAuto && upstreamDialer != nil {
-			// Local gateway may be alive while blocking this particular
-			// provider endpoint. Auto mode falls back to direct/TUN routing.
-			gateway = ""
-			working, err = DetectWorkingStandardProxyConfig(src, &SpeedTestConfig{
-				Timeout:    6 * time.Second,
-				TCPTimeout: 3 * time.Second,
-				URLs:       []string{defaultTestURL},
-			})
-		}
+		working, gateway, err = m.resolveWorkingNetworkPath(src, options)
 		if err != nil {
-			return "", "", fmt.Errorf("代理协议/认证验证失败；非 TUN 请填写本地 VPN 网关，TUN 请确认代理服务器连接已由 VPN 正常转发且未形成代理回环: %w", err)
+			return "", "", err
 		}
 		working = strings.TrimSpace(working)
 		relayKey = standardRelayKey(working, gateway)
@@ -207,12 +203,24 @@ func standardRelayKey(working, gateway string) string {
 }
 
 func (m *StandardRelayManager) discoverLocalGatewayCached(explicit string) string {
+	env := m.probeLocalNetworkEnvironmentCached(explicit)
+	if strings.TrimSpace(explicit) != "" {
+		return env.ExplicitGateway
+	}
+	return env.BestGateway
+}
+
+// probeLocalNetworkEnvironmentCached returns a short-lived snapshot of local
+// first-hop options. Shared across multi-open so we do not re-scan ports for
+// every environment start within a few minutes.
+func (m *StandardRelayManager) probeLocalNetworkEnvironmentCached(explicit string) LocalNetworkEnvironment {
 	cacheKey := strings.TrimSpace(explicit)
 	now := time.Now()
 	m.mu.Lock()
-	if cached, ok := m.detectedGateways[cacheKey]; ok && now.Before(cached.expiresAt) {
+	if cached, ok := m.localEnvs[cacheKey]; ok && now.Before(cached.expiresAt) {
+		env := cached.env
 		m.mu.Unlock()
-		return cached.url
+		return env
 	}
 	m.mu.Unlock()
 
@@ -220,17 +228,132 @@ func (m *StandardRelayManager) discoverLocalGatewayCached(explicit string) strin
 	defer m.gatewayDiscoverMu.Unlock()
 	now = time.Now()
 	m.mu.Lock()
-	if cached, ok := m.detectedGateways[cacheKey]; ok && now.Before(cached.expiresAt) {
+	if cached, ok := m.localEnvs[cacheKey]; ok && now.Before(cached.expiresAt) {
+		env := cached.env
 		m.mu.Unlock()
-		return cached.url
+		return env
 	}
 	m.mu.Unlock()
 
-	gateway := DiscoverLocalGateway(explicit, 1800*time.Millisecond)
+	// Full live scan: open ports → protocol handshake → rank by latency.
+	env := ProbeLocalNetworkEnvironment(explicit, 3*time.Second)
 	m.mu.Lock()
-	m.detectedGateways[cacheKey] = detectedLocalGateway{url: gateway, expiresAt: now.Add(5 * time.Minute)}
+	m.localEnvs[cacheKey] = cachedLocalNetworkEnv{env: env, expiresAt: now.Add(2 * time.Minute)}
+	// Keep best-gateway map in sync for DiscoverLocalGatewayCached callers.
+	m.detectedGateways[cacheKey] = detectedLocalGateway{
+		url:       env.BestGateway,
+		expiresAt: now.Add(2 * time.Minute),
+	}
+	m.detectedGateways["__env__"+cacheKey] = detectedLocalGateway{
+		url:       env.BestGateway,
+		expiresAt: now.Add(2 * time.Minute),
+	}
 	m.mu.Unlock()
-	return gateway
+	return env
+}
+
+// resolveWorkingNetworkPath picks how the environment's IP proxy should leave
+// this machine: system route only, or via a live local HTTP/SOCKS first hop.
+// Decision is based on end-to-end success against the actual proxy config —
+// not on any third-party VPN brand.
+func (m *StandardRelayManager) resolveWorkingNetworkPath(src string, options StandardProxyRouteOptions) (working, gateway string, err error) {
+	probeCfg := cloneLaunchStandardProxyProbeConfig()
+	mode := options.Mode
+
+	// Forced system route: no local port chaining.
+	if mode == ProxyNetworkModeDirect || mode == ProxyNetworkModeTUN {
+		working, err = DetectWorkingStandardProxyConfig(src, &probeCfg)
+		if err != nil {
+			return "", "", fmt.Errorf("代理协议/认证验证失败（系统路由）；请确认本机网络/隧道可访问代理服务器且未形成回环: %w", err)
+		}
+		return working, "", nil
+	}
+
+	// Build first-hop candidates from the live local environment.
+	env := m.probeLocalNetworkEnvironmentCached(options.LocalGatewayURL)
+	type pathCandidate struct {
+		gateway string // empty = system route
+	}
+	candidates := make([]pathCandidate, 0, 8)
+
+	switch mode {
+	case ProxyNetworkModeLocalGateway:
+		if env.ExplicitGateway != "" {
+			candidates = append(candidates, pathCandidate{gateway: env.ExplicitGateway})
+		} else if env.BestGateway != "" {
+			// No explicit pin: use every healthy local hop, best latency first.
+			for _, g := range env.Gateways {
+				candidates = append(candidates, pathCandidate{gateway: g.URL})
+			}
+		}
+		if len(candidates) == 0 {
+			return "", "", fmt.Errorf("未检测到可用的本机 HTTP/SOCKS 转发端口；请开启本地转发服务，或在设置中填写本机网关地址，或改用「系统隧道/自动」模式")
+		}
+	default: // auto
+		// System route first: covers plain ISP and system TUN without double hop.
+		candidates = append(candidates, pathCandidate{gateway: ""})
+		// Then every live local hop (already ranked by latency). Cap to avoid
+		// probing dozens of ports on pathological machines.
+		const maxLocalHops = 4
+		for i, g := range env.Gateways {
+			if i >= maxLocalHops {
+				break
+			}
+			candidates = append(candidates, pathCandidate{gateway: g.URL})
+		}
+	}
+
+	type pathResult struct {
+		working string
+		gateway string
+		latency time.Duration
+		err     error
+	}
+	results := make(chan pathResult, len(candidates))
+	for _, candidate := range candidates {
+		candidate := candidate
+		go func() {
+			started := time.Now()
+			var dialer C.Dialer
+			if candidate.gateway != "" {
+				d, dialErr := newUpstreamGatewayDialer(candidate.gateway)
+				if dialErr != nil {
+					results <- pathResult{gateway: candidate.gateway, err: dialErr}
+					return
+				}
+				dialer = d
+			}
+			cfg := cloneLaunchStandardProxyProbeConfig()
+			resolved, detectErr := detectWorkingStandardProxyConfigWithDialer(src, &cfg, dialer)
+			results <- pathResult{
+				working: resolved,
+				gateway: candidate.gateway,
+				latency: time.Since(started),
+				err:     detectErr,
+			}
+		}()
+	}
+
+	var best *pathResult
+	var lastErr error
+	for range candidates {
+		item := <-results
+		if item.err != nil {
+			lastErr = item.err
+			continue
+		}
+		if best == nil || item.latency < best.latency {
+			copyItem := item
+			best = &copyItem
+		}
+	}
+	if best == nil {
+		if lastErr == nil {
+			lastErr = fmt.Errorf("无可用网络路径")
+		}
+		return "", "", fmt.Errorf("代理协议/认证验证失败；已按本机网络环境尝试系统路由与本地 HTTP/SOCKS 转发，均无法到达该 IP 代理。请检查代理协议/账号、本机转发端口，以及系统隧道是否把代理服务器 IP 再次捕获形成回环: %w", lastErr)
+	}
+	return best.working, best.gateway, nil
 }
 
 func (m *StandardRelayManager) acquireExistingLocked(profileID, key string) (string, bool) {
@@ -288,6 +411,7 @@ func (m *StandardRelayManager) StopAll() {
 	m.refs = make(map[string]string)
 	m.detected = make(map[string]detectedStandardProxy)
 	m.detectedGateways = make(map[string]detectedLocalGateway)
+	m.localEnvs = make(map[string]cachedLocalNetworkEnv)
 	m.mu.Unlock()
 	for _, r := range relays {
 		_ = r.Close()

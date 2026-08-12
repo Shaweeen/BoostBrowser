@@ -137,20 +137,23 @@ export function BrowserSettingsModal({ open, onClose, settings: initSettings, co
               value={settings.proxyNetworkMode || 'auto'}
               onChange={e => setSettings(p => ({ ...p, proxyNetworkMode: e.target.value as BrowserSettings['proxyNetworkMode'] }))}
               options={[
-                { value: 'auto', label: '自动（本地 VPN 网关优先，失败后直连/TUN）' },
-                { value: 'local_gateway', label: '本地 VPN 网关（非 TUN 双层代理）' },
-                { value: 'tun', label: 'TUN 接管第一跳' },
-                { value: 'direct', label: '直接连接 IP 代理服务器' },
+                { value: 'auto', label: '自动（检测本机端口/协议，选可用转发路径）' },
+                { value: 'local_gateway', label: '强制本机 HTTP/SOCKS 第一跳' },
+                { value: 'tun', label: '系统隧道路由（不使用本机代理端口）' },
+                { value: 'direct', label: '直连 IP 代理服务器' },
               ]}
             />
           </FormItem>
-          <FormItem label="本地 VPN 网关（可选）">
+          <FormItem label="本机转发网关（可选）">
             <Input
               value={settings.localVpnProxy || ''}
               onChange={e => setSettings(p => ({ ...p, localVpnProxy: e.target.value }))}
-              placeholder="例如：http://127.0.0.1:7897 或 socks5://127.0.0.1:7891"
+              placeholder="例如：http://127.0.0.1:7897 或 socks5://127.0.0.1:1080"
             />
-            <p className="mt-1 text-xs text-[var(--color-text-muted)]">非 TUN 模式下作为第一跳；最终网站出口仍是环境选择的 IP 代理。</p>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+              启动环境时会扫描本机已监听端口，自动识别 HTTP CONNECT / SOCKS5，并按「系统路由 + 本机转发」实测哪条路径能通环境配置的 IP 代理。
+              不绑定某一款 VPN/代理软件。留空则完全自动；填写则优先使用该本机地址。
+            </p>
           </FormItem>
         </div>
       </Modal>

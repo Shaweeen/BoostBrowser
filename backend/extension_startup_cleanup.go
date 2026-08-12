@@ -203,9 +203,40 @@ func patchChromePreferencesFile(path string) error {
 		changed = true
 	}
 
+	// Website login durability (Gmail / X / OAuth such as Privy):
+	//   - allow third-party cookies so authorize redirects keep state;
+	//   - default content setting for cookies = Allow (1);
+	//   - never arm "clear cookies on exit" for multi-account environments.
+	// Chromium cookie_controls_mode: 0 = allow all third-party cookies.
+	if !jsonNumberEquals(profilePrefs["cookie_controls_mode"], 0) {
+		profilePrefs["cookie_controls_mode"] = float64(0)
+		changed = true
+	}
+	if profilePrefs["block_third_party_cookies"] != false {
+		profilePrefs["block_third_party_cookies"] = false
+		changed = true
+	}
+	defaultContent := ensureJSONMap(profilePrefs, "default_content_setting_values")
+	if !jsonNumberEquals(defaultContent["cookies"], 1) {
+		defaultContent["cookies"] = float64(1)
+		changed = true
+	}
+	// Some Chromium builds store clear-on-exit under privacy.clear_on_exit.*;
+	// force cookies off so Gmail/X sessions survive close + upgrade restart.
+	privacyPrefs := ensureJSONMap(prefs, "privacy")
+	clearOnExit := ensureJSONMap(privacyPrefs, "clear_on_exit")
+	for _, key := range []string{"cookies", "hosted_app_data", "site_settings"} {
+		if clearOnExit[key] != false {
+			clearOnExit[key] = false
+			changed = true
+		}
+	}
+
 	// Keep every isolated environment local-only by default. Windows enterprise
 	// policy is authoritative for Chrome, while these preferences cover Chromium
 	// variants that do not implement every Google policy hook.
+	// Note: signin.allowed=false only blocks Chrome browser-account sync, not
+	// website logins (mail.google.com / x.com cookies still persist).
 	signinPrefs := ensureJSONMap(prefs, "signin")
 	if signinPrefs["allowed"] != false {
 		signinPrefs["allowed"] = false
@@ -261,6 +292,24 @@ func ensureJSONMap(parent map[string]any, key string) map[string]any {
 	created := map[string]any{}
 	parent[key] = created
 	return created
+}
+
+// jsonNumberEquals compares JSON numbers that may arrive as float64, int, or
+// json.Number after round-trips.
+func jsonNumberEquals(value any, want int) bool {
+	switch v := value.(type) {
+	case float64:
+		return int(v) == want
+	case int:
+		return v == want
+	case int64:
+		return int(v) == want
+	case json.Number:
+		n, err := v.Int64()
+		return err == nil && int(n) == want
+	default:
+		return false
+	}
 }
 
 // sessionRestoreIsAboutBlank reports whether session prefs already pin a single

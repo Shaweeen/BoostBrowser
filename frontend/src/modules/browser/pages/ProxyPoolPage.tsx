@@ -2581,7 +2581,7 @@ export function ProxyPoolPage() {
                 </FormItem>
               </div>
               <div className="rounded-xl border border-[#f0d58a] bg-[#fff9e8] px-3 py-2 text-xs leading-5 text-[#8a5a00]">
-                独立环境代理不要求开启本地 VPN/TUN。若必须同时使用 Clash Verge TUN，请在 TUN 路由排除中加入代理服务器 IP，避免代理连接再次被 TUN 捕获形成双重代理或回环。
+                独立环境代理不绑定某一款本地工具。启动时会检测本机 HTTP/SOCKS 端口与系统路由，自动选择能到达该 IP 的转发路径。若本机有系统隧道（TUN），请在隧道分流中排除代理服务器 IP，避免双重代理或回环。
               </div>
             </>
           ) : (

@@ -46,6 +46,16 @@ var DefaultSpeedTestConfig = SpeedTestConfig{
 	TCPTimeout: 3 * time.Second,
 }
 
+// LaunchStandardProxyProbeConfig is used when starting environments through the
+// local standard relay. Nym mixnet / dual-hop VPN / residential exits routinely
+// exceed the 6s manual speed-test budget; launch must wait longer and try more
+// connectivity endpoints before hard-failing the whole environment.
+var LaunchStandardProxyProbeConfig = SpeedTestConfig{
+	Timeout:    22 * time.Second,
+	TCPTimeout: 8 * time.Second,
+	// filled lazily via clone so callers get a copy of defaultSpeedTestURLs
+}
+
 // ─── 对外入口 ───
 
 // SpeedTest 使用 mihomo 代理适配器进行测速。
@@ -170,10 +180,17 @@ func robustHTTPProxyTest(proxyId string, px C.Proxy, testURLs []string, timeout 
 
 	lastErr := ""
 	deadline := time.Now().Add(timeout)
-	// GET 的兼容性高于 HEAD。最多尝试三个独立连通性站点，每次不超过
-	// 3 秒，且所有尝试共享 timeout 总预算。
+	// GET 的兼容性高于 HEAD。最多尝试四个独立连通性站点，共享 timeout 总预算。
+	// 短预算（手动测速）单次 ≤3s；长预算（环境启动 / Nym 等慢链路）单次最多 10s，
+	// 否则 gstatic 首包在混网/双跳下经常 3s 内到不了就误杀。
+	maxPerRequest := 3 * time.Second
+	if timeout >= 18*time.Second {
+		maxPerRequest = 10 * time.Second
+	} else if timeout >= 10*time.Second {
+		maxPerRequest = 6 * time.Second
+	}
 	for index, testURL := range testURLs {
-		if index >= 3 {
+		if index >= 4 {
 			break
 		}
 		remaining := time.Until(deadline)
@@ -181,8 +198,12 @@ func robustHTTPProxyTest(proxyId string, px C.Proxy, testURLs []string, timeout 
 			break
 		}
 		requestTimeout := remaining
-		if requestTimeout > 3*time.Second {
-			requestTimeout = 3 * time.Second
+		if requestTimeout > maxPerRequest {
+			requestTimeout = maxPerRequest
+		}
+		// Need a usable floor so a 50ms leftover does not produce a noisy timeout.
+		if requestTimeout < 800*time.Millisecond {
+			break
 		}
 		result := singleHTTPProxyTest(proxyId, px, testURL, http.MethodGet, requestTimeout)
 		if result.Ok {
@@ -194,6 +215,44 @@ func robustHTTPProxyTest(proxyId string, px C.Proxy, testURLs []string, timeout 
 		lastErr = "代理测试失败"
 	}
 	return TestResult{ProxyId: proxyId, Ok: false, Error: lastErr}
+}
+
+// cloneLaunchStandardProxyProbeConfig returns a fresh launch probe config with
+// the multi-endpoint URL list. Callers may mutate the returned value.
+func cloneLaunchStandardProxyProbeConfig() SpeedTestConfig {
+	cfg := LaunchStandardProxyProbeConfig
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 22 * time.Second
+	}
+	if cfg.TCPTimeout <= 0 {
+		cfg.TCPTimeout = 8 * time.Second
+	}
+	if len(cfg.URLs) == 0 {
+		cfg.URLs = append([]string{}, defaultSpeedTestURLs...)
+	}
+	return cfg
+}
+
+// FormatStandardRelayAcquireError turns raw probe failures into actionable text
+// for any local network environment (system tunnel, local HTTP/SOCKS, high RTT).
+func FormatStandardRelayAcquireError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		return "代理协议/认证验证失败"
+	}
+	lower := strings.ToLower(msg)
+	slowPath := strings.Contains(lower, "deadline exceeded") ||
+		strings.Contains(lower, "context deadline") ||
+		strings.Contains(lower, "i/o timeout") ||
+		strings.Contains(lower, "timeout") ||
+		strings.Contains(lower, "timed out")
+	if slowPath {
+		return msg + "。网络路径超时：请确认本机转发端口/系统隧道畅通，代理服务器 IP 未被隧道再次捕获形成回环，或改用更快节点后重试"
+	}
+	return msg
 }
 
 func singleHTTPProxyTest(proxyId string, px C.Proxy, testURL string, method string, timeout time.Duration) TestResult {

@@ -502,19 +502,20 @@ export function CoreManagementPage() {
               value={settingsForm.proxyNetworkMode || 'auto'}
               onChange={e => setSettingsForm(prev => ({ ...prev, proxyNetworkMode: e.target.value as BrowserSettings['proxyNetworkMode'] }))}
               options={[
-                { value: 'auto', label: '自动（本地 VPN 网关优先）' },
-                { value: 'local_gateway', label: '本地 VPN 网关（非 TUN）' },
-                { value: 'tun', label: 'TUN 接管第一跳' },
-                { value: 'direct', label: '直接连接' },
+                { value: 'auto', label: '自动（检测本机网络环境）' },
+                { value: 'local_gateway', label: '强制本机 HTTP/SOCKS 第一跳' },
+                { value: 'tun', label: '系统隧道路由' },
+                { value: 'direct', label: '直连 IP 代理' },
               ]}
             />
           </FormItem>
-          <FormItem label="本地 VPN 网关（可选）">
+          <FormItem label="本机转发网关（可选）">
             <Input
               value={settingsForm.localVpnProxy}
               onChange={e => setSettingsForm(prev => ({ ...prev, localVpnProxy: e.target.value }))}
-              placeholder="http://127.0.0.1:7897 或 socks5://127.0.0.1:7891"
+              placeholder="http://127.0.0.1:7897 或 socks5://127.0.0.1:1080"
             />
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">启动时按本机实际端口/协议自适应，不绑定特定 VPN 软件；留空即可自动探测。</p>
           </FormItem>
           <FormItem label="默认指纹参数">
             <Textarea

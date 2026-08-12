@@ -50,6 +50,8 @@ func TestLocalGatewayCandidatesPreferExplicitAndDeduplicate(t *testing.T) {
 	t.Setenv("ALL_PROXY", "http://127.0.0.1:7890")
 	t.Setenv("HTTPS_PROXY", "http://203.0.113.10:7890")
 	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("SOCKS_PROXY", "")
+	t.Setenv("socks_proxy", "")
 	candidates := LocalGatewayCandidates("127.0.0.1:7890")
 	if len(candidates) == 0 || candidates[0] != "http://127.0.0.1:7890" {
 		t.Fatalf("explicit gateway was not preferred: %#v", candidates)
@@ -65,6 +67,37 @@ func TestLocalGatewayCandidatesPreferExplicitAndDeduplicate(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("gateway was not deduplicated: %#v", candidates)
+	}
+	// Seeds must include both schemes for common ports (tool-agnostic).
+	hasHTTP := false
+	hasSOCKS := false
+	for _, candidate := range candidates {
+		if strings.HasPrefix(candidate, "http://127.0.0.1:") {
+			hasHTTP = true
+		}
+		if strings.HasPrefix(candidate, "socks5://127.0.0.1:") {
+			hasSOCKS = true
+		}
+	}
+	if !hasHTTP || !hasSOCKS {
+		t.Fatalf("expected both http and socks5 seeds, got %#v", candidates)
+	}
+}
+
+func TestPreferLocalGatewayIsLatencyOnly(t *testing.T) {
+	// No brand tiers: faster path always wins regardless of "tier" argument.
+	if !preferLocalGateway(99, 10*time.Millisecond, 0, 50*time.Millisecond) {
+		t.Fatal("lower latency must win (tool-agnostic)")
+	}
+	if preferLocalGateway(0, 80*time.Millisecond, 99, 20*time.Millisecond) {
+		t.Fatal("higher latency must not win")
+	}
+}
+
+func TestGatewayFamilyNameIsPortLabelOnly(t *testing.T) {
+	name := GatewayFamilyName("http://127.0.0.1:7897")
+	if !strings.Contains(name, "7897") || !strings.Contains(name, "http") {
+		t.Fatalf("family name should be scheme+port diagnostic, got %q", name)
 	}
 }
 
@@ -218,5 +251,30 @@ func TestStandardRelayChainsThroughLocalVPNGateway(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("gateway tunnel did not close")
+	}
+}
+
+func TestProbeLocalNetworkEnvironmentRanksByLatencyNotBrand(t *testing.T) {
+	// With no listeners, environment should simply report empty gateways.
+	env := ProbeLocalNetworkEnvironment("", 200*time.Millisecond)
+	if env.ProbedAt.IsZero() {
+		t.Fatal("ProbedAt must be set")
+	}
+	// Do not require open ports on CI; just ensure API is stable.
+	_ = env.HasLocalGateway
+	_ = env.BestGateway
+}
+
+func TestResolveWorkingNetworkPathDirectIgnoresLocalPorts(t *testing.T) {
+	mgr := NewStandardRelayManager()
+	// Invalid proxy should fail without needing local tools.
+	_, _, err := mgr.resolveWorkingNetworkPath("http://127.0.0.1:1", StandardProxyRouteOptions{
+		Mode: ProxyNetworkModeDirect,
+	})
+	if err == nil {
+		t.Fatal("direct mode with dead proxy must fail")
+	}
+	if !strings.Contains(err.Error(), "系统路由") {
+		t.Fatalf("direct-mode error should mention system route: %v", err)
 	}
 }

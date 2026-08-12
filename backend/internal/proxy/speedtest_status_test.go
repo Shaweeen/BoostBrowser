@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestUsableProxyResponseStatusRejectsProxyAuthentication(t *testing.T) {
@@ -51,5 +53,29 @@ func TestSchemeOfProxyURL(t *testing.T) {
 	}
 	if schemeOfProxyURL("http://x:1") != "http" {
 		t.Fatal("http scheme parse")
+	}
+}
+
+func TestCloneLaunchStandardProxyProbeConfig(t *testing.T) {
+	cfg := cloneLaunchStandardProxyProbeConfig()
+	if cfg.Timeout < 15*time.Second {
+		t.Fatalf("launch probe timeout too short for Nym/high-latency: %v", cfg.Timeout)
+	}
+	if cfg.TCPTimeout < 5*time.Second {
+		t.Fatalf("launch TCP timeout too short: %v", cfg.TCPTimeout)
+	}
+	if len(cfg.URLs) < 2 {
+		t.Fatalf("launch probe must try multiple connectivity URLs, got %#v", cfg.URLs)
+	}
+}
+
+func TestFormatStandardRelayAcquireErrorHintsTimeout(t *testing.T) {
+	msg := FormatStandardRelayAcquireError(fmt.Errorf(`Get "http://www.gstatic.com/generate_204": context deadline exceeded`))
+	if !strings.Contains(msg, "超时") && !strings.Contains(msg, "回环") {
+		t.Fatalf("timeout error should give network-path guidance: %s", msg)
+	}
+	plain := FormatStandardRelayAcquireError(fmt.Errorf("proxy auth failed"))
+	if strings.Contains(plain, "回环") {
+		t.Fatalf("non-timeout errors should not force tunnel hint: %s", plain)
 	}
 }

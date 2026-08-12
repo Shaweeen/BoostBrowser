@@ -59,8 +59,59 @@ func TestPatchChromePreferencesFileDisablesSessionRestore(t *testing.T) {
 	if syncPrefs["requested"] != false || syncPrefs["suppress_start"] != true {
 		t.Fatalf("browser sync startup preferences not suppressed: %#v", syncPrefs)
 	}
+	// Website login durability: third-party cookies allowed, never clear on exit.
+	if !jsonNumberEquals(profile["cookie_controls_mode"], 0) {
+		t.Fatalf("cookie_controls_mode must allow third-party cookies: %#v", profile["cookie_controls_mode"])
+	}
+	if profile["block_third_party_cookies"] != false {
+		t.Fatalf("block_third_party_cookies must be false: %#v", profile["block_third_party_cookies"])
+	}
+	defaultContent := profile["default_content_setting_values"].(map[string]any)
+	if !jsonNumberEquals(defaultContent["cookies"], 1) {
+		t.Fatalf("cookies content setting must be Allow(1): %#v", defaultContent["cookies"])
+	}
+	privacy := out["privacy"].(map[string]any)
+	clearOnExit := privacy["clear_on_exit"].(map[string]any)
+	if clearOnExit["cookies"] != false {
+		t.Fatalf("clear_on_exit.cookies must be false: %#v", clearOnExit)
+	}
 	// 默认搜索引擎现在由 seedDefaultSearchEngine 接管（需要 Web Data 文件），
 	// patchChromePreferencesFile 不再负责 search provider 字段。
+}
+
+func TestSessionWipeDoneIsOneShot(t *testing.T) {
+	root := t.TempDir()
+	def := filepath.Join(root, "Default")
+	if err := os.MkdirAll(filepath.Join(def, "Sessions"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite := func(path, body string) {
+		if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite(filepath.Join(def, "Current Session"), "session-1")
+	mustWrite(filepath.Join(def, "Cookies"), "cookie-db")
+
+	// First wipe: session gone, cookies kept, marker written.
+	sanitizeChromeStartupPreferencesOpts(root, true)
+	if _, err := os.Stat(filepath.Join(def, "Current Session")); !os.IsNotExist(err) {
+		t.Fatal("first adapt should discard restorable session")
+	}
+	if _, err := os.Stat(filepath.Join(def, "Cookies")); err != nil {
+		t.Fatalf("Cookies must never be wiped: %v", err)
+	}
+	if !sessionWipeDone(root) {
+		t.Fatal("session wipe marker must be set after first wipe")
+	}
+
+	// User later re-creates a session file (normal browsing). Second start with
+	// wipeRestorableSessions=true must NOT delete it again.
+	mustWrite(filepath.Join(def, "Current Session"), "session-2")
+	sanitizeChromeStartupPreferencesOpts(root, true)
+	if data, err := os.ReadFile(filepath.Join(def, "Current Session")); err != nil || string(data) != "session-2" {
+		t.Fatalf("second start must keep user session after one-shot wipe, got %q err=%v", data, err)
+	}
 }
 
 func TestSanitizeChromeStartupPreferencesDoesNotCreateSearchProvider(t *testing.T) {

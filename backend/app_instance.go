@@ -407,7 +407,8 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			LocalGatewayURL: a.config.Browser.LocalVPNProxy,
 		})
 		if relayErr != nil {
-			startErr := fmt.Errorf("实例启动失败：标准代理本地转发启动失败。原因：%v。请检查代理协议、账号密码和节点可用性。", relayErr)
+			detail := proxy.FormatStandardRelayAcquireError(relayErr)
+			startErr := fmt.Errorf("实例启动失败：标准代理本地转发启动失败。原因：%s。已按本机网络环境探测端口/协议与转发路径；请检查代理协议、账号密码、节点可用性，以及本机转发或系统隧道是否畅通。", detail)
 			log.Error("标准代理本地转发失败", logger.F("profile_id", profileId), logger.F("proxy_id", profile.ProxyId), logger.F("error", relayErr.Error()), logger.F("reason", startErr.Error()))
 			profile.LastError = startErr.Error()
 			return profile, startErr

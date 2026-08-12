@@ -1709,22 +1709,24 @@ export function BrowserListPage() {
                 value={settings.proxyNetworkMode || 'auto'}
                 onChange={e => setSettings(prev => ({ ...prev, proxyNetworkMode: e.target.value as BrowserSettings['proxyNetworkMode'] }))}
                 options={[
-                  { value: 'auto', label: '自动' },
-                  { value: 'local_gateway', label: '本地 VPN 网关（非 TUN）' },
-                  { value: 'tun', label: 'TUN 接管' },
-                  { value: 'direct', label: '直接连接' },
+                  { value: 'auto', label: '自动（检测本机网络环境）' },
+                  { value: 'local_gateway', label: '强制本机 HTTP/SOCKS 第一跳' },
+                  { value: 'tun', label: '系统隧道路由' },
+                  { value: 'direct', label: '直连 IP 代理' },
                 ]}
               />
             </FormItem>
-            <FormItem label="本地 VPN 网关（可选）">
+            <FormItem label="本机转发网关（可选）">
               <Input
                 value={settings.localVpnProxy || ''}
                 onChange={e => setSettings(prev => ({ ...prev, localVpnProxy: e.target.value }))}
-                placeholder="http://127.0.0.1:7897"
+                placeholder="http://127.0.0.1:7897 或 socks5://127.0.0.1:1080"
               />
             </FormItem>
           </div>
-          <p className="-mt-4 text-xs text-[var(--color-text-muted)]">非 TUN 时 VPN 只负责第一跳传输，网站最终看到环境选择的代理池 IP。</p>
+          <p className="-mt-4 text-xs text-[var(--color-text-muted)]">
+            启动时扫描本机端口并识别 HTTP/SOCKS5，自动选择能到达环境 IP 代理的转发路径；不绑定某一款代理工具。网站最终出口仍是环境配置的 IP。
+          </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <FormItem label="启动就绪超时（毫秒）" hint="默认 3000，慢机器可调到 5000-10000">
               <Input
