@@ -148,8 +148,8 @@ func TestUpdateDownloadRoutesFollowPriorityAndEndWithDirect(t *testing.T) {
 	app.config.Browser.LocalVPNProxy = "http://127.0.0.1:17890"
 
 	routes := app.updateNetworkRoutes()
-	if len(routes) != 3 {
-		t.Fatalf("expected client, deduplicated env and direct routes, got %#v", routes)
+	if len(routes) < 3 {
+		t.Fatalf("expected at least client, deduplicated env and direct routes, got %#v", routes)
 	}
 	if routes[0].name != "客户端代理" || routes[0].proxyURL != "http://127.0.0.1:17890" {
 		t.Fatalf("client proxy must be first: %#v", routes)
@@ -157,7 +157,16 @@ func TestUpdateDownloadRoutesFollowPriorityAndEndWithDirect(t *testing.T) {
 	if !strings.HasPrefix(routes[1].name, "环境变量 ") || routes[1].proxyURL != "http://127.0.0.1:17891" {
 		t.Fatalf("environment proxy must follow client proxy: %#v", routes)
 	}
-	if routes[2].name != "直连" || routes[2].proxyURL != "" {
+	last := routes[len(routes)-1]
+	if last.name != "直连" || last.proxyURL != "" {
 		t.Fatalf("direct fallback must be last: %#v", routes)
+	}
+	// Windows CI/build hosts may have Clash Verge system proxy enabled. It is
+	// intentionally included between environment proxy and direct; the test
+	// must not assume the machine-wide proxy is absent.
+	for i, route := range routes[2 : len(routes)-1] {
+		if route.name != "Windows 系统代理" || route.proxyURL == "" {
+			t.Fatalf("unexpected fallback route at %d: %#v", i+2, routes)
+		}
 	}
 }
