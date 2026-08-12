@@ -283,24 +283,32 @@ $assets = @(
 )
 foreach ($asset in $assets) { Require-File $asset }
 
+# Release lifecycle (Windows is the binary authority):
+# - No release yet → create draft, upload, then publish (draft=false).
+# - Existing draft → upload, then publish.
+# - Already published → re-upload assets with --clobber (notes-only / partial
+#   releases from other machines are common). Never require isDraft after upload.
 $existing = $null
 $existingProbe = Invoke-GhProbe -Arguments @('release', 'view', $Tag, '--repo', $Repository, '--json', 'tagName,isDraft,isPrerelease')
 $existingText = $existingProbe.Output
 if ($existingProbe.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($existingText)) {
     $existing = $existingText | ConvertFrom-Json
-    if (-not $existing.isDraft) {
-        throw "Release $Tag is already published and will not be overwritten"
+    if ($existing.isDraft) {
+        Write-Host "Release $Tag exists as draft; uploading assets then publishing." -ForegroundColor Cyan
+    } else {
+        Write-Host "Release $Tag already published; re-uploading Windows assets with --clobber." -ForegroundColor Yellow
     }
 } else {
     & gh release create $Tag --repo $Repository --title "BrowserStudio $Tag" --notes-file $NotesPath --verify-tag --draft
     if ($LASTEXITCODE -ne 0) { throw "Unable to create draft release $Tag" }
+    Write-Host "Created draft release $Tag" -ForegroundColor Cyan
 }
 
 & gh release upload $Tag @assets --repo $Repository --clobber
 if ($LASTEXITCODE -ne 0) { throw "Unable to upload release assets for $Tag" }
 
 $release = (& gh release view $Tag --repo $Repository --json assets,isDraft,url) | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0 -or -not $release.isDraft) { throw 'Release verification expected a draft release' }
+if ($LASTEXITCODE -ne 0) { throw "Unable to verify release $Tag after upload" }
 $uploadedNames = @($release.assets | ForEach-Object { $_.name })
 foreach ($asset in $assets) {
     $name = Split-Path -Leaf $asset
@@ -310,16 +318,21 @@ foreach ($forbidden in @('activation-check.exe', "BrowserStudio-Private-Setup-v$
     if ($uploadedNames -contains $forbidden) { throw "Forbidden private asset was uploaded: $forbidden" }
 }
 
-& gh release edit $Tag --repo $Repository --draft=false --prerelease=false --latest
+# Ensure formal published + latest (idempotent if already published).
+& gh release edit $Tag --repo $Repository --draft=false --prerelease=false --latest --notes-file $NotesPath
 if ($LASTEXITCODE -ne 0) { throw "Unable to publish release $Tag" }
 
-$published = (& gh release view $Tag --repo $Repository --json isDraft,isPrerelease,url) | ConvertFrom-Json
+$published = (& gh release view $Tag --repo $Repository --json isDraft,isPrerelease,url,assets) | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or $published.isDraft -or $published.isPrerelease) {
     throw "Release $Tag was not published successfully"
 }
+$finalCount = @($published.assets).Count
+if ($finalCount -lt $assets.Count) {
+    throw "Release $Tag has only $finalCount assets; expected at least $($assets.Count)"
+}
 
 Write-Host ''
-Write-Host "Published BrowserStudio $Tag" -ForegroundColor Green
+Write-Host "Published BrowserStudio $Tag ($finalCount assets)" -ForegroundColor Green
 Write-Host "Commit: $Head"
 Write-Host "URL: $($published.url)"
 Write-Host 'Private installer and activation checker were not uploaded.' -ForegroundColor Yellow

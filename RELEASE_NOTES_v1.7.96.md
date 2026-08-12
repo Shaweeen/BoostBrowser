@@ -35,7 +35,7 @@ git pull
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\publish_windows_github_release.ps1 -ExpectedVersion 1.7.96
 ```
 
-若 Release 已存在仅缺资产，对 `build\release` 使用 `gh release upload v1.7.96 --clobber ...`。
+若 Release 已存在，新版 `publish_windows_github_release.ps1` 会 **clobber 上传资产并确保正式发布**，不再要求必须是 draft。
 
 ## 验证
 
