@@ -24,7 +24,17 @@ $sourceExtensions = @(
 $ignoredPrefixes = @('build/', 'frontend/dist/', 'frontend/node_modules/', 'vendor/')
 $added = 0
 $deleted = 0
+# Test-only rewrites must not block release packaging (common flake source).
+$deletedProduction = 0
 $changes = @()
+
+function Test-IsTestOnlySourcePath([string]$Path) {
+    $name = [IO.Path]::GetFileName($Path)
+    if ($name -match '_test\.go$') { return $true }
+    if ($name -match '\.(test|spec)\.(ts|tsx|js|jsx)$') { return $true }
+    if ($Path -match '(?i)/(tests|__tests__|__mocks__)/') { return $true }
+    return $false
+}
 
 $numstat = @(& git diff --numstat --find-renames $BaseRef HEAD --)
 if ($LASTEXITCODE -ne 0) {
@@ -51,6 +61,9 @@ foreach ($line in $numstat) {
     $fileDeleted = [int]$parts[1]
     $added += $fileAdded
     $deleted += $fileDeleted
+    if (-not (Test-IsTestOnlySourcePath $path)) {
+        $deletedProduction += $fileDeleted
+    }
     $changes += [pscustomobject]@{
         Path = $path
         Added = $fileAdded
@@ -60,7 +73,7 @@ foreach ($line in $numstat) {
 }
 
 $net = $added - $deleted
-Write-Host "Code health: +$added -$deleted (net $net) from $BaseRef"
+Write-Host "Code health: +$added -$deleted (net $net; production deletions $deletedProduction) from $BaseRef"
 $changes |
     Sort-Object { [Math]::Abs($_.Net) } -Descending |
     Select-Object -First 10 |
@@ -70,15 +83,17 @@ $changedFiles = @(& git diff --name-only $BaseRef HEAD --)
 if ($LASTEXITCODE -ne 0) {
     throw 'Unable to inspect changed file names'
 }
-if ($deleted -ge $LedgerDeletionThreshold -and $changedFiles -notcontains 'docs/DELETION_LEDGER.md') {
-    throw "Material deletion ($deleted lines) is missing docs/DELETION_LEDGER.md"
+# Only production (non-test) material deletions require DELETION_LEDGER.
+if ($deletedProduction -ge $LedgerDeletionThreshold -and $changedFiles -notcontains 'docs/DELETION_LEDGER.md') {
+    throw "Material deletion ($deletedProduction production lines) is missing docs/DELETION_LEDGER.md"
 }
 $deletedSourceFiles = @(& git diff --diff-filter=D --name-only $BaseRef HEAD --)
 if ($LASTEXITCODE -ne 0) {
     throw 'Unable to inspect deleted source files'
 }
-if ($deletedSourceFiles.Count -gt 0 -and $changedFiles -notcontains 'docs/DELETION_LEDGER.md') {
-    throw "Deleted files are missing a reversible docs/DELETION_LEDGER.md entry"
+$deletedProductionFiles = @($deletedSourceFiles | Where-Object { -not (Test-IsTestOnlySourcePath ($_ -replace '\\', '/')) })
+if ($deletedProductionFiles.Count -gt 0 -and $changedFiles -notcontains 'docs/DELETION_LEDGER.md') {
+    throw "Deleted production files are missing a reversible docs/DELETION_LEDGER.md entry: $($deletedProductionFiles -join ', ')"
 }
 
 $retiredSymbols = @(

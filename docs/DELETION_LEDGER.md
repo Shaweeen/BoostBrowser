@@ -351,3 +351,9 @@ behavior is intentionally retired.
 | ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
 | --- | --- | --- | --- | --- | --- | --- |
 | CLEAN-088 | Hard `transport.Proxy = nil` in `newPublicRemoteHTTPClient` (`backend/safe_remote_http.go`) that forced extension/subscription downloads to always dial public destinations directly | `v1.7.89` / pre-`e333c48` | New Windows installs behind Clash/Nym could not download Chrome Web Store CRX packages; assignment failed with download errors while browsers worked through the same local proxy. | After validating destination is public, honour `HTTP(S)_PROXY`/`ALL_PROXY` and optional `LocalVPNProxy`; allow loopback dial only as a proxy hop; destination private/loopback still rejected (SSRF). Package-level `downloadExtensionPayloadWithTimeoutAndProxy` + clearer error text. | `go test ./backend/ -run 'TestPublicRemote|TestEnvHTTP|TestValidatePublic' -count=1` | `git show e333c48^:backend/safe_remote_http.go` (`Proxy = nil`). Do not restore unconditional `Proxy = nil` without an alternate outbound path for China/new-PC installs. |
+
+## v1.7.93 release gate: test-only deletions exempt
+
+| ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
+| --- | --- | --- | --- | --- | --- | --- |
+| CLEAN-089 | Flaky integration coverage in `backend/safe_remote_http_test.go` that dialed real/network or relied on process-cached `http.ProxyFromEnvironment` (failed on Windows machines with user `HTTPS_PROXY=127.0.0.1:7897`) | `v1.7.91` / pre-`5b45af6` | Blocked every Windows `go test ./...` during publish; not product code. | Deterministic unit checks of fixed LocalVPNProxy selection + destination validation only. | `go test ./backend/ -count=5` | Prior test bodies in `git show 5b45af6^:backend/safe_remote_http_test.go`. Do not reintroduce network-dependent proxy tests into the release package suite. |
