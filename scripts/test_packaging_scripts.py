@@ -413,6 +413,8 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("docs/DELETION_LEDGER.md", text)
         self.assertIn("LedgerDeletionThreshold", text)
         self.assertIn("LedgerDeletionThreshold = 20", text)
+        self.assertIn("--numstat --no-renames", text)
+        self.assertNotIn("--numstat --find-renames", text)
         self.assertIn("--diff-filter=D", text)
         self.assertIn("MaxNetGrowth", text)
         self.assertIn("Retired window-watcher code was reintroduced", text)

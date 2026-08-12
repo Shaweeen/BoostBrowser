@@ -26,7 +26,10 @@ $added = 0
 $deleted = 0
 $changes = @()
 
-$numstat = @(& git diff --numstat --find-renames $BaseRef HEAD --)
+# Keep paths literal. Git's rename presentation can contain brace syntax such
+# as "dir/{old => new}.json", which is not a legal Windows path and makes
+# System.IO.Path.GetExtension throw under Windows PowerShell 5.1.
+$numstat = @(& git diff --numstat --no-renames $BaseRef HEAD --)
 if ($LASTEXITCODE -ne 0) {
     throw "Unable to inspect source changes from $BaseRef"
 }
