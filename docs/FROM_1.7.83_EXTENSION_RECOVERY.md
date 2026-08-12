@@ -76,8 +76,10 @@ git pull
 # wails.json → productVersion 应为 1.7.95
 
 # 3. 本机打包并上传（仅 Windows）
+# 门禁基线应为 v1.7.83。若仍报净增 >800 相对 v1.7.55，先 git pull 取脚本修复，或加 -ApprovedGrowthReason
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\publish_windows_github_release.ps1 -ExpectedVersion 1.7.95
 ```
+
 
 若用私有仓：
 

@@ -167,11 +167,26 @@ if ($isShallowOutput[0].Trim() -eq 'true') {
 }
 if ($LASTEXITCODE -ne 0) { throw 'Unable to fetch complete release tag history' }
 
-$previousTagOutput = @(& git describe --tags --abbrev=0 --match 'v[0-9]*' "$Tag^{}^")
+# Resolve the previous release tag WITHOUT PowerShell caret pitfalls.
+# Windows PowerShell can mangle strings like "$Tag^{}^" (caret is special in
+# some hosts), which made describe fall back to a distant tag (e.g. v1.7.55)
+# and fail the 800-line net-growth gate. Use rev-list/rev-parse instead.
+$tagCommitForParent = @(& git rev-list -n 1 $Tag)
+if ($LASTEXITCODE -ne 0 -or $tagCommitForParent.Count -ne 1) {
+    throw "Unable to resolve commit for $Tag"
+}
+$tagCommitForParent = $tagCommitForParent[0].Trim()
+$parentCommitOutput = @(& git rev-parse ('{0}^' -f $tagCommitForParent))
+if ($LASTEXITCODE -ne 0 -or $parentCommitOutput.Count -ne 1) {
+    throw "Unable to resolve parent commit of $Tag ($tagCommitForParent)"
+}
+$parentCommit = $parentCommitOutput[0].Trim()
+$previousTagOutput = @(& git describe --tags --abbrev=0 --match 'v[0-9]*' $parentCommit)
 if ($LASTEXITCODE -ne 0 -or $previousTagOutput.Count -ne 1) {
-    throw "Unable to resolve the release preceding $Tag"
+    throw "Unable to resolve the release preceding $Tag (parent $parentCommit)"
 }
 $PreviousTag = $previousTagOutput[0].Trim()
+Write-Host "Code health base: $PreviousTag (parent of $Tag)" -ForegroundColor Cyan
 $healthArgs = @(
     '-NoProfile',
     '-ExecutionPolicy',

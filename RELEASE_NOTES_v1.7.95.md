@@ -33,7 +33,15 @@
 
 ```text
 git checkout release/1.7.95-from-1.7.83
+git pull
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\publish_windows_github_release.ps1 -ExpectedVersion 1.7.95
+```
+
+门禁基线应为 **v1.7.83**（相对净增约 700+ 行，&lt; 800）。  
+若仍误用更老 tag，可显式放行：
+
+```text
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\publish_windows_github_release.ps1 -ExpectedVersion 1.7.95 -ApprovedGrowthReason "1.7.95 extension recovery from v1.7.83 only (heal path + proxy CRX + assign); not full-tree thrash"
 ```
 
 ## 验证
