@@ -137,6 +137,63 @@ type ghRelease struct {
 	Assets     []ghAsset `json:"assets"`
 }
 
+type updateNetworkRoute struct {
+	name     string
+	proxyURL string
+}
+
+func (a *App) updateNetworkRoutes() []updateNetworkRoute {
+	raw := []updateNetworkRoute{}
+	if a != nil && a.config != nil {
+		raw = append(raw, updateNetworkRoute{name: "客户端代理", proxyURL: strings.TrimSpace(a.config.Browser.LocalVPNProxy)})
+	}
+	for _, key := range []string{"HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			raw = append(raw, updateNetworkRoute{name: "环境变量 " + key, proxyURL: value})
+		}
+	}
+	if value := strings.TrimSpace(readWindowsSystemProxy()); value != "" {
+		raw = append(raw, updateNetworkRoute{name: "Windows 系统代理", proxyURL: value})
+	}
+	raw = append(raw, updateNetworkRoute{name: "直连"})
+
+	seen := map[string]bool{}
+	routes := make([]updateNetworkRoute, 0, len(raw))
+	for _, route := range raw {
+		key := strings.ToLower(strings.TrimSpace(route.proxyURL))
+		if key == "" {
+			key = "<direct>"
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		routes = append(routes, route)
+	}
+	return routes
+}
+
+func (a *App) updateDownloadClients(timeout time.Duration) []struct {
+	name   string
+	client *http.Client
+} {
+	routes := a.updateNetworkRoutes()
+	clients := make([]struct {
+		name   string
+		client *http.Client
+	}, 0, len(routes))
+	for _, route := range routes {
+		clients = append(clients, struct {
+			name   string
+			client *http.Client
+		}{
+			name:   route.name,
+			client: newPublicRemoteHTTPClientWithProxyPolicy(timeout, false, route.proxyURL, false),
+		})
+	}
+	return clients
+}
+
 // updateHTTPClient uses the same public-remote policy as extension downloads:
 // honour HTTP(S)_PROXY / ALL_PROXY and optional LocalVPNProxy so checks work
 // behind Clash/Nym. Destinations stay restricted to public hosts.
@@ -367,32 +424,8 @@ func (a *App) DownloadUpdate(url, expectedSHA256 string) (string, error) {
 	dst := filepath.Join(updateDir, "boost-browser.new.exe")
 	_ = os.Remove(dst)
 
-	req, err := http.NewRequest("GET", trustedURL.String(), nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("User-Agent", "BoostBrowser-Updater/1.0")
-
-	client := a.updateHTTPClient(30 * time.Minute)
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("下载失败：%w（请开启系统代理/本机转发网关）", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("下载失败：HTTP %d", resp.StatusCode)
-	}
-
-	total := resp.ContentLength
-	out, err := os.Create(dst)
-	if err != nil {
-		return "", err
-	}
-	defer out.Close()
-
-	hasher := sha256.New()
 	var downloaded int64
-	buf := make([]byte, 64*1024)
+	var total int64
 	lastEmit := time.Now()
 	emitProgress := func(force bool) {
 		if !force && time.Since(lastEmit) < 200*time.Millisecond {
@@ -410,31 +443,73 @@ func (a *App) DownloadUpdate(url, expectedSHA256 string) (string, error) {
 		})
 	}
 
-	for {
-		n, rerr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, werr := out.Write(buf[:n]); werr != nil {
-				return "", werr
-			}
-			hasher.Write(buf[:n])
-			downloaded += int64(n)
-			emitProgress(false)
+	var gotHash string
+	var routeErrors []string
+	for _, candidate := range a.updateDownloadClients(30 * time.Minute) {
+		downloaded, total = 0, 0
+		_ = os.Remove(dst)
+		req, reqErr := http.NewRequest("GET", trustedURL.String(), nil)
+		if reqErr != nil {
+			return "", reqErr
 		}
-		if rerr == io.EOF {
+		req.Header.Set("User-Agent", "BoostBrowser-Updater/1.0")
+		resp, requestErr := candidate.client.Do(req)
+		if requestErr != nil {
+			routeErrors = append(routeErrors, candidate.name+": "+requestErr.Error())
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			routeErrors = append(routeErrors, fmt.Sprintf("%s: HTTP %d", candidate.name, resp.StatusCode))
+			continue
+		}
+		total = resp.ContentLength
+		out, createErr := os.Create(dst)
+		if createErr != nil {
+			_ = resp.Body.Close()
+			return "", createErr
+		}
+		hasher := sha256.New()
+		buf := make([]byte, 64*1024)
+		copyErr := error(nil)
+		for {
+			n, readErr := resp.Body.Read(buf)
+			if n > 0 {
+				if _, writeErr := out.Write(buf[:n]); writeErr != nil {
+					copyErr = writeErr
+					break
+				}
+				_, _ = hasher.Write(buf[:n])
+				downloaded += int64(n)
+				emitProgress(false)
+			}
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				copyErr = readErr
+				break
+			}
+		}
+		_ = resp.Body.Close()
+		closeErr := out.Close()
+		if copyErr != nil || closeErr != nil {
+			if copyErr == nil {
+				copyErr = closeErr
+			}
+			routeErrors = append(routeErrors, candidate.name+": 下载中断: "+copyErr.Error())
+			continue
+		}
+		gotHash = hex.EncodeToString(hasher.Sum(nil))
+		if strings.EqualFold(gotHash, expectedSHA256) {
+			log.Info("更新下载链路成功", logger.F("route", candidate.name))
 			break
 		}
-		if rerr != nil {
-			return "", fmt.Errorf("下载中断：%w", rerr)
-		}
+		routeErrors = append(routeErrors, candidate.name+": SHA256 不匹配")
 	}
-	if err := out.Close(); err != nil {
-		return "", err
-	}
-
-	gotHash := hex.EncodeToString(hasher.Sum(nil))
-	if !strings.EqualFold(gotHash, expectedSHA256) {
+	if gotHash == "" || !strings.EqualFold(gotHash, expectedSHA256) {
 		_ = os.Remove(dst)
-		return "", fmt.Errorf("SHA256 校验失败，文件已损坏或被篡改\n期望: %s\n实际: %s", expectedSHA256, gotHash)
+		return "", fmt.Errorf("所有更新下载链路均失败：%s", strings.Join(routeErrors, "；"))
 	}
 	if !isWindowsPEFile(dst) {
 		_ = os.Remove(dst)

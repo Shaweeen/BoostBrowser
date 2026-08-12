@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"boost-browser/backend/internal/config"
 )
 
 func TestNormalizeUpdateSHA256(t *testing.T) {
@@ -132,5 +134,30 @@ func TestFetchLatestReleaseFallsBackToAPIWhenRedirectUnavailable(t *testing.T) {
 	rel, err := fetchLatestReleaseWithFallback(&http.Client{Timeout: 2 * time.Second}, srv.URL+"/api/releases/latest", srv.URL+"/releases/latest")
 	if err != nil || rel.TagName != "v8.8.8" {
 		t.Fatalf("expected API fallback v8.8.8, got rel=%+v err=%v", rel, err)
+	}
+}
+
+func TestUpdateDownloadRoutesFollowPriorityAndEndWithDirect(t *testing.T) {
+	for _, key := range []string{"HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:17891")
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:17891")
+	app := NewApp(t.TempDir())
+	app.config = config.DefaultConfig()
+	app.config.Browser.LocalVPNProxy = "http://127.0.0.1:17890"
+
+	routes := app.updateNetworkRoutes()
+	if len(routes) != 3 {
+		t.Fatalf("expected client, deduplicated env and direct routes, got %#v", routes)
+	}
+	if routes[0].name != "客户端代理" || routes[0].proxyURL != "http://127.0.0.1:17890" {
+		t.Fatalf("client proxy must be first: %#v", routes)
+	}
+	if !strings.HasPrefix(routes[1].name, "环境变量 ") || routes[1].proxyURL != "http://127.0.0.1:17891" {
+		t.Fatalf("environment proxy must follow client proxy: %#v", routes)
+	}
+	if routes[2].name != "直连" || routes[2].proxyURL != "" {
+		t.Fatalf("direct fallback must be last: %#v", routes)
 	}
 }

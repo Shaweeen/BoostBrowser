@@ -93,6 +93,14 @@ func newPublicRemoteHTTPClient(timeout time.Duration, allowHTTP bool) *http.Clie
 }
 
 func newPublicRemoteHTTPClientWithProxy(timeout time.Duration, allowHTTP bool, optionalProxyURL string) *http.Client {
+	return newPublicRemoteHTTPClientWithProxyPolicy(timeout, allowHTTP, optionalProxyURL, true)
+}
+
+// newPublicRemoteHTTPClientWithProxyPolicy lets callers such as the updater
+// test one already-resolved route at a time. When discoverFallback is false,
+// an empty proxy means an intentional direct connection instead of silently
+// consulting environment or Windows proxy settings again.
+func newPublicRemoteHTTPClientWithProxyPolicy(timeout time.Duration, allowHTTP bool, optionalProxyURL string, discoverFallback bool) *http.Client {
 	optionalProxyURL = strings.TrimSpace(optionalProxyURL)
 	var fixedProxy *url.URL
 	if optionalProxyURL != "" {
@@ -101,7 +109,7 @@ func newPublicRemoteHTTPClientWithProxy(timeout time.Duration, allowHTTP bool, o
 		}
 	}
 	var systemProxy *url.URL
-	if fixedProxy == nil && !envHTTPProxyConfigured() {
+	if discoverFallback && fixedProxy == nil && !envHTTPProxyConfigured() {
 		if raw := strings.TrimSpace(readWindowsSystemProxy()); raw != "" {
 			if u, err := url.Parse(raw); err == nil && u.Scheme != "" && u.Host != "" {
 				systemProxy = u
@@ -125,9 +133,12 @@ func newPublicRemoteHTTPClientWithProxy(timeout time.Duration, allowHTTP bool, o
 		if systemProxy != nil {
 			return systemProxy, nil
 		}
-		return http.ProxyFromEnvironment(req)
+		if discoverFallback {
+			return http.ProxyFromEnvironment(req)
+		}
+		return nil, nil
 	}
-	allowLocalProxyHop := fixedProxy != nil || systemProxy != nil || envHTTPProxyConfigured()
+	allowLocalProxyHop := fixedProxy != nil || systemProxy != nil || (discoverFallback && envHTTPProxyConfigured())
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
