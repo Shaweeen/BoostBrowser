@@ -467,7 +467,7 @@ func (a *App) downloadAndInstallExtension(downloadAddress string) (string, strin
 	if err := validateExtensionDownloadURL(downloadURL); err != nil {
 		return "", "", "", "", err
 	}
-	payload, err := downloadExtensionPayload(downloadURL)
+	payload, err := a.downloadExtensionPayload(downloadURL)
 	if err != nil {
 		return "", "", "", "", err
 	}
@@ -690,15 +690,28 @@ func validateExtensionDownloadURL(rawURL string) error {
 }
 
 func downloadExtensionPayload(downloadURL string) ([]byte, error) {
-	return downloadExtensionPayloadWithTimeout(downloadURL, 90*time.Second)
+	return downloadExtensionPayloadWithTimeoutAndProxy(downloadURL, 90*time.Second, "")
+}
+
+func (a *App) downloadExtensionPayload(downloadURL string) ([]byte, error) {
+	proxyURL := ""
+	if a != nil && a.config != nil {
+		// Prefer explicit local gateway from Browser settings (Clash/Nym local port).
+		proxyURL = strings.TrimSpace(a.config.Browser.LocalVPNProxy)
+	}
+	return downloadExtensionPayloadWithTimeoutAndProxy(downloadURL, 90*time.Second, proxyURL)
 }
 
 func downloadExtensionPayloadWithTimeout(downloadURL string, timeout time.Duration) ([]byte, error) {
+	return downloadExtensionPayloadWithTimeoutAndProxy(downloadURL, timeout, "")
+}
+
+func downloadExtensionPayloadWithTimeoutAndProxy(downloadURL string, timeout time.Duration, optionalProxyURL string) ([]byte, error) {
 	const maxExtensionDownloadBytes = 128 * 1024 * 1024
 	if timeout <= 0 {
 		timeout = 90 * time.Second
 	}
-	client := newPublicRemoteHTTPClient(timeout, false)
+	client := newPublicRemoteHTTPClientWithProxy(timeout, false, optionalProxyURL)
 	req, err := http.NewRequest(http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("扩展下载地址无效：%w", err)
@@ -706,11 +719,11 @@ func downloadExtensionPayloadWithTimeout(downloadURL string, timeout time.Durati
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+managedExtensionChromeVersion+" Safari/537.36")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("扩展下载失败：%w", err)
+		return nil, fmt.Errorf("扩展下载失败：%w。若在国内网络无法直连 Google，请开启本地代理并设置 HTTPS_PROXY=http://127.0.0.1:端口（或在客户端「本机转发网关」填写该地址），也可改用 .crx/.zip 直链导入", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("扩展下载失败：HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("扩展下载失败：HTTP %d。若无法访问 Chrome 网上应用店，请检查本机代理/HTTPS_PROXY 或使用 .crx/.zip 直链", resp.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxExtensionDownloadBytes+1))
 	if err != nil {

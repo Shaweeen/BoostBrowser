@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -56,15 +57,77 @@ func isUnsafeRemoteIP(ip net.IP) bool {
 	return false
 }
 
+func isLoopbackHostname(host string) bool {
+	host = strings.ToLower(strings.Trim(strings.TrimSpace(host), "[]"))
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+func envHTTPProxyConfigured() bool {
+	for _, key := range []string{"HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "ALL_PROXY", "all_proxy"} {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// newPublicRemoteHTTPClient builds an outbound client for user-supplied public
+// HTTPS/HTTP URLs (extension CRX, Clash subscriptions).
+//
+// Security:
+//   - Destination URL must be public (validated before request + on redirect).
+//   - Direct dials never connect to private/loopback destinations.
+//
+// Network (China / new Windows installs):
+//   - Honours HTTP(S)_PROXY / ALL_PROXY so local Clash/Nym gateways work.
+//   - Loopback dial is allowed only as a proxy hop when a proxy env is set
+//     (or optionalProxyURL is a local gateway). Destination still cannot be private.
 func newPublicRemoteHTTPClient(timeout time.Duration, allowHTTP bool) *http.Client {
+	return newPublicRemoteHTTPClientWithProxy(timeout, allowHTTP, "")
+}
+
+func newPublicRemoteHTTPClientWithProxy(timeout time.Duration, allowHTTP bool, optionalProxyURL string) *http.Client {
+	optionalProxyURL = strings.TrimSpace(optionalProxyURL)
+	var fixedProxy *url.URL
+	if optionalProxyURL != "" {
+		if u, err := url.Parse(optionalProxyURL); err == nil && u.Scheme != "" && u.Host != "" {
+			fixedProxy = u
+		}
+	}
+
 	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	// A local HTTP_PROXY would bypass destination validation and reopen SSRF.
-	transport.Proxy = nil
+	transport.Proxy = func(req *http.Request) (*url.URL, error) {
+		// Never proxy to a blocked destination URL.
+		if req != nil && req.URL != nil {
+			host := req.URL.Hostname()
+			if host != "" && isBlockedRemoteHostname(host) {
+				return nil, fmt.Errorf("URL 不允许指向本机或内网地址")
+			}
+		}
+		if fixedProxy != nil {
+			return fixedProxy, nil
+		}
+		return http.ProxyFromEnvironment(req)
+	}
+	allowLocalProxyHop := fixedProxy != nil || envHTTPProxyConfigured()
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, fmt.Errorf("解析远程地址失败: %w", err)
+		}
+		// Local HTTP/SOCKS gateway hop (Clash Verge / Nym local port).
+		if isLoopbackHostname(host) {
+			if !allowLocalProxyHop {
+				return nil, fmt.Errorf("拒绝连接本机地址")
+			}
+			return dialer.DialContext(ctx, network, net.JoinHostPort(host, port))
 		}
 		if isBlockedRemoteHostname(host) {
 			return nil, fmt.Errorf("拒绝连接本机或内网地址")
