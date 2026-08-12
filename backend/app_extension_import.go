@@ -44,6 +44,7 @@ type ExtensionImportResult struct {
 type extensionBindResult struct {
 	UpdatedProfiles []string
 	DeferredRunning int
+	PrefsInstalled  int
 }
 
 // GlobalManagedExtension is the backend-authoritative global extension policy.
@@ -271,11 +272,11 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 		PreviousVersion:      previousVersion,
 		UpdatedProfiles:      bind.UpdatedProfiles,
 		SkippedCount:         skipped,
-		PrefsInstalledCount:  0,
+		PrefsInstalledCount:  bind.PrefsInstalled,
 		DeferredRunningCount: bind.DeferredRunning,
 		Message: formatExtensionAssignMessage(
 			extID, extensionVersion, requestedN, skipped,
-			len(bind.UpdatedProfiles), 0, bind.DeferredRunning, 0,
+			len(bind.UpdatedProfiles), bind.PrefsInstalled, bind.DeferredRunning, 0,
 		),
 	}, nil
 }
@@ -360,11 +361,11 @@ func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionIm
 		PreviousVersion:      previousVersion,
 		UpdatedProfiles:      bind.UpdatedProfiles,
 		SkippedCount:         skipped,
-		PrefsInstalledCount:  0,
+		PrefsInstalledCount:  bind.PrefsInstalled,
 		DeferredRunningCount: bind.DeferredRunning,
 		Message: formatExtensionAssignMessage(
 			extID, extensionVersion, len(targetIDs), skipped,
-			len(bind.UpdatedProfiles), 0, bind.DeferredRunning, 0,
+			len(bind.UpdatedProfiles), bind.PrefsInstalled, bind.DeferredRunning, 0,
 		),
 	}, nil
 }
@@ -636,11 +637,14 @@ func (a *App) filterProfilesMissingEquivalentExtension(profileIDs []string, exte
 			continue
 		}
 		userDataDir := a.browserMgr.ResolveUserDataDir(&profile)
-		// The saved launch assignment is the source of truth. Do not infer that
-		// an extension is missing from Chromium's generated Preferences: doing so
-		// caused every assignment/launch to rewrite profile state and could still
-		// suppress --load-extension on the next start.
+		// A saved launch argument from an older release is not proof that Chrome
+		// accepted the extension. Skip only when this profile also has a loadable
+		// registration; explicit re-distribution otherwise repairs it.
 		if extDir != "" && hasExtensionDirInLaunchArgs(profile.LaunchArgs, extDir) {
+			if profileHasLoadableEquivalentExtension(userDataDir, extensionID, manifestName, extDir) {
+				continue
+			}
+			missing = append(missing, profileID)
 			continue
 		}
 		// Only skip when Chrome can still load an equivalent extension package.
@@ -1355,13 +1359,26 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) (*e
 			launchArgs: append([]string{}, profile.LaunchArgs...),
 			updatedAt:  profile.UpdatedAt,
 		}
-		// LaunchArgs is the sole assignment record. Do not pre-write Chromium
-		// Preferences: Chrome owns that file and may reject synthetic entries.
+		// Persist the assignment for every profile. Stopped profiles can be
+		// registered immediately; running profiles apply it after restart so we
+		// never race Chromium's Preferences writer.
 		profile.LaunchArgs = addExtensionDirToLaunchArgs(profile.LaunchArgs, extDir)
 		profile.UpdatedAt = time.Now().Format(time.RFC3339)
 		result.UpdatedProfiles = append(result.UpdatedProfiles, id)
 		if profile.Running {
 			result.DeferredRunning++
+		} else {
+			userDataDir := a.browserMgr.ResolveUserDataDir(profile)
+			if err := installUnpackedExtensionIntoProfile(userDataDir, extDir); err != nil {
+				for rollbackID, state := range previous {
+					if rollback := a.browserMgr.Profiles[rollbackID]; rollback != nil {
+						rollback.LaunchArgs = state.launchArgs
+						rollback.UpdatedAt = state.updatedAt
+					}
+				}
+				return nil, fmt.Errorf("扩展写入环境 %s 失败：%w", profile.ProfileName, err)
+			}
+			result.PrefsInstalled++
 		}
 	}
 	if len(result.UpdatedProfiles) == 0 {

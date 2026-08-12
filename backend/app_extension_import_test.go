@@ -743,7 +743,7 @@ func TestGlobalExtensionDistributionChecksOnlyNewProfilesOnExplicitAction(t *tes
 	}
 }
 
-func TestAssignRecordsLaunchArgWithoutWritingProfileData(t *testing.T) {
+func TestAssignRegistersStoppedProfileWithoutTouchingWalletData(t *testing.T) {
 	root := t.TempDir()
 	app := NewApp(root)
 	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
@@ -763,8 +763,8 @@ func TestAssignRecordsLaunchArgWithoutWritingProfileData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.PrefsInstalledCount != 0 {
-		t.Fatalf("assign must not synthesize Chrome Preferences, got prefs=%d msg=%q", result.PrefsInstalledCount, result.Message)
+	if result.PrefsInstalledCount != 1 {
+		t.Fatalf("stopped profile must receive loadable registration, got prefs=%d msg=%q", result.PrefsInstalledCount, result.Message)
 	}
 	if result.SkippedCount != 0 {
 		t.Fatalf("fresh profile should not skip: %#v", result)
@@ -792,17 +792,19 @@ func TestAssignRecordsLaunchArgWithoutWritingProfileData(t *testing.T) {
 		t.Fatalf("decode Preferences: %v", err)
 	}
 	extensions, _ := prefs["extensions"].(map[string]any)
-	if settings, ok := extensions["settings"].(map[string]any); ok && len(settings) > 0 {
-		t.Fatalf("assignment must not synthesize extension install records: %#v", settings)
+	settings, _ := extensions["settings"].(map[string]any)
+	entry, _ := settings[extID].(map[string]any)
+	if entry == nil || entry["state"] != float64(1) {
+		t.Fatalf("assignment must create enabled loadable registration: %#v", settings)
 	}
 	if !strings.Contains(second.Message, "跳过") && !strings.Contains(second.Message, "已存在") {
 		t.Fatalf("skip message should be clear: %q", second.Message)
 	}
 }
 
-func TestGlobalExtensionDistributionRebindsResidueWithoutTouchingPreferences(t *testing.T) {
-	// Preferences residue must not block the authoritative launch assignment,
-	// and assigning must not manufacture a Chrome-owned install record.
+func TestGlobalExtensionDistributionHealsUnusableRegistration(t *testing.T) {
+	// Preferences residue must not block explicit re-distribution. Healing may
+	// update the managed path/state but must preserve extension storage.
 	root := t.TempDir()
 	app := NewApp(root)
 	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
@@ -840,8 +842,8 @@ func TestGlobalExtensionDistributionRebindsResidueWithoutTouchingPreferences(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(afterPrefs), `"path"`) {
-		t.Fatalf("assignment must not synthesize a package path in Preferences: %s", afterPrefs)
+	if !strings.Contains(string(afterPrefs), `"path"`) || !strings.Contains(string(afterPrefs), `"state": 1`) {
+		t.Fatalf("assignment must heal a loadable enabled registration: %s", afterPrefs)
 	}
 }
 

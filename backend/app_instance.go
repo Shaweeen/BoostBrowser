@@ -448,6 +448,8 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	args = append(args, sanitizedProfileLaunchArgs...)
 	args = append(args, sanitizedExtraLaunchArgs...)
 	args = appendChromeTestingInfobarSuppressArg(args, isCloakSelectedCore)
+	args, _, _ = applyProfileNativeExtensionLaunchArgs(args, userDataDir)
+	args = ensureLoadExtensionCommandLineSwitchEnabled(args)
 
 	// cloak 路径下额外剥掉几个会暴露 chromium 身份的 launch arg：
 	//   - --extension-mime-request-handling   (Chromium-only debug switch)
