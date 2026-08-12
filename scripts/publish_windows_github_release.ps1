@@ -82,10 +82,18 @@ $Tag = "v$Version"
 $NotesPath = "$RepoRoot\RELEASE_NOTES_v$Version.md"
 Require-File $NotesPath
 
-$trackedChanges = @(& git status --porcelain --untracked-files=no)
-if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect Git status' }
-if ($trackedChanges.Count -gt 0) {
-    throw 'Tracked files have uncommitted changes. Publish only from the signed release commit.'
+# Fail fast before long builds: clean tree, HEAD==tag, wails version, code health.
+$preflight = Join-Path $PSScriptRoot 'preflight_windows_release.ps1'
+if (Test-Path -LiteralPath $preflight) {
+    Write-Host "Running preflight_windows_release.ps1 -ExpectedVersion $Version ..." -ForegroundColor Cyan
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $preflight -ExpectedVersion $Version
+    if ($LASTEXITCODE -ne 0) { throw 'Preflight failed. Fix version/tag/ledger/dirty tree before packaging.' }
+} else {
+    $trackedChanges = @(& git status --porcelain --untracked-files=no)
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect Git status' }
+    if ($trackedChanges.Count -gt 0) {
+        throw 'Tracked files have uncommitted changes. Publish only from the signed release commit.'
+    }
 }
 
 $headOutput = @(& git rev-parse HEAD)
