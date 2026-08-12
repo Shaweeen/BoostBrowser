@@ -137,16 +137,28 @@ type ghRelease struct {
 	Assets     []ghAsset `json:"assets"`
 }
 
+// updateHTTPClient uses the same public-remote policy as extension downloads:
+// honour HTTP(S)_PROXY / ALL_PROXY and optional LocalVPNProxy so checks work
+// behind Clash/Nym. Destinations stay restricted to public hosts.
+func (a *App) updateHTTPClient(timeout time.Duration) *http.Client {
+	proxyURL := ""
+	if a != nil && a.config != nil {
+		proxyURL = strings.TrimSpace(a.config.Browser.LocalVPNProxy)
+	}
+	return newPublicRemoteHTTPClientWithProxy(timeout, false, proxyURL)
+}
+
 // CheckUpdate Wails binding：用户点检查更新 / 启动后自动调用
 func (a *App) CheckUpdate() (*UpdateCheckResult, error) {
 	log := logger.New("Updater")
 	current := a.appVersion()
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	// 45s: GitHub from China is slow even via local proxy; 15s caused false timeouts.
+	client := a.updateHTTPClient(45 * time.Second)
 	rel, err := fetchLatestReleaseWithFallback(client, githubReleaseAPI(), githubLatestReleasePage())
 	if err != nil {
 		log.Info("更新信息获取失败", logger.F("error", err.Error()))
-		return nil, err
+		return nil, fmt.Errorf("%w（请开启系统代理/本机转发网关，或到 GitHub Releases 手动下载）", err)
 	}
 	if rel.Draft || rel.Prerelease {
 		log.Info("最新 release 是草稿或预发布，跳过", logger.F("tag", rel.TagName))
@@ -175,8 +187,8 @@ func (a *App) CheckUpdate() (*UpdateCheckResult, error) {
 		return nil, err
 	}
 
-	// 拉 sha256 文件内容
-	sha256Hex, err := fetchSHA256Asset(sha256URL)
+	// 拉 sha256 文件内容（同一代理客户端）
+	sha256Hex, err := fetchSHA256AssetWithClient(client, sha256URL)
 	if err != nil {
 		return nil, fmt.Errorf("sha256 文件下载失败：%w", err)
 	}
@@ -209,12 +221,13 @@ func fetchLatestReleaseWithFallback(client *http.Client, apiURL, latestPageURL s
 	if err == nil {
 		return rel, nil
 	}
-	if !strings.Contains(err.Error(), "GitHub API 限流") {
+	// Trigger fallback on 403-style API failures (rate limit or blocked path).
+	if !strings.Contains(err.Error(), "GitHub API 限流") && !strings.Contains(err.Error(), "HTTP 403") {
 		return nil, err
 	}
 	fallback, fallbackErr := fetchLatestReleaseFromRedirect(client, latestPageURL)
 	if fallbackErr != nil {
-		return nil, fmt.Errorf("GitHub API 限流，备用更新地址也不可用：%w", fallbackErr)
+		return nil, fmt.Errorf("GitHub API 不可用且备用地址失败（多为网络无法访问 github.com，请开代理）：%w", fallbackErr)
 	}
 	return fallback, nil
 }
@@ -238,7 +251,8 @@ func fetchLatestReleaseFromAPI(client *http.Client, apiURL string) (*ghRelease, 
 		return nil, fmt.Errorf("尚未发布任何 release")
 	}
 	if resp.StatusCode == 403 {
-		return nil, fmt.Errorf("GitHub API 限流")
+		// 403 may be rate-limit OR network middlebox/block; wording covers both.
+		return nil, fmt.Errorf("GitHub API 限流或访问被拒绝(HTTP 403)")
 	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("GitHub API 返回 HTTP %d", resp.StatusCode)
@@ -299,11 +313,17 @@ func fetchLatestReleaseFromRedirect(client *http.Client, latestPageURL string) (
 }
 
 func fetchSHA256Asset(url string) (string, error) {
+	return fetchSHA256AssetWithClient(nil, url)
+}
+
+func fetchSHA256AssetWithClient(client *http.Client, url string) (string, error) {
 	trustedURL, err := validateUpdateAssetURL(url, "boost-browser.exe.sha256")
 	if err != nil {
 		return "", err
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
+	if client == nil {
+		client = newPublicRemoteHTTPClientWithProxy(30*time.Second, false, "")
+	}
 	resp, err := client.Get(trustedURL.String())
 	if err != nil {
 		return "", err
@@ -354,10 +374,10 @@ func (a *App) DownloadUpdate(url, expectedSHA256 string) (string, error) {
 	}
 	req.Header.Set("User-Agent", "BoostBrowser-Updater/1.0")
 
-	client := &http.Client{Timeout: 30 * time.Minute}
+	client := a.updateHTTPClient(30 * time.Minute)
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("下载失败：%w", err)
+		return "", fmt.Errorf("下载失败：%w（请开启系统代理/本机转发网关）", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
