@@ -496,14 +496,16 @@ func chromeExtensionInstallTime() string {
 	return strconv.FormatInt(us, 10)
 }
 
-// extensionAlreadyPresentInProfileReadOnly is a READ-ONLY check: does this
-// environment already hold the assigned package as a usable extension?
+// extensionAlreadyPresentInProfileReadOnly is a READ-ONLY check used for
+// "does Chrome have durable extension/wallet data we must protect?".
 // Never creates/updates/deletes Preferences, LES, Cookies, or package files.
 //
 // True when any of:
 //   - Local Extension Settings / Extension State / extension IndexedDB has files
 //   - Preferences.settings[id] is ENABLED and path still has a valid manifest
-//   - Preferences.path points at the package (or its abs path) and is ENABLED
+//
+// NOTE: LES-only true means vault data exists, NOT that Chrome can load the
+// package. CLI-skip decisions must use canSkipLoadExtensionCLI instead.
 func extensionAlreadyPresentInProfileReadOnly(userDataDir, packageDir string) bool {
 	userDataDir = strings.TrimSpace(userDataDir)
 	packageDir = strings.TrimSpace(packageDir)
@@ -521,7 +523,12 @@ func extensionAlreadyPresentInProfileReadOnly(userDataDir, packageDir string) bo
 	if extID != "" && extensionHasDurableRuntimeFiles(userDataDir, extID) {
 		return true
 	}
-	// Preferences-only (Chrome wrote after a prior load) — read only.
+	return extensionPreferencesPathLoadable(userDataDir, extID, absPkg)
+}
+
+// extensionPreferencesPathLoadable reports Preferences ENABLED + path whose
+// manifest.json still exists (Chrome can load without --load-extension).
+func extensionPreferencesPathLoadable(userDataDir, extID, absPkg string) bool {
 	entry, ok := readPreferencesExtensionEntry(userDataDir, extID)
 	if !ok || entry == nil {
 		entry, ok = findPreferencesExtensionByPackagePath(userDataDir, absPkg)
@@ -531,30 +538,74 @@ func extensionAlreadyPresentInProfileReadOnly(userDataDir, packageDir string) bo
 	}
 	state, _ := entry["state"].(float64)
 	if state != 1 {
-		return false // disabled / unbound — do not treat as present
+		return false
 	}
 	path, _ := entry["path"].(string)
 	path = strings.TrimSpace(path)
 	if path == "" {
-		// Enabled row without path still means Chrome knows the extension id;
-		// durable LES already handled above. Without path or LES, keep CLI.
 		return false
 	}
-	// Prefer package path still loadable (shared import dir or profile copy).
 	if validateUnpackedExtensionManifest(path) == nil {
 		return true
 	}
-	if validateUnpackedExtensionManifest(absPkg) == nil &&
+	if absPkg != "" && validateUnpackedExtensionManifest(absPkg) == nil &&
 		normalizeExtensionPath(path) == normalizeExtensionPath(absPkg) {
 		return true
 	}
 	return false
 }
 
-// canSkipLoadExtensionCLI is the start-path gate: READ-ONLY presence detection.
-// Does not write disk. Alias for extensionAlreadyPresentInProfileReadOnly.
+// canSkipLoadExtensionCLI is the start-path gate for cancelling --load-extension.
+// Requires a loadable Preferences registration (valid package path on disk).
+//
+// LES/wallet vault alone is NOT enough: after client upgrade the absolute package
+// path in Preferences often points at the old install dir, while LES still has
+// wallet data. Treating LES as "skip CLI" strips --load-extension and Chrome
+// shows zero toolbar extensions — vault stays but UI "all extensions dropped".
+// Never writes disk.
 func canSkipLoadExtensionCLI(userDataDir, packageDir string) bool {
-	return extensionAlreadyPresentInProfileReadOnly(userDataDir, packageDir)
+	return isExtensionInstalledInProfile(userDataDir, packageDir)
+}
+
+// healAssignedExtensionPackagePaths rewrites only Preferences path/state for
+// assigned packages so Chrome can load them after an upgrade moved the program
+// package directory. Never deletes/truncates LES, Cookies, IndexedDB, or vaults.
+// Returns how many packages were healed.
+func healAssignedExtensionPackagePaths(userDataDir string, launchArgs []string) int {
+	userDataDir = strings.TrimSpace(userDataDir)
+	if userDataDir == "" {
+		return 0
+	}
+	healed := 0
+	log := logger.New("Extension")
+	for _, packageDir := range activeLoadExtensionDirs(launchArgs) {
+		packageDir = strings.TrimSpace(packageDir)
+		if packageDir == "" {
+			continue
+		}
+		if validateUnpackedExtensionManifest(packageDir) != nil {
+			// Shared package missing entirely — keep CLI path / wait for re-import.
+			continue
+		}
+		if isExtensionInstalledInProfile(userDataDir, packageDir) {
+			continue
+		}
+		// Broken prefs path or LES-only: re-register path. installUnpacked
+		// heals path/state only and never wipes existing LES.
+		if err := installUnpackedExtensionIntoProfile(userDataDir, packageDir); err != nil {
+			log.Warn("扩展包路径修复失败（不触碰钱包 LES）",
+				logger.F("package", packageDir),
+				logger.F("error", err.Error()),
+			)
+			continue
+		}
+		healed++
+		log.Info("已修复扩展 Preferences 加载路径（钱包/LES 未改动）",
+			logger.F("package", packageDir),
+			logger.F("extension_id", resolveExtensionPackageID(packageDir)),
+		)
+	}
+	return healed
 }
 
 // extensionHasDurableRuntimeFiles reports Chrome-written storage under LES or
@@ -611,9 +662,10 @@ func selectLoadExtensionCLIReadOnly(userDataDir string, launchArgs []string) (pr
 	}
 	log := logger.New("Extension")
 	for _, packageDir := range paths {
-		if extensionAlreadyPresentInProfileReadOnly(userDataDir, packageDir) {
+		// Skip CLI only when Preferences package path is loadable — not LES alone.
+		if canSkipLoadExtensionCLI(userDataDir, packageDir) {
 			present++
-			log.Info("只读检测：环境已有扩展，取消该包 CLI load",
+			log.Info("只读检测：扩展 Preferences 路径可加载，取消该包 CLI load",
 				logger.F("package", packageDir),
 				logger.F("extension_id", resolveExtensionPackageID(packageDir)),
 			)

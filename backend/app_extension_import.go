@@ -552,11 +552,19 @@ func (a *App) filterProfilesMissingEquivalentExtension(profileIDs []string, exte
 		if !ok {
 			continue
 		}
+		userDataDir := a.browserMgr.ResolveUserDataDir(&profile)
+		// Assigned in launch args AND still loadable → skip re-bind.
+		// If path is stale after upgrade, re-bind to heal Preferences (LES kept).
 		if extDir != "" && hasExtensionDirInLaunchArgs(profile.LaunchArgs, extDir) {
+			if isExtensionInstalledInProfile(userDataDir, extDir) {
+				continue
+			}
+			missing = append(missing, profileID)
 			continue
 		}
-		userDataDir := a.browserMgr.ResolveUserDataDir(&profile)
-		if profileHasEquivalentExtension(userDataDir, extensionID, manifestName) {
+		// Only skip when Chrome can still load an equivalent extension package.
+		// Stale prefs/LES-only must not block re-import/heal ("已存在未覆盖").
+		if profileHasLoadableEquivalentExtension(userDataDir, extensionID, manifestName, extDir) {
 			continue
 		}
 		missing = append(missing, profileID)
@@ -564,15 +572,27 @@ func (a *App) filterProfilesMissingEquivalentExtension(profileIDs []string, exte
 	return missing
 }
 
+// profileHasEquivalentExtension reports any prefs/Extensions folder residue for
+// the id/name. Prefer profileHasLoadableEquivalentExtension for import/assign
+// skip decisions so broken package paths can be healed.
 func profileHasEquivalentExtension(userDataDir string, extensionID string, manifestName string) bool {
+	return profileHasLoadableEquivalentExtension(userDataDir, extensionID, manifestName, "")
+}
+
+// profileHasLoadableEquivalentExtension is true only when an equivalent
+// extension is ENABLED and its package path still has a valid manifest.
+// packageDir (optional) is the shared import package to match against.
+// Match by extension id and/or manifest name. Broken paths return false so
+// re-import can heal Preferences without claiming "已存在未覆盖".
+func profileHasLoadableEquivalentExtension(userDataDir string, extensionID string, manifestName string, packageDir string) bool {
 	extensionID = strings.ToLower(strings.TrimSpace(extensionID))
 	manifestName = strings.ToLower(strings.TrimSpace(manifestName))
-	if extensionID != "" {
-		for _, profileDir := range chromeProfileDirs(userDataDir) {
-			if info, err := os.Stat(filepath.Join(profileDir, "Extensions", extensionID)); err == nil && info.IsDir() {
-				return true
-			}
-		}
+	packageDir = strings.TrimSpace(packageDir)
+	if packageDir != "" && isExtensionInstalledInProfile(userDataDir, packageDir) {
+		return true
+	}
+	if extensionID == "" && manifestName == "" {
+		return false
 	}
 	for _, prefPath := range chromeProfilePreferencePaths(userDataDir) {
 		data, err := os.ReadFile(prefPath)
@@ -585,17 +605,39 @@ func profileHasEquivalentExtension(userDataDir string, extensionID string, manif
 		}
 		extensions, _ := prefs["extensions"].(map[string]any)
 		settings, _ := extensions["settings"].(map[string]any)
+		if settings == nil {
+			continue
+		}
 		for id, raw := range settings {
+			setting, _ := raw.(map[string]any)
+			if setting == nil || !extensionSettingIsLoadable(setting) {
+				continue
+			}
 			if extensionID != "" && strings.EqualFold(strings.TrimSpace(id), extensionID) {
 				return true
 			}
-			setting, _ := raw.(map[string]any)
 			if manifestName != "" && extensionSettingManifestName(setting) == manifestName {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func extensionSettingIsLoadable(entry map[string]any) bool {
+	if entry == nil {
+		return false
+	}
+	state, _ := entry["state"].(float64)
+	if state != 1 {
+		return false
+	}
+	path, _ := entry["path"].(string)
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	return validateUnpackedExtensionManifest(path) == nil
 }
 
 func chromeProfileDirs(userDataDir string) []string {

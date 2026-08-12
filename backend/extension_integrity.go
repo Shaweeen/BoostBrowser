@@ -150,8 +150,9 @@ func everyAssignedHasDurableRuntime(userDataDir string, launchArgs []string) boo
 		return true
 	}
 	for _, dir := range dirs {
-		// Read-only presence (LES or enabled Preferences with valid path).
-		if !extensionAlreadyPresentInProfileReadOnly(userDataDir, dir) {
+		// Integrity-complete is used to hard-strip --load-extension. Require a
+		// loadable Preferences registration, not LES alone (upgrade-safe).
+		if !isExtensionInstalledInProfile(userDataDir, dir) {
 			return false
 		}
 	}

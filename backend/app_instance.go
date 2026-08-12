@@ -233,22 +233,32 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		profile.LastError = startErr.Error()
 		return profile, startErr
 	}
-	// Extension inject is selective: packages with durable profile/wallet data
-	// are never re-injected. New assignments only inject the missing packages.
-	// Hot-settled environments skip one-time adapt work (prefs rewrite, sole
-	// blank wipe, prep goroutines) to protect data and speed multi-open.
+	// Extension inject is selective. Policy (wallet-safe):
+	//   1) heal Preferences package paths for assigned packages only — never
+	//      touch LES / Cookies / IndexedDB vaults;
+	//   2) skip --load-extension only when Preferences path is still loadable
+	//      (LES alone is not enough — upgrade can leave a stale absolute path);
+	//   3) hot-settled skips one-time adapt work once loadable registration exists.
 	assignmentFP, assignmentExtIDs := assignmentFingerprintFromLaunchArgs(sanitizedProfileLaunchArgs)
+	if !allowRabbyImport && len(activeLoadExtensionDirs(sanitizedProfileLaunchArgs)) > 0 {
+		if healed := healAssignedExtensionPackagePaths(userDataDir, sanitizedProfileLaunchArgs); healed > 0 {
+			log.Info("启动前已修复扩展加载路径（钱包 LES 未改动）",
+				logger.F("profile_id", profileId),
+				logger.F("healed", healed),
+			)
+		}
+	}
 	needingInject := loadExtensionDirsNeedingInject(userDataDir, sanitizedProfileLaunchArgs)
 	hotSettled := isEnvironmentHotStartSettled(userDataDir, sanitizedProfileLaunchArgs)
 	extensionPrepReady := isExtensionLaunchPrepReady(userDataDir, assignmentFP) || hotSettled
 	if hotSettled {
-		log.Info("环境热启动：已校验扩展/钱包 data，跳过重复注入与一次性适配",
+		log.Info("环境热启动：扩展可加载且钱包 data 保留，跳过重复注入与一次性适配",
 			logger.F("profile_id", profileId),
 			logger.F("assigned", len(assignmentExtIDs)),
 			logger.F("still_need_inject", len(needingInject)),
 		)
 	} else if len(needingInject) > 0 {
-		log.Info("扩展选择性注入：仅首次适配缺少环境 data 的包",
+		log.Info("扩展选择性注入：仅首次适配或路径失效后需要 CLI 的包",
 			logger.F("profile_id", profileId),
 			logger.F("inject", len(needingInject)),
 			logger.F("already_adapted", len(assignmentExtIDs)-len(needingInject)),
@@ -257,10 +267,8 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 
 	// Integrity complete / hot-settled: zero CLI and never touch user sessions.
 	assignmentComplete := isExtensionAssignmentComplete(userDataDir, sanitizedProfileLaunchArgs)
-	// Scheme A 注册兜底：仍需要 CLI 注入的包（注册缺失）先补写 Preferences
-	// unpacked 注册，Chrome 从 profile 加载扩展，不再每次触发
-	// onInstalled(install) 弹扩展欢迎页。仅在环境未运行（冷启动）且非钱包
-	// 批量导入启动时执行；注册成功后重新评估，能剥离 CLI 就剥离。
+	// Scheme A 注册兜底：仍需要 CLI 的包补写 Preferences unpacked 注册。
+	// 注册成功后重新评估，能剥离 CLI 就剥离（钱包 LES 从不在此路径被改写）。
 	if !allowRabbyImport && !hotSettled && len(needingInject) > 0 {
 		if registered := a.registerAssignedExtensionsIntoProfile(userDataDir, needingInject); registered > 0 {
 			needingInject = loadExtensionDirsNeedingInject(userDataDir, sanitizedProfileLaunchArgs)
