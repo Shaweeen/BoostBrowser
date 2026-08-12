@@ -669,6 +669,10 @@ func TestGlobalExtensionDistributionChecksOnlyNewProfilesOnExplicitAction(t *tes
 	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"MetaMask","version":"1.0","manifest_version":3}`), 0644); err != nil {
 		t.Fatal(err)
 	}
+	absPkg, err := filepath.Abs(extDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	existing, err := app.browserMgr.Create(BrowserProfileInput{ProfileName: "existing"})
 	if err != nil {
@@ -678,13 +682,27 @@ func TestGlobalExtensionDistributionChecksOnlyNewProfilesOnExplicitAction(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Loadable registration (ENABLED + valid package path): distribution must skip.
 	existingPrefs := filepath.Join(app.browserMgr.ResolveUserDataDir(existing), "Default", "Preferences")
 	if err := os.MkdirAll(filepath.Dir(existingPrefs), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(existingPrefs, []byte(`{"extensions":{"settings":{"nkbihfbeogaeaoehlefnkodbefgpgknn":{"manifest":{"name":"MetaMask"}}}}}`), 0644); err != nil {
+	loadablePrefs := map[string]any{
+		"extensions": map[string]any{
+			"settings": map[string]any{
+				extID: map[string]any{
+					"state":    float64(1),
+					"path":     absPkg,
+					"manifest": map[string]any{"name": "MetaMask"},
+				},
+			},
+		},
+	}
+	raw, _ := json.Marshal(loadablePrefs)
+	if err := os.WriteFile(existingPrefs, raw, 0644); err != nil {
 		t.Fatal(err)
 	}
+	beforePrefs, _ := os.ReadFile(existingPrefs)
 
 	first, err := app.BrowserGlobalExtensionImport(extID)
 	if err != nil {
@@ -693,8 +711,12 @@ func TestGlobalExtensionDistributionChecksOnlyNewProfilesOnExplicitAction(t *tes
 	if !reflect.DeepEqual(first.UpdatedProfiles, []string{missing.ProfileId}) {
 		t.Fatalf("explicit distribution should bind only the missing profile: %#v", first.UpdatedProfiles)
 	}
-	if prefs, err := os.ReadFile(existingPrefs); err != nil || strings.Contains(string(prefs), "developer_mode") {
-		t.Fatalf("existing extension preferences were modified: %s err=%v", prefs, err)
+	afterPrefs, err := os.ReadFile(existingPrefs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(beforePrefs) != string(afterPrefs) {
+		t.Fatalf("loadable existing profile Preferences must not be rewritten: before=%s after=%s", beforePrefs, afterPrefs)
 	}
 
 	second, err := app.BrowserGlobalExtensionImport(extID)
@@ -718,6 +740,42 @@ func TestGlobalExtensionDistributionChecksOnlyNewProfilesOnExplicitAction(t *tes
 	}
 	if !reflect.DeepEqual(third.UpdatedProfiles, []string{createdLater.ProfileId}) {
 		t.Fatalf("next explicit distribution should bind only the new profile: %#v", third.UpdatedProfiles)
+	}
+}
+
+func TestGlobalExtensionDistributionHealsResidueWithoutLoadablePath(t *testing.T) {
+	// Prefs residue (id only, no path) must not block re-bind — upgrade-safe heal.
+	root := t.TempDir()
+	app := NewApp(root)
+	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
+	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
+	extDir := app.globalExtensionDir(extID)
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"MetaMask","version":"1.0","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	existing, err := app.browserMgr.Create(BrowserProfileInput{ProfileName: "residue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefsPath := filepath.Join(app.browserMgr.ResolveUserDataDir(existing), "Default", "Preferences")
+	if err := os.MkdirAll(filepath.Dir(prefsPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(prefsPath, []byte(`{"extensions":{"settings":{"nkbihfbeogaeaoehlefnkodbefgpgknn":{"manifest":{"name":"MetaMask"}}}}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := app.BrowserGlobalExtensionImport(extID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.UpdatedProfiles) != 1 || result.UpdatedProfiles[0] != existing.ProfileId {
+		t.Fatalf("residue without loadable path must re-bind for heal: %#v", result.UpdatedProfiles)
+	}
+	if !isExtensionInstalledInProfile(app.browserMgr.ResolveUserDataDir(existing), extDir) {
+		t.Fatal("after re-bind, package path must be loadable")
 	}
 }
 
