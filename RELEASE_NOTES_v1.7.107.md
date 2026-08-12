@@ -1,4 +1,4 @@
-# BrowserStudio v1.7.106
+# BrowserStudio v1.7.107
 
 ## 修复内容
 
@@ -27,3 +27,4 @@
 - 环境启动时统一执行扩展加载决策并启用 Chrome 137+ `--load-extension` 兼容开关，不包含 Rabby、MetaMask 等品牌特判。
 - 修复客户端能够检测到新版、却无法下载 GitHub Release 大文件的问题：下载按客户端代理、环境变量代理、Windows 系统代理、直连依次有界回退，单条链路失败不再中止整个更新。
 - 每次重试都会重新创建临时文件并释放失败连接；最终文件仍必须通过 Release SHA256 和 Windows PE 校验后才能交给 updater 安装。
+- 补齐更新下载单链路替换的可逆删除台账，确保 Windows 发布前代码健康检查通过。
