@@ -2,7 +2,6 @@ package backend
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -17,38 +16,36 @@ func TestValidatePublicRemoteURLRejectsLocal(t *testing.T) {
 	}
 }
 
-func TestPublicRemoteHTTPClientUsesEnvProxy(t *testing.T) {
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("PK\x03\x04fake"))
-	}))
-	defer proxy.Close()
-
-	t.Setenv("HTTP_PROXY", proxy.URL)
-	t.Setenv("HTTPS_PROXY", proxy.URL)
-	client := newPublicRemoteHTTPClient(5*time.Second, true)
-	req, err := http.NewRequest(http.MethodGet, "http://example.com/extension.crx", nil)
+func TestPublicRemoteHTTPClientOptionalLocalGateway(t *testing.T) {
+	// Prefer fixed optional proxy (app LocalVPNProxy path). Do not rely on
+	// http.ProxyFromEnvironment — it caches env at first process use and is
+	// flaky under suite order / user-level HTTPS_PROXY on developer machines.
+	client := newPublicRemoteHTTPClientWithProxy(5*time.Second, true, "http://127.0.0.1:17890")
+	tr, ok := client.Transport.(*http.Transport)
+	if !ok || tr.Proxy == nil {
+		t.Fatal("expected http.Transport with Proxy func")
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://clients2.google.com/service/update2/crx", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := client.Do(req)
+	proxyURL, err := tr.Proxy(req)
 	if err != nil {
-		t.Fatalf("proxy download failed: %v", err)
+		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("status=%d", resp.StatusCode)
+	if proxyURL == nil || proxyURL.Host != "127.0.0.1:17890" {
+		t.Fatalf("expected fixed local gateway 127.0.0.1:17890, got %#v", proxyURL)
+	}
+	localReq, err := http.NewRequest(http.MethodGet, "https://127.0.0.1/secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.Proxy(localReq); err == nil {
+		t.Fatal("proxy selection must reject loopback destinations")
 	}
 }
 
 func TestEnvHTTPProxyConfigured(t *testing.T) {
-	t.Setenv("HTTP_PROXY", "")
-	t.Setenv("HTTPS_PROXY", "")
-	t.Setenv("http_proxy", "")
-	t.Setenv("https_proxy", "")
-	t.Setenv("ALL_PROXY", "")
-	t.Setenv("all_proxy", "")
-	// Clear may not unset empty - force empty and check HTTPS only set later
 	os.Unsetenv("HTTP_PROXY")
 	os.Unsetenv("HTTPS_PROXY")
 	os.Unsetenv("http_proxy")
