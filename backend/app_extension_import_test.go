@@ -743,9 +743,7 @@ func TestGlobalExtensionDistributionChecksOnlyNewProfilesOnExplicitAction(t *tes
 	}
 }
 
-func TestAssignWritesPreferencesAndHotStartNeedsZeroCLI(t *testing.T) {
-	// Assign → Preferences loadable (required success) → first start still keeps
-	// --load-extension until Chrome durable LES exists → then zero CLI.
+func TestAssignRecordsLaunchArgWithoutWritingProfileData(t *testing.T) {
 	root := t.TempDir()
 	app := NewApp(root)
 	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
@@ -765,43 +763,18 @@ func TestAssignWritesPreferencesAndHotStartNeedsZeroCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.PrefsInstalledCount != 1 {
-		t.Fatalf("expected Preferences install, got prefs=%d msg=%q", result.PrefsInstalledCount, result.Message)
+	if result.PrefsInstalledCount != 0 {
+		t.Fatalf("assign must not synthesize Chrome Preferences, got prefs=%d msg=%q", result.PrefsInstalledCount, result.Message)
 	}
 	if result.SkippedCount != 0 {
 		t.Fatalf("fresh profile should not skip: %#v", result)
 	}
-	userData := app.browserMgr.ResolveUserDataDir(profile)
-	args := []string{"--load-extension=" + extDir}
-	if !isExtensionInstalledInProfile(userData, extDir) {
-		t.Fatal("after assign, Preferences must be loadable")
-	}
-	// Prefs-only must NOT strip CLI (first adapt so Chrome actually loads package).
-	if isEnvironmentHotStartSettled(userData, args) {
-		t.Fatal("prefs-only after assign must keep CLI for first open")
-	}
-	next, present, cli := applyProfileNativeExtensionLaunchArgs(args, userData)
-	if cli != 1 || present != 0 {
-		t.Fatalf("first open after assign must inject CLI: present=%d cli=%d args=%v", present, cli, next)
-	}
-	// Simulate Chrome writing durable runtime after first load.
-	les := filepath.Join(userData, "Default", "Local Extension Settings", extID)
-	if err := os.MkdirAll(les, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(les, "000003.log"), []byte("vault"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if !isEnvironmentHotStartSettled(userData, args) {
-		t.Fatal("prefs+LES must settle hot start (zero CLI)")
-	}
-	next2, present2, cli2 := applyProfileNativeExtensionLaunchArgs(args, userData)
-	if cli2 != 0 || present2 != 1 {
-		t.Fatalf("after LES, CLI must strip: present=%d cli=%d args=%v", present2, cli2, next2)
+	updated, ok := app.browserMgr.Profiles[profile.ProfileId]
+	if !ok || updated == nil || !hasExtensionDirInLaunchArgs(updated.LaunchArgs, extDir) {
+		t.Fatalf("assignment must persist --load-extension: %#v", updated)
 	}
 
-	// Second assign: same extension → skip, do not overwrite Preferences bytes.
-	before, _ := os.ReadFile(filepath.Join(userData, "Default", "Preferences"))
+	// Second assign: same extension → skip, without touching profile data.
 	second, err := app.BrowserProfileImportExtension([]string{profile.ProfileId}, extID)
 	if err != nil {
 		t.Fatal(err)
@@ -809,17 +782,27 @@ func TestAssignWritesPreferencesAndHotStartNeedsZeroCLI(t *testing.T) {
 	if second.SkippedCount != 1 || len(second.UpdatedProfiles) != 0 {
 		t.Fatalf("same extension must skip: %#v", second)
 	}
-	after, _ := os.ReadFile(filepath.Join(userData, "Default", "Preferences"))
-	if string(before) != string(after) {
-		t.Fatal("skip must not rewrite Preferences (wallet-safe)")
+	userData := app.browserMgr.ResolveUserDataDir(profile)
+	prefsData, err := os.ReadFile(filepath.Join(userData, "Default", "Preferences"))
+	if err != nil {
+		t.Fatalf("read developer-mode Preferences: %v", err)
+	}
+	var prefs map[string]any
+	if err := json.Unmarshal(prefsData, &prefs); err != nil {
+		t.Fatalf("decode Preferences: %v", err)
+	}
+	extensions, _ := prefs["extensions"].(map[string]any)
+	if settings, ok := extensions["settings"].(map[string]any); ok && len(settings) > 0 {
+		t.Fatalf("assignment must not synthesize extension install records: %#v", settings)
 	}
 	if !strings.Contains(second.Message, "跳过") && !strings.Contains(second.Message, "已存在") {
 		t.Fatalf("skip message should be clear: %q", second.Message)
 	}
 }
 
-func TestGlobalExtensionDistributionHealsResidueWithoutLoadablePath(t *testing.T) {
-	// Prefs residue (id only, no path) must not block re-bind — upgrade-safe heal.
+func TestGlobalExtensionDistributionRebindsResidueWithoutTouchingPreferences(t *testing.T) {
+	// Preferences residue must not block the authoritative launch assignment,
+	// and assigning must not manufacture a Chrome-owned install record.
 	root := t.TempDir()
 	app := NewApp(root)
 	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
@@ -849,8 +832,16 @@ func TestGlobalExtensionDistributionHealsResidueWithoutLoadablePath(t *testing.T
 	if len(result.UpdatedProfiles) != 1 || result.UpdatedProfiles[0] != existing.ProfileId {
 		t.Fatalf("residue without loadable path must re-bind for heal: %#v", result.UpdatedProfiles)
 	}
-	if !isExtensionInstalledInProfile(app.browserMgr.ResolveUserDataDir(existing), extDir) {
-		t.Fatal("after re-bind, package path must be loadable")
+	updated := app.browserMgr.Profiles[existing.ProfileId]
+	if updated == nil || !hasExtensionDirInLaunchArgs(updated.LaunchArgs, extDir) {
+		t.Fatalf("after re-bind, launch assignment must be present: %#v", updated)
+	}
+	afterPrefs, err := os.ReadFile(prefsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(afterPrefs), `"path"`) {
+		t.Fatalf("assignment must not synthesize a package path in Preferences: %s", afterPrefs)
 	}
 }
 

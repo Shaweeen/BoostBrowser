@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Save, RotateCcw, Upload, Download, RefreshCw, HardDriveDownload } from 'lucide-react'
+import { Save, RotateCcw, Upload, Download, RefreshCw, HardDriveDownload, ShieldCheck } from 'lucide-react'
 import { Card, Button, FormItem, Input, Select, Switch, ThemeSwitcher, toast, Modal, Progress } from '../../shared/components'
 import { fetchSettings, saveSettings, resetSettings, initializeSystemData, exportSystemConfig, importSystemConfig, prepareLegacyDataRecovery, executeLegacyDataRecovery, cancelLegacyDataRecovery } from './api'
 import type { LegacyDataRecoveryPreview } from './api'
@@ -11,6 +11,15 @@ import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 import { useBackupStore } from '../../store/backupStore'
 import { triggerUpdateCheck } from '../updater/UpdateChecker'
 import { resolveActionErrorMessage } from '../browser/utils/actionErrors'
+import { GetAppConfig, GetStartupDataCompatibilityStatus } from '../../wailsjs/go/main/App'
+
+type StartupDataStatus = {
+  activeDataPath?: string
+  autoRecovered?: number
+  recoveryCount?: number
+  recoveryPath?: string
+  message?: string
+}
 
 interface BackupExportProgress {
   phase: string
@@ -35,6 +44,8 @@ export function SettingsPage() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
+  const [currentVersion, setCurrentVersion] = useState('-')
+  const [dataCheckStatus, setDataCheckStatus] = useState<StartupDataStatus | null>(null)
   const [importModalOpen, setImportModalOpen] = useState(false)
   const [legacyModalOpen, setLegacyModalOpen] = useState(false)
   const [legacyPreview, setLegacyPreview] = useState<LegacyDataRecoveryPreview | null>(null)
@@ -49,7 +60,18 @@ export function SettingsPage() {
 
   useEffect(() => {
     loadSettings()
+    GetAppConfig()
+      .then((value) => setCurrentVersion(String(value?.version || '-')))
+      .catch(() => setCurrentVersion('-'))
   }, [])
+
+  const handleDataSelfCheck = async () => {
+    try {
+      setDataCheckStatus(await GetStartupDataCompatibilityStatus())
+    } catch (error: any) {
+      toast.error(error?.message || '数据自检失败')
+    }
+  }
 
   useEffect(() => {
     const onProgress = (payload: any) => {
@@ -436,7 +458,7 @@ export function SettingsPage() {
     try {
       const ok = await dismissLegacyDataFolders(autoLegacyPreview.folders.map(f => f.folderKey))
       if (ok) {
-        toast.success('已忽略并永久删除这些残留文件夹，不再提醒')
+        toast.success('已记录忽略，数据文件仍保留在磁盘')
         setAutoLegacyModalOpen(false)
         setAutoLegacyPreview(null)
       }
@@ -489,10 +511,13 @@ export function SettingsPage() {
           <div className="text-sm text-[var(--color-text-secondary)]">
             点击右侧按钮立即检查 GitHub 上是否有新版本
           </div>
-          <Button variant="secondary" size="sm" onClick={() => triggerUpdateCheck()}>
-            <RefreshCw className="w-4 h-4" />
-            检查更新
-          </Button>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-[var(--color-text-muted)]">当前版本 v{currentVersion.replace(/^v/i, '')}</span>
+            <Button variant="secondary" size="sm" onClick={() => triggerUpdateCheck()}>
+              <RefreshCw className="w-4 h-4" />
+              检查更新
+            </Button>
+          </div>
         </div>
       </Card>
 
@@ -644,11 +669,11 @@ export function SettingsPage() {
         </div>
       </Card>
 
-      <Card title="遗留数据识别" subtitle="仅在删除环境后自动检查；也可手动扫描。忽略将永久删除残留文件夹">
+      <Card title="遗留数据识别" subtitle="仅在用户手动操作时检查；忽略不会删除磁盘数据">
         <div className="space-y-3">
           <div className="flex items-center justify-between gap-4">
             <div className="text-sm text-[var(--color-text-secondary)]">
-              导入为原地挂载；选择「忽略」会删除磁盘上的残留数据且不再询问。日常启动不再自动扫描。
+              导入为原地挂载，不复制、不覆盖；忽略只记录选择，文件仍保留在磁盘。
             </div>
             <div className="flex flex-wrap gap-2">
               <Button variant="secondary" size="sm" onClick={handleScanLegacyData} loading={autoLegacyBusy}>
@@ -713,6 +738,10 @@ export function SettingsPage() {
               <HardDriveDownload className="w-4 h-4" />
               从旧版 data 恢复
             </Button>
+            <Button variant="secondary" size="sm" onClick={handleDataSelfCheck}>
+              <ShieldCheck className="w-4 h-4" />
+              数据自检
+            </Button>
           </div>
           {exportProgress && (
             <div className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-secondary)] px-3 py-2 space-y-2">
@@ -760,6 +789,23 @@ export function SettingsPage() {
           )}
         </div>
       </Card>
+
+      <Modal
+        open={dataCheckStatus !== null}
+        onClose={() => setDataCheckStatus(null)}
+        title="数据自检结果"
+        width="560px"
+        footer={<Button onClick={() => setDataCheckStatus(null)}>关闭</Button>}
+      >
+        <div className="space-y-2 text-sm text-[var(--color-text-secondary)]">
+          <p className="font-medium text-[var(--color-text-primary)]">{dataCheckStatus?.message || '数据检查完成'}</p>
+          <p>自动识别环境：{dataCheckStatus?.autoRecovered || 0} 个</p>
+          <p>待确认恢复：{dataCheckStatus?.recoveryCount || 0} 个</p>
+          {dataCheckStatus?.recoveryPath && <p className="break-all text-xs">恢复归档：{dataCheckStatus.recoveryPath}</p>}
+          {dataCheckStatus?.activeDataPath && <p className="break-all text-xs">数据目录：{dataCheckStatus.activeDataPath}</p>}
+          <p className="pt-2 text-xs text-[var(--color-text-muted)]">自检仅读取状态，不会覆盖或删除 Cookies、扩展、钱包与登录数据。</p>
+        </div>
+      </Modal>
 
       <Modal
         open={importModalOpen}
@@ -904,7 +950,7 @@ export function SettingsPage() {
         footer={
           <>
             <Button variant="secondary" onClick={handleAutoLegacyDismissAll} disabled={autoLegacyBusy}>
-              忽略并删除残留文件夹
+              忽略（保留文件）
             </Button>
             <Button onClick={handleAutoLegacyImport} loading={autoLegacyBusy} disabled={autoLegacySelected.size === 0}>
               导入勾选的环境
@@ -939,7 +985,7 @@ export function SettingsPage() {
             ))}
           </div>
           <p className="text-xs text-[var(--color-text-muted)]">
-            导入为原地挂载。忽略会永久删除勾选的残留文件夹且不再询问。
+            导入为原地挂载。忽略只记录用户选择，不删除勾选的数据文件夹。
           </p>
         </div>
       </Modal>

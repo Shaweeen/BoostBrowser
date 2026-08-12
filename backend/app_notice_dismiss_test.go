@@ -40,9 +40,8 @@ func TestNoticeDismissalStatePersists(t *testing.T) {
 	}
 }
 
-// TestLegacyFolderDismissalDeletesAndPersists verifies ignore permanently
-// deletes orphan folders under the data root and records them so they never
-// reappear. Scan without pending returns empty (no startup scan).
+// TestLegacyFolderDismissalPreservesDataAndPersists verifies ignore records
+// the choice without deleting any user data.
 func testAppWithDataRoot(t *testing.T) (*App, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -54,7 +53,7 @@ func testAppWithDataRoot(t *testing.T) (*App, string) {
 	return app, app.backupResolveUserDataRoot(cfg)
 }
 
-func TestLegacyFolderDismissalDeletesAndPersists(t *testing.T) {
+func TestLegacyFolderDismissalPreservesDataAndPersists(t *testing.T) {
 	app, activeRoot := testAppWithDataRoot(t)
 	orphan1 := filepath.Join(activeRoot, "orphan-a")
 	orphan2 := filepath.Join(activeRoot, "orphan-b")
@@ -89,11 +88,11 @@ func TestLegacyFolderDismissalDeletesAndPersists(t *testing.T) {
 	if err := app.BrowserLegacyDataDismissFolders(keys); err != nil {
 		t.Fatalf("dismiss legacy folders failed: %v", err)
 	}
-	if _, err := os.Stat(orphan1); !os.IsNotExist(err) {
-		t.Fatalf("orphan-a should be deleted, err=%v", err)
+	if _, err := os.Stat(orphan1); err != nil {
+		t.Fatalf("orphan-a must be preserved, err=%v", err)
 	}
-	if _, err := os.Stat(orphan2); !os.IsNotExist(err) {
-		t.Fatalf("orphan-b should be deleted, err=%v", err)
+	if _, err := os.Stat(orphan2); err != nil {
+		t.Fatalf("orphan-b must be preserved, err=%v", err)
 	}
 	dismissed := app.dismissedLegacyFolderSet()
 	if !dismissed["orphan-a"] || !dismissed["orphan-b"] {
@@ -101,7 +100,7 @@ func TestLegacyFolderDismissalDeletesAndPersists(t *testing.T) {
 	}
 }
 
-func TestLegacyScanOnlyWhenPending(t *testing.T) {
+func TestLegacyScanOnlyWhenManuallyRequested(t *testing.T) {
 	app, activeRoot := testAppWithDataRoot(t)
 	orphan := filepath.Join(activeRoot, "leftover-1")
 	if err := os.MkdirAll(filepath.Join(orphan, "Default"), 0755); err != nil {
@@ -116,13 +115,12 @@ func TestLegacyScanOnlyWhenPending(t *testing.T) {
 	if len(p.Folders) != 0 {
 		t.Fatal("without pending, scan must not surface leftovers")
 	}
-	app.armLegacyScanAfterProfileDelete()
-	p2, err := app.BrowserLegacyDataAutoScan(false)
+	p2, err := app.BrowserLegacyDataAutoScan(true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(p2.Folders) == 0 {
-		t.Fatal("after delete arm, scan must surface leftovers")
+		t.Fatal("manual scan must surface leftovers")
 	}
 }
 

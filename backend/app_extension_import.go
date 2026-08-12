@@ -30,10 +30,11 @@ type ExtensionImportResult struct {
 	UpdatedProfiles  []string `json:"updatedProfiles"`
 	// SkippedProfiles: already had the same loadable extension (no overwrite).
 	SkippedCount int `json:"skippedCount,omitempty"`
-	// PrefsInstalledCount: stopped envs where Preferences registration is loadable after assign.
+	// PrefsInstalledCount is retained for API compatibility and is always zero:
+	// BrowserStudio does not synthesize Chromium-owned installation records.
 	PrefsInstalledCount int `json:"prefsInstalledCount,omitempty"`
-	// DeferredRunningCount: envs were running; LaunchArgs bound, Preferences on next cold start.
-	DeferredRunningCount int `json:"deferredRunningCount,omitempty"`
+	// DeferredRunningCount: envs were running; assignment loads after restart.
+	DeferredRunningCount int    `json:"deferredRunningCount,omitempty"`
 	Message              string `json:"message"`
 }
 
@@ -42,9 +43,7 @@ type ExtensionImportResult struct {
 // filterProfilesMissingEquivalentExtension.
 type extensionBindResult struct {
 	UpdatedProfiles []string
-	PrefsInstalled  int
 	DeferredRunning int
-	FailedPrefs     []string
 }
 
 // GlobalManagedExtension is the backend-authoritative global extension policy.
@@ -272,11 +271,11 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 		PreviousVersion:      previousVersion,
 		UpdatedProfiles:      bind.UpdatedProfiles,
 		SkippedCount:         skipped,
-		PrefsInstalledCount:  bind.PrefsInstalled,
+		PrefsInstalledCount:  0,
 		DeferredRunningCount: bind.DeferredRunning,
 		Message: formatExtensionAssignMessage(
 			extID, extensionVersion, requestedN, skipped,
-			len(bind.UpdatedProfiles), bind.PrefsInstalled, bind.DeferredRunning, len(bind.FailedPrefs),
+			len(bind.UpdatedProfiles), 0, bind.DeferredRunning, 0,
 		),
 	}, nil
 }
@@ -361,11 +360,11 @@ func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionIm
 		PreviousVersion:      previousVersion,
 		UpdatedProfiles:      bind.UpdatedProfiles,
 		SkippedCount:         skipped,
-		PrefsInstalledCount:  bind.PrefsInstalled,
+		PrefsInstalledCount:  0,
 		DeferredRunningCount: bind.DeferredRunning,
 		Message: formatExtensionAssignMessage(
 			extID, extensionVersion, len(targetIDs), skipped,
-			len(bind.UpdatedProfiles), bind.PrefsInstalled, bind.DeferredRunning, len(bind.FailedPrefs),
+			len(bind.UpdatedProfiles), 0, bind.DeferredRunning, 0,
 		),
 	}, nil
 }
@@ -580,13 +579,8 @@ func extensionSourceKey(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
-func extensionInstallMessage(previousVersion, extensionVersion string, count int) string {
-	return formatExtensionAssignMessage("", extensionVersion, count, 0, count, count, 0, 0)
-}
-
-// formatExtensionAssignMessage is the user-facing assign summary.
-// Policy: skip same loadable extension; Preferences inject for missing; no LES wipe;
-// hot starts do not re-CLI (no extension homepage tabs).
+// formatExtensionAssignMessage is the user-facing assign summary. Assignment
+// records only the launch path and never rewrites Chromium profile storage.
 func formatExtensionAssignMessage(extID, version string, total, skipped, bound, prefsOK, deferred, failed int) string {
 	name := strings.TrimSpace(extID)
 	if ver := strings.TrimSpace(version); ver != "" {
@@ -614,7 +608,7 @@ func formatExtensionAssignMessage(extID, version string, total, skipped, bound, 
 		parts = append(parts, fmt.Sprintf("已写入 Profile %d（请关闭后重新打开环境一次以加载扩展）", prefsOK))
 	}
 	if deferred > 0 {
-		parts = append(parts, fmt.Sprintf("运行中延后 %d（必须先关闭环境再分配才能写入）", deferred))
+		parts = append(parts, fmt.Sprintf("运行中 %d（关闭并重新打开后加载）", deferred))
 	}
 	if skipped > 0 {
 		parts = append(parts, fmt.Sprintf("跳过已有 %d", skipped))
@@ -622,7 +616,7 @@ func formatExtensionAssignMessage(extID, version string, total, skipped, bound, 
 	if failed > 0 {
 		parts = append(parts, fmt.Sprintf("写入失败 %d", failed))
 	}
-	parts = append(parts, "未改动已有钱包/LES")
+	parts = append(parts, "未改动已有钱包、Cookies 或扩展存储")
 	return strings.Join(parts, "；")
 }
 
@@ -642,13 +636,11 @@ func (a *App) filterProfilesMissingEquivalentExtension(profileIDs []string, exte
 			continue
 		}
 		userDataDir := a.browserMgr.ResolveUserDataDir(&profile)
-		// Assigned in launch args AND still loadable → skip re-bind.
-		// If path is stale after upgrade, re-bind to heal Preferences (LES kept).
+		// The saved launch assignment is the source of truth. Do not infer that
+		// an extension is missing from Chromium's generated Preferences: doing so
+		// caused every assignment/launch to rewrite profile state and could still
+		// suppress --load-extension on the next start.
 		if extDir != "" && hasExtensionDirInLaunchArgs(profile.LaunchArgs, extDir) {
-			if isExtensionInstalledInProfile(userDataDir, extDir) {
-				continue
-			}
-			missing = append(missing, profileID)
 			continue
 		}
 		// Only skip when Chrome can still load an equivalent extension package.
@@ -1354,16 +1346,6 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) (*e
 	result := &extensionBindResult{
 		UpdatedProfiles: make([]string, 0, len(profileIds)),
 	}
-	// Materialize package into each stopped profile (Default/Extensions/…) and
-	// bind LaunchArgs to that profile-local path so --load-extension always
-	// points at a path Chromium can open. Shared program package remains the
-	// source of truth for copies; running profiles only get shared LaunchArgs
-	// until next cold start.
-	type pendingInstall struct {
-		profileID   string
-		userDataDir string
-	}
-	pending := make([]pendingInstall, 0, len(profileIds))
 	for _, id := range profileIds {
 		profile, ok := a.browserMgr.Profiles[id]
 		if !ok || profile == nil {
@@ -1373,29 +1355,14 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) (*e
 			launchArgs: append([]string{}, profile.LaunchArgs...),
 			updatedAt:  profile.UpdatedAt,
 		}
-		userDataDir := a.browserMgr.ResolveUserDataDir(profile)
-		bindPath := extDir
-		if !profile.Running {
-			if local, _, _, mErr := materializeExtensionPackageForProfile(userDataDir, extDir); mErr == nil && local != "" {
-				bindPath = local
-			}
-		}
-		// LaunchArgs record which package path this environment must load.
-		profile.LaunchArgs = addExtensionDirToLaunchArgs(profile.LaunchArgs, bindPath)
-		// Always keep shared path too so heal can re-copy after upgrade moves appRoot.
-		if bindPath != extDir {
-			profile.LaunchArgs = addExtensionDirToLaunchArgs(profile.LaunchArgs, extDir)
-		}
+		// LaunchArgs is the sole assignment record. Do not pre-write Chromium
+		// Preferences: Chrome owns that file and may reject synthetic entries.
+		profile.LaunchArgs = addExtensionDirToLaunchArgs(profile.LaunchArgs, extDir)
 		profile.UpdatedAt = time.Now().Format(time.RFC3339)
 		result.UpdatedProfiles = append(result.UpdatedProfiles, id)
 		if profile.Running {
 			result.DeferredRunning++
-			continue
 		}
-		pending = append(pending, pendingInstall{
-			profileID:   id,
-			userDataDir: userDataDir,
-		})
 	}
 	if len(result.UpdatedProfiles) == 0 {
 		return nil, fmt.Errorf("未找到可更新的实例")
@@ -1409,66 +1376,10 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) (*e
 		}
 		return nil, fmt.Errorf("保存实例扩展配置失败：%w", err)
 	}
-	// Force next start to re-verify extension packages ↔ profile data.
+	// Clear legacy optimization markers so old releases cannot suppress the
+	// authoritative --load-extension argument on the next start.
 	a.clearExtensionLaunchReadyForProfilesLocked(result.UpdatedProfiles)
 	a.clearExtensionIntegrityForProfilesLocked(result.UpdatedProfiles)
-	// Materialize while mutex held but Chrome is stopped for these profiles.
-	log := logger.New("Extension")
-	for _, item := range pending {
-		if err := os.MkdirAll(item.userDataDir, 0755); err != nil {
-			log.Warn("扩展 Profile 安装失败：无法创建用户目录",
-				logger.F("profile_id", item.profileID),
-				logger.F("error", err.Error()),
-			)
-			result.FailedPrefs = append(result.FailedPrefs, item.profileID)
-			continue
-		}
-		localPath, _, _, matErr := materializeExtensionPackageForProfile(item.userDataDir, extDir)
-		if matErr != nil {
-			log.Warn("扩展物化进环境目录失败，尝试仅写 Preferences",
-				logger.F("profile_id", item.profileID),
-				logger.F("error", matErr.Error()),
-			)
-			localPath = extDir
-		}
-		if err := installUnpackedExtensionIntoProfile(item.userDataDir, extDir); err != nil {
-			log.Warn("分配时 Profile 安装失败，启动时将 heal/CLI 兜底（不触碰 LES）",
-				logger.F("profile_id", item.profileID),
-				logger.F("error", err.Error()),
-			)
-			result.FailedPrefs = append(result.FailedPrefs, item.profileID)
-			continue
-		}
-		// Success = Preferences path is loadable for the materialised (or shared) package.
-		checkPath := localPath
-		if checkPath == "" {
-			checkPath = extDir
-		}
-		if !isExtensionInstalledInProfile(item.userDataDir, checkPath) && !isExtensionInstalledInProfile(item.userDataDir, extDir) {
-			log.Warn("分配后 Preferences 仍不可加载，启动时将 heal",
-				logger.F("profile_id", item.profileID),
-			)
-			result.FailedPrefs = append(result.FailedPrefs, item.profileID)
-			continue
-		}
-		result.PrefsInstalled++
-		log.Info("分配时已将扩展物化并写入环境 Profile（首次打开强制 CLI 加载）",
-			logger.F("profile_id", item.profileID),
-			logger.F("extension_id", resolveExtensionPackageID(extDir)),
-			logger.F("local_path", checkPath),
-		)
-	}
-	// Success policy: at least one stopped environment must have loadable Preferences.
-	// All-running → user must stop browsers first. Prefs all failed → hard error.
-	if len(pending) == 0 && result.DeferredRunning > 0 && result.PrefsInstalled == 0 {
-		return result, fmt.Errorf("所选环境均在运行中，无法写入扩展 Profile。请先关闭这些环境后再点「分配」（否则浏览器内看不到扩展）")
-	}
-	if len(pending) > 0 && result.PrefsInstalled == 0 {
-		return result, fmt.Errorf("扩展未能写入任何环境的 Preferences（失败 %d 个）。请检查扩展包是否完整、环境目录是否可写后重试", len(result.FailedPrefs))
-	}
-	if len(result.FailedPrefs) > 0 && result.PrefsInstalled == 0 {
-		return result, fmt.Errorf("扩展 Preferences 写入全部失败（%d 个环境）", len(result.FailedPrefs))
-	}
 	return result, nil
 }
 

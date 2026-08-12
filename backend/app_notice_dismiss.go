@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"boost-browser/backend/internal/fsutil"
-
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // noticeDismissMu serializes read-modify-write of the dismiss state file so
@@ -29,7 +27,7 @@ type noticeDismissState struct {
 	// to stop reporting as "尚未完成首次适配".
 	ExtensionIncomplete []string `json:"extensionIncomplete"`
 	// LegacyFolders are relative Chrome data folders under the data root the
-	// user chose not to import (and that were deleted on dismiss).
+	// user chose not to import. Dismissal never deletes user data.
 	LegacyFolders []string `json:"legacyFolders"`
 	// LegacyScanPending is set after the user deletes an environment so the
 	// UI may run one orphan-folder scan. Cleared after scan/import/dismiss.
@@ -139,10 +137,9 @@ func (a *App) BrowserExtensionIntegrityClearDismissed() error {
 //
 // Policy (product):
 //   - Do NOT scan on every client startup.
-//   - After the user deletes an environment, set LegacyScanPending and emit
-//     legacy-data:scan-needed so the UI may offer import once.
-//   - "Ignore / do not import" DELETES those folders on disk and records the
-//     keys so they never reappear; no further prompts for them.
+//   - Scan only after the user explicitly starts it from Settings.
+//   - "Ignore / do not import" only records the keys so they do not reappear.
+//     It never deletes browser, extension, wallet, cookie, or login data.
 // ============================================================================
 
 type LegacyDataAutoFolder struct {
@@ -205,12 +202,6 @@ func (a *App) scanLegacyDataAuto() ([]LegacyDataAutoFolder, int) {
 	return folders, skipDismissed
 }
 
-func (a *App) markLegacyScanPendingLocked() {
-	state := a.readNoticeDismissal()
-	state.LegacyScanPending = true
-	_ = a.writeNoticeDismissal(state)
-}
-
 func (a *App) clearLegacyScanPendingLocked() {
 	state := a.readNoticeDismissal()
 	if !state.LegacyScanPending {
@@ -224,24 +215,8 @@ func (a *App) legacyScanPending() bool {
 	return a.readNoticeDismissal().LegacyScanPending
 }
 
-// armLegacyScanAfterProfileDelete is called after an environment is removed so
-// the UI can offer a one-shot orphan-folder import. Not used on app startup.
-func (a *App) armLegacyScanAfterProfileDelete() {
-	if a == nil {
-		return
-	}
-	noticeDismissMu.Lock()
-	a.markLegacyScanPendingLocked()
-	noticeDismissMu.Unlock()
-	if a.ctx == nil {
-		return
-	}
-	defer func() { _ = recover() }()
-	runtime.EventsEmit(a.ctx, "legacy-data:scan-needed", map[string]any{"reason": "profile-deleted"})
-}
-
 // BrowserLegacyDataAutoScan returns unregistered Chrome data folders.
-// force=false: only returns candidates when LegacyScanPending (post-delete).
+// force=false: compatibility no-op retained for older frontend bindings.
 // force=true: settings/manual scan, ignores pending gate.
 func (a *App) BrowserLegacyDataAutoScan(force bool) (*LegacyDataAutoPreview, error) {
 	if a == nil {
@@ -250,7 +225,7 @@ func (a *App) BrowserLegacyDataAutoScan(force bool) (*LegacyDataAutoPreview, err
 	pending := a.legacyScanPending()
 	preview := &LegacyDataAutoPreview{Pending: pending || force}
 	if !force && !pending {
-		preview.Message = "无待处理的环境残留扫描（仅在删除环境后检查）"
+		preview.Message = "未执行数据扫描；请在设置页手动触发"
 		preview.Folders = []LegacyDataAutoFolder{}
 		return preview, nil
 	}
@@ -269,30 +244,18 @@ func (a *App) BrowserLegacyDataAutoScan(force bool) (*LegacyDataAutoPreview, err
 		}
 		return preview, nil
 	}
-	preview.Message = fmt.Sprintf("删除环境后识别到 %d 个未关联数据文件夹。导入为环境，或忽略并永久删除这些文件夹", len(folders))
+	preview.Message = fmt.Sprintf("识别到 %d 个未关联数据文件夹。可导入为环境，或仅记录忽略（不删除文件）", len(folders))
 	return preview, nil
 }
 
-// BrowserLegacyDataDismissFolders permanently deletes the chosen orphan folders
-// under the data root and records the keys so they never reappear. Does not
-// touch folders still owned by a registered environment.
+// BrowserLegacyDataDismissFolders records ignored orphan folders. It never
+// removes data from disk; users may re-enable suggestions later.
 func (a *App) BrowserLegacyDataDismissFolders(folderKeys []string) error {
 	if a == nil || a.config == nil {
 		return fmt.Errorf("应用尚未初始化")
 	}
 	noticeDismissMu.Lock()
 	defer noticeDismissMu.Unlock()
-
-	activeRoot := a.backupResolveUserDataRoot(a.config)
-	registered := make(map[string]bool)
-	if a.browserMgr != nil {
-		for _, p := range a.browserMgr.List() {
-			dir := backupNormalizePath(a.browserMgr.ResolveUserDataDir(&p))
-			if dir != "" {
-				registered[dir] = true
-			}
-		}
-	}
 
 	state := a.readNoticeDismissal()
 	seen := make(map[string]bool, len(state.LegacyFolders)+len(folderKeys))
@@ -301,31 +264,15 @@ func (a *App) BrowserLegacyDataDismissFolders(folderKeys []string) error {
 			seen[key] = true
 		}
 	}
-	var deleteErrs []string
 	for _, key := range folderKeys {
 		key = strings.TrimSpace(key)
 		if key == "" {
 			continue
 		}
-		// Prevent path escape outside the data root.
+		// Store only safe relative keys. No filesystem mutation is performed.
 		rel := filepath.Clean(filepath.FromSlash(key))
 		if rel == "." || rel == ".." || strings.HasPrefix(rel, "..") {
-			deleteErrs = append(deleteErrs, key+": 非法路径")
 			continue
-		}
-		abs := backupNormalizePath(filepath.Join(activeRoot, rel))
-		rootNorm := backupNormalizePath(activeRoot)
-		if rootNorm == "" || abs == rootNorm || !strings.HasPrefix(abs, rootNorm+string(os.PathSeparator)) {
-			deleteErrs = append(deleteErrs, key+": 不在数据目录内")
-			continue
-		}
-		if registered[abs] {
-			deleteErrs = append(deleteErrs, key+": 仍关联已注册环境，已跳过删除")
-			continue
-		}
-		if err := os.RemoveAll(abs); err != nil {
-			deleteErrs = append(deleteErrs, key+": "+err.Error())
-			// Still record dismiss so we stop prompting even if delete failed partially.
 		}
 		if !seen[key] {
 			seen[key] = true
@@ -335,9 +282,6 @@ func (a *App) BrowserLegacyDataDismissFolders(folderKeys []string) error {
 	state.LegacyScanPending = false
 	if err := a.writeNoticeDismissal(state); err != nil {
 		return err
-	}
-	if len(deleteErrs) > 0 {
-		return fmt.Errorf("已记录忽略；部分文件夹删除失败：%s", strings.Join(deleteErrs, "；"))
 	}
 	return nil
 }

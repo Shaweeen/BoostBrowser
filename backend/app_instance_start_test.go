@@ -503,6 +503,23 @@ func TestSanitizeManagedLaunchArgsKeepsUnmanagedFlags(t *testing.T) {
 	}
 }
 
+func TestSanitizeManagedLaunchArgsKeepsSavedExtensionAssignment(t *testing.T) {
+	t.Parallel()
+
+	input := []string{
+		"--disable-sync",
+		"--load-extension=D:\\BrowserStudio\\extensions\\metamask",
+		"--remote-debugging-port=9222",
+	}
+	got, removed := sanitizeManagedLaunchArgs(input)
+	if len(got) != 2 || got[1] != input[1] {
+		t.Fatalf("saved extension assignment must reach Chromium: got=%v", got)
+	}
+	if len(removed) != 1 || removed[0] != "--remote-debugging-port" {
+		t.Fatalf("only managed debug flag should be removed: %v", removed)
+	}
+}
+
 func TestSanitizeManagedWindowPlacementArgsRemovesWindowSizeAndPosition(t *testing.T) {
 	t.Parallel()
 

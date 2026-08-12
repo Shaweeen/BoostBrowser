@@ -125,7 +125,7 @@ if ($Head -ne $TagCommit) {
 }
 
 # Verify the release tag is on origin. Windows schannel occasionally fails the
-# TLS handshake mid-publish even right after a successful fetch — retry and
+# TLS handshake mid-publish even right after a successful fetch - retry and
 # fall back to the GitHub API (same credentials as `gh release create`).
 function Assert-OriginReleaseTag([string]$TagName) {
     $ref = "refs/tags/$TagName"
@@ -292,9 +292,9 @@ $assets = @(
 foreach ($asset in $assets) { Require-File $asset }
 
 # Release lifecycle (Windows is the binary authority):
-# - No release yet → create draft, upload, then publish (draft=false).
-# - Existing draft → upload, then publish.
-# - Already published → re-upload assets with --clobber (notes-only / partial
+# - No release yet -> create draft, upload, then publish (draft=false).
+# - Existing draft -> upload, then publish.
+# - Already published -> re-upload assets with --clobber (notes-only / partial
 #   releases from other machines are common). Never require isDraft after upload.
 $existing = $null
 $existingProbe = Invoke-GhProbe -Arguments @('release', 'view', $Tag, '--repo', $Repository, '--json', 'tagName,isDraft,isPrerelease')

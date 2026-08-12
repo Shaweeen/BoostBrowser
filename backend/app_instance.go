@@ -233,68 +233,12 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		profile.LastError = startErr.Error()
 		return profile, startErr
 	}
-	// Extension inject is selective. Policy (product design):
-	//   1) heal Preferences package paths for ASSIGNED packages only — never
-	//      scan/enumerate all user extensions; never touch LES / Cookies / IndexedDB;
-	//   2) skip --load-extension only when Preferences path is still loadable
-	//      (LES alone is not enough — upgrade can leave a stale absolute path);
-	//   3) hot-settled → hard strip ALL CLI load → no onInstalled extension homepage tabs.
-	assignmentFP, assignmentExtIDs := assignmentFingerprintFromLaunchArgs(sanitizedProfileLaunchArgs)
-	if !allowRabbyImport && len(activeLoadExtensionDirs(sanitizedProfileLaunchArgs)) > 0 {
-		if healed := healAssignedExtensionPackagePaths(userDataDir, sanitizedProfileLaunchArgs); healed > 0 {
-			log.Info("启动前已修复扩展加载路径（钱包 LES 未改动）",
-				logger.F("profile_id", profileId),
-				logger.F("healed", healed),
-			)
-		}
-	}
-	needingInject := loadExtensionDirsNeedingInject(userDataDir, sanitizedProfileLaunchArgs)
-	hotSettled := isEnvironmentHotStartSettled(userDataDir, sanitizedProfileLaunchArgs)
-	extensionPrepReady := isExtensionLaunchPrepReady(userDataDir, assignmentFP) || hotSettled
-	if hotSettled {
-		log.Info("环境热启动：扩展可加载且钱包 data 保留，跳过重复注入与一次性适配",
-			logger.F("profile_id", profileId),
-			logger.F("assigned", len(assignmentExtIDs)),
-			logger.F("still_need_inject", len(needingInject)),
-		)
-	} else if len(needingInject) > 0 {
-		log.Info("扩展选择性注入：仅首次适配或路径失效后需要 CLI 的包",
-			logger.F("profile_id", profileId),
-			logger.F("inject", len(needingInject)),
-			logger.F("already_adapted", len(assignmentExtIDs)-len(needingInject)),
-		)
-	}
-
-	// Integrity complete / hot-settled: zero CLI and never touch user sessions.
-	assignmentComplete := isExtensionAssignmentComplete(userDataDir, sanitizedProfileLaunchArgs)
-	// Scheme A 注册兜底：仍需要 CLI 的包补写 Preferences unpacked 注册。
-	// 注册成功后重新评估，能剥离 CLI 就剥离（钱包 LES 从不在此路径被改写）。
-	if !allowRabbyImport && !hotSettled && len(needingInject) > 0 {
-		if registered := a.registerAssignedExtensionsIntoProfile(userDataDir, needingInject); registered > 0 {
-			needingInject = loadExtensionDirsNeedingInject(userDataDir, sanitizedProfileLaunchArgs)
-			hotSettled = isEnvironmentHotStartSettled(userDataDir, sanitizedProfileLaunchArgs)
-			assignmentComplete = isExtensionAssignmentComplete(userDataDir, sanitizedProfileLaunchArgs)
-			if hotSettled {
-				log.Info("补写注册后转为热启动：本次不再注入扩展，避免每次启动弹扩展主页",
-					logger.F("profile_id", profileId),
-					logger.F("registered", registered),
-				)
-			}
-		}
-	}
-	// Preferences sanitize + one-time session wipe run ONLY on non-hot starts.
-	// Hot-settled environments must not have their Preferences rewritten on every
-	// open (that touches user data and re-arms session restore each time).
-	if !hotSettled {
-		// Wipe Session/Tabs ONLY when first-adapt still needs --load-extension.
-		// Do not wipe merely because prep marker is missing (that destroyed work
-		// tabs). The wipe itself is marker-guarded and runs at most once.
-		wipeSessions := !assignmentComplete && len(needingInject) > 0
-		sanitizeChromeStartupPreferencesOpts(userDataDir, wipeSessions)
-	}
-	if !hotSettled && assignmentFP == "" {
-		markStartPrepDone(userDataDir)
-	}
+	// The saved --load-extension list is the authoritative assignment record.
+	// Always pass assigned packages to Chromium. Preferences and wallet storage
+	// only prove that user data exists; they do not prove Chromium accepted an
+	// extension registration, so they must never be used to strip the launch arg.
+	// This path is read-only for profile data (Cookies / LES / IndexedDB).
+	extensionPrepReady := isStartPrepDone(userDataDir)
 	if err := ensureBrowserUserDataDirReadyForFreshLaunch(chromeBinaryPath, userDataDir); err != nil {
 		log.Error("浏览器用户目录启动前检查失败", logger.F("profile_id", profileId), logger.F("chrome", chromeBinaryPath), logger.F("dir", userDataDir), logger.F("error", err.Error()))
 		profile.LastError = err.Error()
@@ -302,7 +246,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 	// Bookmarks / static search seed are not required every start; they slow
 	// multi-open. First-open (no ready marker) still seeds non-cloak search once.
-	if !isCloakSelectedCore && !hotSettled && !extensionPrepReady {
+	if !isCloakSelectedCore && !extensionPrepReady {
 		seedDefaultSearchEngine(userDataDir)
 	}
 
@@ -531,7 +475,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		args = filtered
 	}
 
-	if isCloakSelectedCore && !hotSettled {
+	if isCloakSelectedCore && !extensionPrepReady {
 		// Only seed cloak labs flags on first-adapt starts; rewriting Local State
 		// every open races Chrome and costs multi-open time.
 		if err := ensureCloakLocalStateFlags(userDataDir); err != nil {
@@ -544,51 +488,13 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
-	// Prefer profile-local materialized packages; keep CLI until durable LES.
-	// Chrome 137+ branded builds need DisableLoadExtensionCommandLineSwitch off.
-	var profileInstalledN, cliFallbackN int
-	if hotSettled || assignmentComplete {
-		// Only strip CLI when every assigned package is truly loadable+adapted.
-		// Re-check needingInject: never hard-strip if any package still needs inject.
-		if len(needingInject) == 0 {
-			args = stripLoadExtensionArgs(args)
-			profileInstalledN = len(assignmentExtIDs)
-			if profileInstalledN == 0 {
-				profileInstalledN = len(activeLoadExtensionDirs(sanitizedProfileLaunchArgs))
-			}
-			cliFallbackN = 0
-			log.Info("热启动/完整性已确认：强制零 CLI load，保留用户 Session",
-				logger.F("profile_id", profileId),
-				logger.F("hot_settled", hotSettled),
-				logger.F("assignment_complete", assignmentComplete),
-				logger.F("present", profileInstalledN),
-			)
-		} else {
-			args, profileInstalledN, cliFallbackN = applyProfileNativeExtensionLaunchArgs(args, userDataDir)
-			log.Info("标记完整但仍有包需 CLI，保留注入",
-				logger.F("profile_id", profileId),
-				logger.F("cli_load", cliFallbackN),
-			)
-		}
-	} else {
-		// First adapt / path heal: keep --load-extension for packages without LES.
-		args, profileInstalledN, cliFallbackN = applyProfileNativeExtensionLaunchArgs(args, userDataDir)
-		if cliFallbackN == 0 && profileInstalledN > 0 {
-			log.Info("只读检测：环境已有扩展，已取消 CLI load",
-				logger.F("profile_id", profileId),
-				logger.F("present", profileInstalledN),
-			)
-		} else if cliFallbackN > 0 {
-			log.Info("只读检测：部分扩展尚无环境 data，保留 CLI 首次适配",
-				logger.F("profile_id", profileId),
-				logger.F("present", profileInstalledN),
-				logger.F("cli_load", cliFallbackN),
-				logger.F("hot_settled", hotSettled),
-			)
-		}
+	assignedExtensionCount := len(activeLoadExtensionDirs(sanitizedProfileLaunchArgs))
+	if assignedExtensionCount > 0 {
+		log.Info("启动时加载用户已分配扩展（不改写用户数据）",
+			logger.F("profile_id", profileId),
+			logger.F("assigned", assignedExtensionCount),
+		)
 	}
-	// Chrome 137+ may ignore --load-extension unless this feature is disabled.
-	args = ensureLoadExtensionCommandLineSwitchEnabled(args)
 	// Extension package repair runs off the critical path after first start
 	// (async). Avoid blocking multi-open on CRX/key network work.
 	// Final authoritative placement pass: fingerprint/profile/API arguments are
@@ -717,7 +623,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			// 扩展自动页兜底清扫：分配了扩展的普通启动，关闭扩展在启动时自动
 			// 打开的欢迎/解锁/通知页，保持单一空白初始页。钱包批量导入启动
 			// （allowRabbyImport）需要扩展页面完成导入，跳过。
-			if assignmentFP != "" && !allowRabbyImport {
+			if assignedExtensionCount > 0 && !allowRabbyImport {
 				cleanupLaunchArgs := append([]string{}, sanitizedProfileLaunchArgs...)
 				go closeAssignedExtensionAutoPagesAfterStart(stableDebugPort, cleanupLaunchArgs)
 			}
@@ -751,27 +657,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				}
 			}()
 
-			// After first adapt with CLI: wait for Chrome to flush LES, then freeze integrity.
-			if cliFallbackN > 0 && assignmentFP != "" {
-				launchArgsSnapshot := append([]string{}, sanitizedProfileLaunchArgs...)
-				go func() {
-					defer func() { _ = recover() }()
-					a.completeAssignedExtensionProfileData(userDataDir, launchArgsSnapshot)
-					time.Sleep(1500 * time.Millisecond)
-					a.maybeMarkExtensionLaunchReady(profileId, userDataDir, assignmentFP, launchArgsSnapshot, assignmentExtIDs)
-				}()
-			} else if assignmentFP != "" {
-				markStartPrepDone(userDataDir)
-				// No CLI this start: if durable data already complete, freeze marker now.
-				if isExtensionAssignmentComplete(userDataDir, sanitizedProfileLaunchArgs) ||
-					markExtensionIntegrityIfComplete(userDataDir, profileId, sanitizedProfileLaunchArgs) {
-					// fully stopped verification
-				} else if profileInstalledN > 0 || hotSettled {
-					a.maybeMarkExtensionLaunchReady(profileId, userDataDir, assignmentFP, sanitizedProfileLaunchArgs, assignmentExtIDs)
-				}
-			} else {
-				markStartPrepDone(userDataDir)
-			}
+			markStartPrepDone(userDataDir)
 
 			a.emitBrowserInstanceStarted(profile, false)
 

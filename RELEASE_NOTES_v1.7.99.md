@@ -1,27 +1,17 @@
 # BrowserStudio v1.7.99
 
-## P0：扩展分配后环境里真的能加载
+## 修复内容
 
-### 根因
-1. 仅写 Preferences 指向共享目录，部分内核/路径下 Chrome 不加载。
-2. Chrome 137+ 默认禁用 `--load-extension`（需 `DisableLoadExtensionCommandLineSwitch`）。
-3. 用户机 `extensions\imported` 若只有 `lfoeajg…`（Web Store 助手），说明业务扩展从未下载成功。
+- 修复已分配扩展在环境重新打开后未加载、扩展栏为空的问题。
+- 扩展分配以环境保存的加载清单为准，不再根据钱包存储或合成的 Chromium 配置误判“已安装”。
+- 不改写已有 Cookies、IndexedDB、Local Extension Settings、钱包或登录数据。
+- Chrome 148 内置隔离仅接受安装器验证过的 Chrome for Testing 内核，避免官方 Chrome 忽略扩展加载参数。
+- 移除客户端启动时的 data 自检弹窗和删除环境后的后台自检触发。
+- 在“从旧版 data 恢复”旁增加手动“数据自检”，检查过程只读。
+- “检查更新”按钮旁显示当前客户端版本号。
+- 修复旧版“忽略恢复数据”可能删除文件夹的危险行为；现在只记录忽略状态，原数据仍保留。
 
-### 修复
-- **分配时物化**：把扩展复制到环境  
-  `Default/Extensions/<id>/<version>/`，Preferences 指向该路径。
-- LaunchArgs 绑定 **环境内路径**（并保留共享路径供 heal）。
-- 启动时若仍有 `--load-extension`，自动加  
-  `--disable-features=DisableLoadExtensionCommandLineSwitch`。
-- 有 LES 前强制 CLI；禁止把 Web Store 助手当业务扩展分配。
+## 数据安全
 
-### 使用
-1. 开代理，**重新导入** MetaMask/Rabby（确认 `imported\` 出现新 ID，不是只有 lfoeajg）。
-2. **关闭全部环境** → 点分配。
-3. 再打开环境 → `chrome://extensions` 应出现扩展。
-
-## Windows 单行
-
-```text
-cd D:\BrowserStudio-src; git fetch --tags --force; git checkout release/1.7.95-from-1.7.83; git reset --hard v1.7.99; git clean -fd; git log -1 --oneline; powershell -NoProfile -ExecutionPolicy Bypass -File scripts\publish_windows_github_release.ps1 -ExpectedVersion 1.7.99
-```
+- 更新不覆盖现有环境目录、浏览器账号、Cookies、扩展存储或钱包数据。
+- 运行中的环境完成扩展分配后，需要关闭并重新打开该环境以加载新分配。

@@ -16,11 +16,9 @@ import (
 // 注入在每次启动重复发生（注册缺失、ID 解析失败、首次适配未完成），用户
 // 每次打开环境都会看到扩展主页标签，即使钱包数据已经导入。
 //
-// 两层修复（都只作用于“已分配”扩展，绝不触碰 http(s) 工作标签）：
-//  1. 启动前补写 Scheme A（Preferences unpacked 注册）：Chrome 从 profile
-//     加载扩展，不再把它当作 CLI 新装 → 不触发 onInstalled(install) 弹页。
-//  2. 启动后短窗口 CDP 清扫：兜底关闭已分配扩展自动打开的
-//     chrome-extension:// 页面，保证环境保持单一空白初始页。
+// 当前启动路径不再补写 Chromium Preferences。扩展分配只记录
+// --load-extension，Chromium 自己生成注册与钱包存储；启动后仅保留一个
+// 有界 CDP 清扫窗口，兜底关闭扩展自动创建的页面。
 //
 // 钱包批量导入启动（allowRabbyImport）需要扩展页面完成导入，两层都跳过。
 

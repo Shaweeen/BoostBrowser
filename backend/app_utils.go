@@ -369,6 +369,13 @@ func (a *App) findBundledGoogleChromeCore() (string, string) {
 		if _, statErr := os.Stat(filepath.Join(absDir, cloakMarkerFilename)); statErr == nil {
 			continue
 		}
+		// Official branded Chrome 137+ ignores --load-extension. Only expose the
+		// bundled Google fallback when the installer verified it as Chrome for
+		// Testing. Otherwise extension assignment appears successful but the
+		// environment opens with an empty extension toolbar.
+		if !isChromeForTestingKernelDir(absDir) {
+			continue
+		}
 		if _, _, ok := browser.FindCoreExecutable(absDir); !ok {
 			continue
 		}
@@ -385,6 +392,14 @@ func (a *App) findBundledGoogleChromeCore() (string, string) {
 		return "", ""
 	}
 	return filepath.Join("chrome", bestName), bestVersion
+}
+
+func isChromeForTestingKernelDir(dir string) bool {
+	if strings.TrimSpace(dir) == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(dir, "chrome-for-testing.marker"))
+	return err == nil && !info.IsDir()
 }
 
 func (a *App) autoDetectCores() {

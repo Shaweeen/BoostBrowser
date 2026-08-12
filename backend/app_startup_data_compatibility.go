@@ -90,13 +90,32 @@ func (a *App) setStartupDataCompatibilityStatus(status StartupDataCompatibilityS
 	a.startupDataMu.Unlock()
 }
 
-// GetStartupDataCompatibilityStatus is queried after the frontend mounts so
-// startup notices cannot be lost before Wails event listeners are registered.
+// GetStartupDataCompatibilityStatus performs the settings-page manual,
+// read-only check. It never imports, deletes, moves, or rewrites user data.
 func (a *App) GetStartupDataCompatibilityStatus() StartupDataCompatibilityStatus {
 	if a == nil {
 		return StartupDataCompatibilityStatus{}
 	}
 	a.startupDataMu.RLock()
-	defer a.startupDataMu.RUnlock()
-	return a.startupDataStatus
+	status := a.startupDataStatus
+	a.startupDataMu.RUnlock()
+	if a.config == nil {
+		return status
+	}
+	activeRoot := a.backupResolveUserDataRoot(a.config)
+	status.ActiveDataPath = activeRoot
+	status.ExistingData = directoryHasEntries(activeRoot)
+	status.RecoveryCount = 0
+	if a.browserMgr != nil {
+		status.RecoveryPath = a.browserMgr.ProfileRecoveryArchiveRoot()
+		if archives, err := browser.ListProfileDataArchives(status.RecoveryPath); err == nil {
+			for _, archive := range archives {
+				if archive.DataAvailable {
+					status.RecoveryCount++
+				}
+			}
+		}
+	}
+	status.Message = "数据自检完成；仅检查目录和恢复归档，未改动浏览器、扩展或钱包数据"
+	return status
 }

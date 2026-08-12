@@ -266,18 +266,6 @@ export function WindowSyncPage() {
     }
   }, [isSyncing])
 
-  // Auto-refresh the live environment list while the assistant is open and not
-  // actively syncing. A closed/reopened environment then appears without a
-  // manual refresh. Silent mode keeps the refresh button idle and never prunes
-  // the user's in-progress selection.
-  useEffect(() => {
-    if (isSyncing) return
-    const timer = window.setInterval(() => {
-      void loadProfiles(false, true)
-    }, 3000)
-    return () => window.clearInterval(timer)
-  }, [isSyncing, loadProfiles])
-
   useEffect(() => {
     if (!compactPanelInteractive) {
       if (compactPanelLeaveTimerRef.current) {

@@ -4,10 +4,10 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import { ThemeProvider } from './shared/theme'
 import { Layout } from './shared/layout'
 import { ToastContainer, Modal, Button, Loading } from './shared/components'
-import { AlertCircle } from 'lucide-react'
 import { useNotificationStore } from './store/notificationStore'
 import { useBackupStore } from './store/backupStore'
-import { ForceQuit as ForceQuitApp, GetStartupDataCompatibilityStatus, IsWindowSyncPanelMode, RecordLifecycleEvent, SaveNativeMainWindowBounds } from './wailsjs/go/main/App'
+import { AlertCircle } from 'lucide-react'
+import { ForceQuit as ForceQuitApp, IsWindowSyncPanelMode, RecordLifecycleEvent, SaveNativeMainWindowBounds } from './wailsjs/go/main/App'
 import { Environment, Quit, WindowGetPosition, WindowGetSize, WindowHide, WindowIsMaximised, WindowIsMinimised, WindowMinimise, WindowSetPosition, WindowSetSize } from './wailsjs/runtime/runtime'
 
 function lazyNamed<TModule extends Record<string, ComponentType<any>>>(
@@ -346,207 +346,6 @@ function CloseConfirmModal() {
   )
 }
 
-type StartupDataStatus = {
-  activeDataPath?: string
-  existingData?: boolean
-  autoRecovered?: number
-  recoveryCount?: number
-  recoveryPath?: string
-  message?: string
-}
-
-type LegacyDataAutoFolder = {
-  folderKey: string
-  folderName: string
-  profileName: string
-  sizeBytes: number
-}
-
-type LegacyDataAutoPreview = {
-  folders: LegacyDataAutoFolder[]
-  dismissed: number
-  pending?: boolean
-  message: string
-}
-
-// LegacyDataAutoNotice: only after the user deletes an environment (backend
-// sets LegacyScanPending + emits legacy-data:scan-needed). Not on every startup.
-// "Ignore" permanently deletes those orphan folders and never re-prompts.
-function LegacyDataAutoNotice() {
-  const [preview, setPreview] = useState<LegacyDataAutoPreview | null>(null)
-  const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    const runScan = async () => {
-      try {
-        const { scanLegacyDataAuto } = await import('./modules/browser/api')
-        // force=false: only returns folders when post-delete pending is set
-        const result = await scanLegacyDataAuto(false)
-        if (!cancelled && Array.isArray(result?.folders) && result.folders.length > 0) {
-          setPreview(result)
-          setSelected(new Set(result.folders.map((f) => f.folderKey)))
-        }
-      } catch {
-        // non-fatal
-      }
-    }
-    const runtime = (window as any).runtime
-    if (!runtime?.EventsOn) {
-      return () => {
-        cancelled = true
-      }
-    }
-    const off = runtime.EventsOn('legacy-data:scan-needed', () => {
-      void runScan()
-    })
-    return () => {
-      cancelled = true
-      if (typeof off === 'function') off()
-      else if (runtime.EventsOff) runtime.EventsOff('legacy-data:scan-needed')
-    }
-  }, [])
-
-  const toggle = (key: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }
-
-  const handleImport = async () => {
-    if (busy || selected.size === 0) return
-    setBusy(true)
-    try {
-      const { importLegacyDataFolders } = await import('./modules/browser/api')
-      const result = await importLegacyDataFolders(Array.from(selected))
-      const { toast } = await import('./shared/components')
-      toast.success(result?.message || '旧数据已导入')
-      setPreview(null)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const handleDismissAll = async () => {
-    if (busy || !preview) return
-    setBusy(true)
-    try {
-      const { dismissLegacyDataFolders } = await import('./modules/browser/api')
-      const keys = preview.folders.map((f) => f.folderKey)
-      const ok = await dismissLegacyDataFolders(keys)
-      const { toast } = await import('./shared/components')
-      if (ok) {
-        toast.success('已忽略并永久删除这些残留数据文件夹，不再提醒')
-        setPreview(null)
-      } else {
-        toast.error('删除残留数据失败，请检查磁盘权限')
-      }
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  if (!preview) return null
-
-  return (
-    <Modal
-      open
-      onClose={() => setPreview(null)}
-      title="删除环境后发现未关联数据"
-      width="600px"
-      footer={
-        <div className="flex items-center gap-2 w-full">
-          <Button variant="secondary" className="flex-1" onClick={handleDismissAll} disabled={busy}>
-            忽略并删除残留文件夹
-          </Button>
-          <Button className="flex-1" onClick={handleImport} loading={busy} disabled={selected.size === 0}>
-            导入勾选的环境
-          </Button>
-        </div>
-      }
-    >
-      <div className="space-y-3 text-sm text-[var(--color-text-secondary)]">
-        <p>{preview.message}</p>
-        <div className="max-h-64 overflow-y-auto rounded-lg border border-[var(--color-border-default)] divide-y divide-[var(--color-border-default)]">
-          {preview.folders.map((f) => (
-            <label
-              key={f.folderKey}
-              className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-[var(--color-bg-secondary)] transition-colors"
-            >
-              <input
-                type="checkbox"
-                checked={selected.has(f.folderKey)}
-                onChange={() => toggle(f.folderKey)}
-                className="accent-[var(--color-accent)]"
-              />
-              <div className="flex-1 min-w-0">
-                <p className="truncate font-medium text-[var(--color-text-primary)]">{f.folderName}</p>
-                {f.profileName && f.profileName !== f.folderName && (
-                  <p className="truncate text-xs text-[var(--color-text-muted)]">识别名：{f.profileName}</p>
-                )}
-              </div>
-              <span className="flex-shrink-0 text-xs text-[var(--color-text-muted)]">
-                {(f.sizeBytes / (1024 * 1024)).toFixed(1)} MB
-              </span>
-            </label>
-          ))}
-        </div>
-        <p className="text-xs text-[var(--color-text-muted)]">
-          导入为环境是原地挂载，不复制、不覆盖现有环境；勾选后 Cookies、扩展与钱包本地存储保持原样。忽略的文件不会被删除，之后可在设置页重新启用提醒。
-        </p>
-      </div>
-    </Modal>
-  )
-}
-
-function StartupDataCompatibilityNotice() {
-  const [status, setStatus] = useState<StartupDataStatus | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    GetStartupDataCompatibilityStatus()
-      .then((value) => {
-        if (!cancelled && (Number(value?.autoRecovered || 0) > 0 || Number(value?.recoveryCount || 0) > 0)) setStatus(value)
-      })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [])
-
-  return (
-    <Modal
-      open={status !== null}
-      onClose={() => setStatus(null)}
-      title="已识别现有 data 数据"
-      width="560px"
-      footer={<Button onClick={() => setStatus(null)}>我知道了</Button>}
-    >
-      <div className="space-y-3 text-sm text-[var(--color-text-secondary)]">
-        <div className="flex items-start gap-3 rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-secondary)] p-3">
-          <AlertCircle className="mt-0.5 h-5 w-5 flex-none text-[var(--color-accent)]" />
-          <div>
-            <p className="font-medium text-[var(--color-text-primary)]">{status?.message}</p>
-            <p className="mt-1">自动恢复环境：{status?.autoRecovered || 0} 个</p>
-            {(status?.recoveryCount || 0) > 0 && (
-              <>
-                <p className="mt-1">等待用户确认恢复：{status?.recoveryCount || 0} 个</p>
-                <p className="mt-1 break-all text-xs text-[var(--color-text-muted)]">恢复归档：{status?.recoveryPath}</p>
-              </>
-            )}
-            <p className="mt-1 break-all text-xs text-[var(--color-text-muted)]">数据目录：{status?.activeDataPath}</p>
-          </div>
-        </div>
-        <p className="text-xs text-[var(--color-text-muted)]">
-          客户端只升级程序和最新数据读取组件，不改写环境中的 Cookies、浏览器文件、扩展与钱包本地存储。钱包扩展升级请保持相同的官方扩展 ID；扩展自身会负责其存储格式迁移。
-        </p>
-      </div>
-    </Modal>
-  )
-}
-
 function App() {
   useWailsNotifications()
   const [quickLaunchOpen, setQuickLaunchOpen] = useState(false)
@@ -714,8 +513,6 @@ function App() {
         </Layout>
         <ToastContainer />
         {!syncPanelMode && <CloseConfirmModal />}
-        {!syncPanelMode && <StartupDataCompatibilityNotice />}
-        {!syncPanelMode && <LegacyDataAutoNotice />}
         {!syncPanelMode && <UpdateChecker />}
         {!syncPanelMode && (
           <Suspense fallback={null}>
