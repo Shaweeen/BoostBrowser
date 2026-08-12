@@ -335,7 +335,7 @@ func (a *App) BrowserExtensionSyncKnownToProfiles(profileIds []string) (*Extensi
 	}
 	updatedSet := map[string]struct{}{}
 	for _, pkg := range packages {
-		ids, err := a.bindExtensionDirToProfiles(profileIds, pkg)
+		bind, err := a.bindExtensionDirToProfiles(profileIds, pkg)
 		if err != nil {
 			logger.New("Extension").Warn("同步扩展到环境失败",
 				logger.F("package", pkg),
@@ -343,7 +343,10 @@ func (a *App) BrowserExtensionSyncKnownToProfiles(profileIds []string) (*Extensi
 			)
 			continue
 		}
-		for _, id := range ids {
+		if bind == nil {
+			continue
+		}
+		for _, id := range bind.UpdatedProfiles {
 			updatedSet[id] = struct{}{}
 		}
 	}

@@ -338,8 +338,9 @@ export function ExtensionManagementPage() {
       const result = item.distributionMode === 'global'
         ? await importGlobalExtension(item.downloadAddress)
         : await importExtensionToBrowserProfiles(targetIds, item.downloadAddress)
+      // Backend message already covers skip / prefs / deferred; do not append long noise.
       const baseMsg = result?.message || `已分配到 ${targetIds.length} 个实例`
-      toast.success(`${baseMsg}。请打开一次环境完成适配；已有钱包/扩展 data 的包不再重复注入。完整后停止验证。`)
+      toast.success(baseMsg)
       if (item.distributionMode === 'global' || targetIds.length === profiles.length) {
         setAppliedGlobalProfiles(prev => {
           const next = new Map(prev)

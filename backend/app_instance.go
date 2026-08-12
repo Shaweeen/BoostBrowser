@@ -233,12 +233,12 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		profile.LastError = startErr.Error()
 		return profile, startErr
 	}
-	// Extension inject is selective. Policy (wallet-safe):
-	//   1) heal Preferences package paths for assigned packages only — never
-	//      touch LES / Cookies / IndexedDB vaults;
+	// Extension inject is selective. Policy (product design):
+	//   1) heal Preferences package paths for ASSIGNED packages only — never
+	//      scan/enumerate all user extensions; never touch LES / Cookies / IndexedDB;
 	//   2) skip --load-extension only when Preferences path is still loadable
 	//      (LES alone is not enough — upgrade can leave a stale absolute path);
-	//   3) hot-settled skips one-time adapt work once loadable registration exists.
+	//   3) hot-settled → hard strip ALL CLI load → no onInstalled extension homepage tabs.
 	assignmentFP, assignmentExtIDs := assignmentFingerprintFromLaunchArgs(sanitizedProfileLaunchArgs)
 	if !allowRabbyImport && len(activeLoadExtensionDirs(sanitizedProfileLaunchArgs)) > 0 {
 		if healed := healAssignedExtensionPackagePaths(userDataDir, sanitizedProfileLaunchArgs); healed > 0 {

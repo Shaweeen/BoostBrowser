@@ -721,6 +721,105 @@ func TestGlobalExtensionDistributionChecksOnlyNewProfilesOnExplicitAction(t *tes
 	}
 }
 
+func TestAssignWritesPreferencesAndHotStartNeedsZeroCLI(t *testing.T) {
+	// Assign → Preferences loadable → isEnvironmentHotStartSettled → no --load-extension.
+	root := t.TempDir()
+	app := NewApp(root)
+	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
+	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
+	extDir := app.globalExtensionDir(extID)
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"MetaMask","version":"11.0","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := app.browserMgr.Create(BrowserProfileInput{ProfileName: "fresh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := app.BrowserProfileImportExtension([]string{profile.ProfileId}, extID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PrefsInstalledCount != 1 {
+		t.Fatalf("expected Preferences install, got prefs=%d msg=%q", result.PrefsInstalledCount, result.Message)
+	}
+	if result.SkippedCount != 0 {
+		t.Fatalf("fresh profile should not skip: %#v", result)
+	}
+	userData := app.browserMgr.ResolveUserDataDir(profile)
+	args := []string{"--load-extension=" + extDir}
+	if !isExtensionInstalledInProfile(userData, extDir) {
+		t.Fatal("after assign, Preferences must be loadable")
+	}
+	if !isEnvironmentHotStartSettled(userData, args) {
+		t.Fatal("Preferences-loadable assign must settle hot start (zero CLI)")
+	}
+	next, present, cli := applyProfileNativeExtensionLaunchArgs(args, userData)
+	if cli != 0 || present != 1 {
+		t.Fatalf("hot path must strip CLI: present=%d cli=%d args=%v", present, cli, next)
+	}
+	for _, a := range next {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(a)), "--load-extension=") {
+			t.Fatalf("CLI load must be absent after assign: %v", next)
+		}
+	}
+
+	// Second assign: same extension → skip, do not overwrite Preferences bytes.
+	before, _ := os.ReadFile(filepath.Join(userData, "Default", "Preferences"))
+	second, err := app.BrowserProfileImportExtension([]string{profile.ProfileId}, extID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.SkippedCount != 1 || len(second.UpdatedProfiles) != 0 {
+		t.Fatalf("same extension must skip: %#v", second)
+	}
+	after, _ := os.ReadFile(filepath.Join(userData, "Default", "Preferences"))
+	if string(before) != string(after) {
+		t.Fatal("skip must not rewrite Preferences (wallet-safe)")
+	}
+	if !strings.Contains(second.Message, "跳过") && !strings.Contains(second.Message, "已存在") {
+		t.Fatalf("skip message should be clear: %q", second.Message)
+	}
+}
+
+func TestGlobalExtensionDistributionHealsResidueWithoutLoadablePath(t *testing.T) {
+	// Prefs residue (id only, no path) must not block re-bind — upgrade-safe heal.
+	root := t.TempDir()
+	app := NewApp(root)
+	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
+	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
+	extDir := app.globalExtensionDir(extID)
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(`{"name":"MetaMask","version":"1.0","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	existing, err := app.browserMgr.Create(BrowserProfileInput{ProfileName: "residue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefsPath := filepath.Join(app.browserMgr.ResolveUserDataDir(existing), "Default", "Preferences")
+	if err := os.MkdirAll(filepath.Dir(prefsPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(prefsPath, []byte(`{"extensions":{"settings":{"nkbihfbeogaeaoehlefnkodbefgpgknn":{"manifest":{"name":"MetaMask"}}}}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := app.BrowserGlobalExtensionImport(extID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.UpdatedProfiles) != 1 || result.UpdatedProfiles[0] != existing.ProfileId {
+		t.Fatalf("residue without loadable path must re-bind for heal: %#v", result.UpdatedProfiles)
+	}
+	if !isExtensionInstalledInProfile(app.browserMgr.ResolveUserDataDir(existing), extDir) {
+		t.Fatal("after re-bind, package path must be loadable")
+	}
+}
+
 func TestProfileDeletionArchivesOwnedDataRetainsSnapshotsAndRemovesExtensionReferences(t *testing.T) {
 	root := t.TempDir()
 	app := NewApp(root)
