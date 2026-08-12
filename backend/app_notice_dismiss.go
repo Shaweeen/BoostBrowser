@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"boost-browser/backend/internal/fsutil"
+
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // noticeDismissMu serializes read-modify-write of the dismiss state file so
@@ -27,9 +29,13 @@ type noticeDismissState struct {
 	// to stop reporting as "尚未完成首次适配".
 	ExtensionIncomplete []string `json:"extensionIncomplete"`
 	// LegacyFolders are relative Chrome data folders under the data root the
-	// user chose not to import.
+	// user chose not to import (and that were deleted on dismiss).
 	LegacyFolders []string `json:"legacyFolders"`
-	UpdatedAt     string   `json:"updatedAt"`
+	// LegacyScanPending is set after the user deletes an environment so the
+	// UI may run one orphan-folder scan. Cleared after scan/import/dismiss.
+	// Startup must NOT scan when this is false.
+	LegacyScanPending bool   `json:"legacyScanPending"`
+	UpdatedAt         string `json:"updatedAt"`
 }
 
 func (a *App) noticeDismissPath() string {
@@ -128,11 +134,15 @@ func (a *App) BrowserExtensionIntegrityClearDismissed() error {
 }
 
 // ============================================================================
-// Legacy-data auto scan: find Chrome data folders inside the active data root
-// that are not attached to any registered environment. These are typically
-// leftovers from an older install whose app.db entries were lost. The client
-// self-identifies them at startup so the user can decide to import or ignore —
-// and once ignored, the choice is remembered across restarts and upgrades.
+// Legacy-data scan: unregistered Chrome folders under the data root (typically
+// left after an environment was deleted or app.db was lost).
+//
+// Policy (product):
+//   - Do NOT scan on every client startup.
+//   - After the user deletes an environment, set LegacyScanPending and emit
+//     legacy-data:scan-needed so the UI may offer import once.
+//   - "Ignore / do not import" DELETES those folders on disk and records the
+//     keys so they never reappear; no further prompts for them.
 // ============================================================================
 
 type LegacyDataAutoFolder struct {
@@ -145,7 +155,9 @@ type LegacyDataAutoFolder struct {
 type LegacyDataAutoPreview struct {
 	Folders   []LegacyDataAutoFolder `json:"folders"`
 	Dismissed int                    `json:"dismissed"`
-	Message   string                 `json:"message"`
+	// Pending is true when a post-delete scan is armed (or force=true).
+	Pending bool   `json:"pending"`
+	Message string `json:"message"`
 }
 
 func (a *App) scanLegacyDataAuto() ([]LegacyDataAutoFolder, int) {
@@ -193,31 +205,95 @@ func (a *App) scanLegacyDataAuto() ([]LegacyDataAutoFolder, int) {
 	return folders, skipDismissed
 }
 
-// BrowserLegacyDataAutoScan returns unregistered Chrome data folders found in
-// the active data root. Runs at client startup so leftover data from an older
-// install is surfaced once; dismissed folders stay hidden until re-enabled.
-func (a *App) BrowserLegacyDataAutoScan() (*LegacyDataAutoPreview, error) {
+func (a *App) markLegacyScanPendingLocked() {
+	state := a.readNoticeDismissal()
+	state.LegacyScanPending = true
+	_ = a.writeNoticeDismissal(state)
+}
+
+func (a *App) clearLegacyScanPendingLocked() {
+	state := a.readNoticeDismissal()
+	if !state.LegacyScanPending {
+		return
+	}
+	state.LegacyScanPending = false
+	_ = a.writeNoticeDismissal(state)
+}
+
+func (a *App) legacyScanPending() bool {
+	return a.readNoticeDismissal().LegacyScanPending
+}
+
+// armLegacyScanAfterProfileDelete is called after an environment is removed so
+// the UI can offer a one-shot orphan-folder import. Not used on app startup.
+func (a *App) armLegacyScanAfterProfileDelete() {
+	if a == nil {
+		return
+	}
+	noticeDismissMu.Lock()
+	a.markLegacyScanPendingLocked()
+	noticeDismissMu.Unlock()
+	if a.ctx == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	runtime.EventsEmit(a.ctx, "legacy-data:scan-needed", map[string]any{"reason": "profile-deleted"})
+}
+
+// BrowserLegacyDataAutoScan returns unregistered Chrome data folders.
+// force=false: only returns candidates when LegacyScanPending (post-delete).
+// force=true: settings/manual scan, ignores pending gate.
+func (a *App) BrowserLegacyDataAutoScan(force bool) (*LegacyDataAutoPreview, error) {
+	if a == nil {
+		return nil, fmt.Errorf("应用尚未初始化")
+	}
+	pending := a.legacyScanPending()
+	preview := &LegacyDataAutoPreview{Pending: pending || force}
+	if !force && !pending {
+		preview.Message = "无待处理的环境残留扫描（仅在删除环境后检查）"
+		preview.Folders = []LegacyDataAutoFolder{}
+		return preview, nil
+	}
 	folders, dismissed := a.scanLegacyDataAuto()
-	preview := &LegacyDataAutoPreview{Folders: folders, Dismissed: dismissed}
+	preview.Folders = folders
+	preview.Dismissed = dismissed
 	if len(folders) == 0 {
-		preview.Message = "未发现需要导入的旧数据"
+		// Nothing to offer: clear pending so we do not re-prompt next open.
+		noticeDismissMu.Lock()
+		a.clearLegacyScanPendingLocked()
+		noticeDismissMu.Unlock()
+		preview.Pending = false
+		preview.Message = "未发现需要导入的残留数据"
 		if dismissed > 0 {
-			preview.Message = fmt.Sprintf("已按你的选择忽略 %d 个旧数据文件夹", dismissed)
+			preview.Message = fmt.Sprintf("未发现可导入残留；已忽略记录 %d 个", dismissed)
 		}
 		return preview, nil
 	}
-	preview.Message = fmt.Sprintf("识别到 %d 个未关联的浏览器数据文件夹，可导入为环境或继续忽略", len(folders))
+	preview.Message = fmt.Sprintf("删除环境后识别到 %d 个未关联数据文件夹。导入为环境，或忽略并永久删除这些文件夹", len(folders))
 	return preview, nil
 }
 
-// BrowserLegacyDataDismissFolders records folders the user chose not to
-// import. They will not be surfaced again by the startup scan.
+// BrowserLegacyDataDismissFolders permanently deletes the chosen orphan folders
+// under the data root and records the keys so they never reappear. Does not
+// touch folders still owned by a registered environment.
 func (a *App) BrowserLegacyDataDismissFolders(folderKeys []string) error {
-	if a == nil {
+	if a == nil || a.config == nil {
 		return fmt.Errorf("应用尚未初始化")
 	}
 	noticeDismissMu.Lock()
 	defer noticeDismissMu.Unlock()
+
+	activeRoot := a.backupResolveUserDataRoot(a.config)
+	registered := make(map[string]bool)
+	if a.browserMgr != nil {
+		for _, p := range a.browserMgr.List() {
+			dir := backupNormalizePath(a.browserMgr.ResolveUserDataDir(&p))
+			if dir != "" {
+				registered[dir] = true
+			}
+		}
+	}
+
 	state := a.readNoticeDismissal()
 	seen := make(map[string]bool, len(state.LegacyFolders)+len(folderKeys))
 	for _, key := range state.LegacyFolders {
@@ -225,15 +301,45 @@ func (a *App) BrowserLegacyDataDismissFolders(folderKeys []string) error {
 			seen[key] = true
 		}
 	}
+	var deleteErrs []string
 	for _, key := range folderKeys {
 		key = strings.TrimSpace(key)
-		if key == "" || seen[key] {
+		if key == "" {
 			continue
 		}
-		seen[key] = true
-		state.LegacyFolders = append(state.LegacyFolders, key)
+		// Prevent path escape outside the data root.
+		rel := filepath.Clean(filepath.FromSlash(key))
+		if rel == "." || rel == ".." || strings.HasPrefix(rel, "..") {
+			deleteErrs = append(deleteErrs, key+": 非法路径")
+			continue
+		}
+		abs := backupNormalizePath(filepath.Join(activeRoot, rel))
+		rootNorm := backupNormalizePath(activeRoot)
+		if rootNorm == "" || abs == rootNorm || !strings.HasPrefix(abs, rootNorm+string(os.PathSeparator)) {
+			deleteErrs = append(deleteErrs, key+": 不在数据目录内")
+			continue
+		}
+		if registered[abs] {
+			deleteErrs = append(deleteErrs, key+": 仍关联已注册环境，已跳过删除")
+			continue
+		}
+		if err := os.RemoveAll(abs); err != nil {
+			deleteErrs = append(deleteErrs, key+": "+err.Error())
+			// Still record dismiss so we stop prompting even if delete failed partially.
+		}
+		if !seen[key] {
+			seen[key] = true
+			state.LegacyFolders = append(state.LegacyFolders, filepath.ToSlash(key))
+		}
 	}
-	return a.writeNoticeDismissal(state)
+	state.LegacyScanPending = false
+	if err := a.writeNoticeDismissal(state); err != nil {
+		return err
+	}
+	if len(deleteErrs) > 0 {
+		return fmt.Errorf("已记录忽略；部分文件夹删除失败：%s", strings.Join(deleteErrs, "；"))
+	}
+	return nil
 }
 
 // BrowserLegacyDataImportFolders attaches unregistered Chrome data folders as
@@ -288,8 +394,9 @@ func (a *App) BrowserLegacyDataImportFolders(folderKeys []string) (*LegacyDataAu
 		// profiles already exist).
 		a.browserMgr.ReloadProfilesFromDAO()
 	}
+	a.clearLegacyScanPendingLocked()
 	folders, dismissed := a.scanLegacyDataAuto()
-	preview := &LegacyDataAutoPreview{Folders: folders, Dismissed: dismissed}
+	preview := &LegacyDataAutoPreview{Folders: folders, Dismissed: dismissed, Pending: false}
 	preview.Message = fmt.Sprintf("旧数据导入完成：成功 %d，失败 %d", imported, failed)
 	return preview, nil
 }

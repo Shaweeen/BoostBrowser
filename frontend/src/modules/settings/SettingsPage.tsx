@@ -391,7 +391,7 @@ export function SettingsPage() {
   const handleScanLegacyData = async () => {
     setAutoLegacyBusy(true)
     try {
-      const preview = await scanLegacyDataAuto()
+      const preview = await scanLegacyDataAuto(true)
       setAutoLegacyPreview(preview)
       if (Array.isArray(preview.folders) && preview.folders.length > 0) {
         setAutoLegacySelected(new Set(preview.folders.map(f => f.folderKey)))
@@ -436,7 +436,7 @@ export function SettingsPage() {
     try {
       const ok = await dismissLegacyDataFolders(autoLegacyPreview.folders.map(f => f.folderKey))
       if (ok) {
-        toast.success('已记录忽略，不再提醒（文件保留在磁盘）')
+        toast.success('已忽略并永久删除这些残留文件夹，不再提醒')
         setAutoLegacyModalOpen(false)
         setAutoLegacyPreview(null)
       }
@@ -644,11 +644,11 @@ export function SettingsPage() {
         </div>
       </Card>
 
-      <Card title="遗留数据自动识别" subtitle="扫描 data 目录内未关联的 Chrome 数据文件夹，可原地导入为环境或记录忽略">
+      <Card title="遗留数据识别" subtitle="仅在删除环境后自动检查；也可手动扫描。忽略将永久删除残留文件夹">
         <div className="space-y-3">
           <div className="flex items-center justify-between gap-4">
             <div className="text-sm text-[var(--color-text-secondary)]">
-              导入是原地挂载，不复制不覆盖；忽略的文件夹不会被删除，随时可重新开启提醒。
+              导入为原地挂载；选择「忽略」会删除磁盘上的残留数据且不再询问。日常启动不再自动扫描。
             </div>
             <div className="flex flex-wrap gap-2">
               <Button variant="secondary" size="sm" onClick={handleScanLegacyData} loading={autoLegacyBusy}>
@@ -904,7 +904,7 @@ export function SettingsPage() {
         footer={
           <>
             <Button variant="secondary" onClick={handleAutoLegacyDismissAll} disabled={autoLegacyBusy}>
-              全部忽略（不再提醒）
+              忽略并删除残留文件夹
             </Button>
             <Button onClick={handleAutoLegacyImport} loading={autoLegacyBusy} disabled={autoLegacySelected.size === 0}>
               导入勾选的环境
@@ -939,7 +939,7 @@ export function SettingsPage() {
             ))}
           </div>
           <p className="text-xs text-[var(--color-text-muted)]">
-            导入为环境是原地挂载，不复制、不覆盖现有环境；Cookies、扩展与钱包本地存储保持原样。忽略的文件不会被删除，之后可在本页重新开启提醒。
+            导入为原地挂载。忽略会永久删除勾选的残留文件夹且不再询问。
           </p>
         </div>
       </Modal>

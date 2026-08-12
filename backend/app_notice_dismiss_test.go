@@ -1,8 +1,12 @@
 package backend
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
+
+	"boost-browser/backend/internal/browser"
+	"boost-browser/backend/internal/config"
 )
 
 // TestNoticeDismissalStatePersists verifies the notice-dismiss state file is a
@@ -36,30 +40,89 @@ func TestNoticeDismissalStatePersists(t *testing.T) {
 	}
 }
 
-// TestLegacyFolderDismissalPersists verifies that “确认不导入” 的旧数据文件夹被
-// 记录后不再重复出现，且清空后可恢复提醒。
-func TestLegacyFolderDismissalPersists(t *testing.T) {
-	app := &App{appRoot: t.TempDir()}
+// TestLegacyFolderDismissalDeletesAndPersists verifies ignore permanently
+// deletes orphan folders under the data root and records them so they never
+// reappear. Scan without pending returns empty (no startup scan).
+func testAppWithDataRoot(t *testing.T) (*App, string) {
+	t.Helper()
+	root := t.TempDir()
+	app := NewApp(root)
+	cfg := config.DefaultConfig()
+	cfg.Browser.UserDataRoot = "data"
+	app.config = cfg
+	app.browserMgr = browser.NewManager(cfg, root)
+	return app, app.backupResolveUserDataRoot(cfg)
+}
 
-	if err := app.BrowserLegacyDataDismissFolders([]string{"old/profile-1", "old/profile-2"}); err != nil {
+func TestLegacyFolderDismissalDeletesAndPersists(t *testing.T) {
+	app, activeRoot := testAppWithDataRoot(t)
+	orphan1 := filepath.Join(activeRoot, "orphan-a")
+	orphan2 := filepath.Join(activeRoot, "orphan-b")
+	for _, d := range []string{orphan1, orphan2} {
+		if err := os.MkdirAll(filepath.Join(d, "Default"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "Default", "Preferences"), []byte(`{}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Without pending, scan returns no folders.
+	preview, err := app.BrowserLegacyDataAutoScan(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Folders) != 0 {
+		t.Fatalf("startup/no-pending scan must be empty: %#v", preview)
+	}
+
+	// force scan sees orphans
+	force, err := app.BrowserLegacyDataAutoScan(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(force.Folders) < 2 {
+		t.Fatalf("force scan should see orphans: %#v", force)
+	}
+
+	keys := []string{"orphan-a", "orphan-b"}
+	if err := app.BrowserLegacyDataDismissFolders(keys); err != nil {
 		t.Fatalf("dismiss legacy folders failed: %v", err)
 	}
+	if _, err := os.Stat(orphan1); !os.IsNotExist(err) {
+		t.Fatalf("orphan-a should be deleted, err=%v", err)
+	}
+	if _, err := os.Stat(orphan2); !os.IsNotExist(err) {
+		t.Fatalf("orphan-b should be deleted, err=%v", err)
+	}
 	dismissed := app.dismissedLegacyFolderSet()
-	if len(dismissed) != 2 || !dismissed["old/profile-1"] || !dismissed["old/profile-2"] {
+	if !dismissed["orphan-a"] || !dismissed["orphan-b"] {
 		t.Fatalf("legacy folder set mismatch: %+v", dismissed)
 	}
+}
 
-	reopened := &App{appRoot: app.appRoot}
-	if !reopened.dismissedLegacyFolderSet()["old/profile-1"] {
-		t.Fatal("legacy folder dismissal did not persist across restart")
+func TestLegacyScanOnlyWhenPending(t *testing.T) {
+	app, activeRoot := testAppWithDataRoot(t)
+	orphan := filepath.Join(activeRoot, "leftover-1")
+	if err := os.MkdirAll(filepath.Join(orphan, "Default"), 0755); err != nil {
+		t.Fatal(err)
 	}
+	_ = os.WriteFile(filepath.Join(orphan, "Default", "Preferences"), []byte(`{}`), 0644)
 
-	// Re-enable: the startup scan must surface the folders again.
-	if err := reopened.BrowserLegacyDataClearDismissed(); err != nil {
-		t.Fatalf("clear legacy dismissed failed: %v", err)
+	p, err := app.BrowserLegacyDataAutoScan(false)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(reopened.dismissedLegacyFolderSet()) != 0 {
-		t.Fatal("clear legacy dismissed did not take effect")
+	if len(p.Folders) != 0 {
+		t.Fatal("without pending, scan must not surface leftovers")
+	}
+	app.armLegacyScanAfterProfileDelete()
+	p2, err := app.BrowserLegacyDataAutoScan(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p2.Folders) == 0 {
+		t.Fatal("after delete arm, scan must surface leftovers")
 	}
 }
 

@@ -480,14 +480,32 @@ func (a *App) BrowserGlobalExtensionList() ([]GlobalManagedExtension, error) {
 	return out, nil
 }
 
+// chromiumWebStoreHelperExtensionID is the public-key-derived ID of the
+// embedded Cloak "chromium-web-store" helper (not a user wallet/business ext).
+const chromiumWebStoreHelperExtensionID = "lfoeajgcchlidpicbabpmckkejpckcfb"
+
+func isChromiumWebStoreHelperExtension(extID, extDir string) bool {
+	if strings.EqualFold(strings.TrimSpace(extID), chromiumWebStoreHelperExtensionID) {
+		return true
+	}
+	low := strings.ToLower(filepath.ToSlash(extDir))
+	return strings.Contains(low, "/chromium-web-store") || strings.HasSuffix(low, "/chromium-web-store")
+}
+
 func (a *App) downloadAndInstallExtension(downloadAddress string) (string, string, string, string, error) {
 	extID := extractExtensionID(downloadAddress)
 	if extID == "" {
 		extID = a.registeredExtensionIDForAddress(downloadAddress)
 	}
+	if isChromiumWebStoreHelperExtension(extID, "") {
+		return "", "", "", "", fmt.Errorf("不能分配内置 Web Store 助手扩展（%s）。请上传 MetaMask/Rabby 等业务扩展的商店地址、扩展 ID 或 .crx/.zip", chromiumWebStoreHelperExtensionID)
+	}
 	if extID != "" {
 		extDir := a.globalExtensionDir(extID)
 		if validateUnpackedExtensionManifest(extDir) == nil {
+			if isChromiumWebStoreHelperExtension(extID, extDir) {
+				return "", "", "", "", fmt.Errorf("不能分配内置 Web Store 助手扩展。请重新从 Chrome 网上应用店或 .crx 导入业务扩展（需代理）")
+			}
 			// Reuse the program package without a network round-trip. Missing
 			// manifest keys are repaired at environment start (and after a real
 			// CRX re-download) so offline distribution and unit tests stay fast.

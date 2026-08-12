@@ -365,14 +365,13 @@ type LegacyDataAutoFolder = {
 type LegacyDataAutoPreview = {
   folders: LegacyDataAutoFolder[]
   dismissed: number
+  pending?: boolean
   message: string
 }
 
-// LegacyDataAutoNotice: client self-identification of leftover Chrome data
-// folders inside the active data root. Surfaced once at startup; the user can
-// import a folder as an environment or dismiss it (dismissal is remembered in
-// backend data/.boost_notice_dismissed.json and never repeats). No data is
-// deleted — dismissed folders stay on disk untouched.
+// LegacyDataAutoNotice: only after the user deletes an environment (backend
+// sets LegacyScanPending + emits legacy-data:scan-needed). Not on every startup.
+// "Ignore" permanently deletes those orphan folders and never re-prompts.
 function LegacyDataAutoNotice() {
   const [preview, setPreview] = useState<LegacyDataAutoPreview | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -380,10 +379,11 @@ function LegacyDataAutoNotice() {
 
   useEffect(() => {
     let cancelled = false
-    const run = async () => {
+    const runScan = async () => {
       try {
         const { scanLegacyDataAuto } = await import('./modules/browser/api')
-        const result = await scanLegacyDataAuto()
+        // force=false: only returns folders when post-delete pending is set
+        const result = await scanLegacyDataAuto(false)
         if (!cancelled && Array.isArray(result?.folders) && result.folders.length > 0) {
           setPreview(result)
           setSelected(new Set(result.folders.map((f) => f.folderKey)))
@@ -392,10 +392,19 @@ function LegacyDataAutoNotice() {
         // non-fatal
       }
     }
-    const t = window.setTimeout(run, 2500)
+    const runtime = (window as any).runtime
+    if (!runtime?.EventsOn) {
+      return () => {
+        cancelled = true
+      }
+    }
+    const off = runtime.EventsOn('legacy-data:scan-needed', () => {
+      void runScan()
+    })
     return () => {
       cancelled = true
-      window.clearTimeout(t)
+      if (typeof off === 'function') off()
+      else if (runtime.EventsOff) runtime.EventsOff('legacy-data:scan-needed')
     }
   }, [])
 
@@ -431,8 +440,10 @@ function LegacyDataAutoNotice() {
       const ok = await dismissLegacyDataFolders(keys)
       const { toast } = await import('./shared/components')
       if (ok) {
-        toast.success('已记录忽略，这些旧数据不再提醒（文件保留在磁盘）')
+        toast.success('已忽略并永久删除这些残留数据文件夹，不再提醒')
         setPreview(null)
+      } else {
+        toast.error('删除残留数据失败，请检查磁盘权限')
       }
     } finally {
       setBusy(false)
@@ -445,12 +456,12 @@ function LegacyDataAutoNotice() {
     <Modal
       open
       onClose={() => setPreview(null)}
-      title="识别到未关联的浏览器数据"
+      title="删除环境后发现未关联数据"
       width="600px"
       footer={
         <div className="flex items-center gap-2 w-full">
           <Button variant="secondary" className="flex-1" onClick={handleDismissAll} disabled={busy}>
-            全部忽略（不再提醒）
+            忽略并删除残留文件夹
           </Button>
           <Button className="flex-1" onClick={handleImport} loading={busy} disabled={selected.size === 0}>
             导入勾选的环境

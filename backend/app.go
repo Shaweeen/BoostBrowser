@@ -838,6 +838,8 @@ func (a *App) deleteBrowserProfileAndOwnedData(profileId string) error {
 	// Publish the authoritative main-client environment list after deletion so
 	// the sync assistant cannot retain the removed profile in a later refresh.
 	a.PrepareWindowSyncRuntimeSnapshot()
+	// Arm a one-shot orphan-folder scan (UI only after delete, not every startup).
+	a.armLegacyScanAfterProfileDelete()
 	if len(cleanupErrors) > 0 {
 		return fmt.Errorf("环境已删除且数据已归档，但附加记录清理失败：%s", strings.Join(cleanupErrors, "；"))
 	}

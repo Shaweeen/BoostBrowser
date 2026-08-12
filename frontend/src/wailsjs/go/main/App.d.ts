@@ -122,7 +122,7 @@ export function BrowserExtensionIntegrityDismissNotice(arg1:Array<string>):Promi
 
 export function BrowserExtensionIntegrityClearDismissed():Promise<void>;
 
-export function BrowserLegacyDataAutoScan():Promise<Record<string, any>>;
+export function BrowserLegacyDataAutoScan(arg1:boolean):Promise<Record<string, any>>;
 
 export function BrowserLegacyDataImportFolders(arg1:Array<string>):Promise<Record<string, any>>;
 

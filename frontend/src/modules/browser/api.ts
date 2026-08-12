@@ -401,12 +401,16 @@ export interface LegacyDataAutoPreview {
   message: string
 }
 
-/** Scan the active data root for Chrome data folders not attached to any environment. */
-export async function scanLegacyDataAuto(): Promise<LegacyDataAutoPreview> {
+/**
+ * Scan orphan Chrome data folders under the data root.
+ * force=false: only after environment delete (backend LegacyScanPending).
+ * force=true: settings/manual scan.
+ */
+export async function scanLegacyDataAuto(force = false): Promise<LegacyDataAutoPreview> {
   const bindings: any = await getBindings()
   if (bindings?.BrowserLegacyDataAutoScan) {
     try {
-      return (await bindings.BrowserLegacyDataAutoScan()) || { folders: [], dismissed: 0, message: '' }
+      return (await bindings.BrowserLegacyDataAutoScan(!!force)) || { folders: [], dismissed: 0, message: '' }
     } catch {
       return { folders: [], dismissed: 0, message: '' }
     }
@@ -414,7 +418,7 @@ export async function scanLegacyDataAuto(): Promise<LegacyDataAutoPreview> {
   const goApp = (window as any).go?.main?.App
   if (goApp?.BrowserLegacyDataAutoScan) {
     try {
-      return (await goApp.BrowserLegacyDataAutoScan()) || { folders: [], dismissed: 0, message: '' }
+      return (await goApp.BrowserLegacyDataAutoScan(!!force)) || { folders: [], dismissed: 0, message: '' }
     } catch {
       return { folders: [], dismissed: 0, message: '' }
     }

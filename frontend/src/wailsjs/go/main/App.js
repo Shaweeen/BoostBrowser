@@ -242,8 +242,8 @@ export function BrowserExtensionIntegrityClearDismissed() {
   return window['go']['main']['App']['BrowserExtensionIntegrityClearDismissed']();
 }
 
-export function BrowserLegacyDataAutoScan() {
-  return window['go']['main']['App']['BrowserLegacyDataAutoScan']();
+export function BrowserLegacyDataAutoScan(arg1) {
+  return window['go']['main']['App']['BrowserLegacyDataAutoScan'](arg1);
 }
 
 export function BrowserLegacyDataImportFolders(arg1) {
