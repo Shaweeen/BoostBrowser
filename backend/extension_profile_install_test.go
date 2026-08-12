@@ -100,7 +100,7 @@ func TestApplyProfileNativeKeepsCLIUntilChromeDataExists(t *testing.T) {
 	if !hasExtensionDirInLaunchArgs(next, pkg) {
 		t.Fatalf("first open must inject CLI: %#v", next)
 	}
-	// Simulate Chrome already has extension: LES vault (read-only detect).
+	// LES vault alone must NOT cancel CLI (stale package path after upgrade).
 	les := filepath.Join(userData, "Default", "Local Extension Settings", extID)
 	if err := os.MkdirAll(les, 0700); err != nil {
 		t.Fatal(err)
@@ -108,14 +108,97 @@ func TestApplyProfileNativeKeepsCLIUntilChromeDataExists(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(les, "000003.log"), []byte("vault"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	next2, present2, cli2 := applyProfileNativeExtensionLaunchArgs(args, userData)
-	if present2 != 1 || cli2 != 0 {
-		t.Fatalf("after LES, CLI must be cancelled: present=%d cli=%d next=%#v", present2, cli2, next2)
+	if !extensionAlreadyPresentInProfileReadOnly(userData, pkg) {
+		t.Fatal("LES vault must still count as durable data to protect")
 	}
-	for _, a := range next2 {
+	next2, present2, cli2 := applyProfileNativeExtensionLaunchArgs(args, userData)
+	if present2 != 0 || cli2 != 1 {
+		t.Fatalf("LES alone must keep CLI until Preferences path is loadable: present=%d cli=%d next=%#v", present2, cli2, next2)
+	}
+	// After healing Preferences path (never wipes LES), CLI can be cancelled.
+	if err := installUnpackedExtensionIntoProfile(userData, pkg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(les, "000003.log")); err != nil {
+		t.Fatalf("heal must not touch LES vault: %v", err)
+	}
+	next3, present3, cli3 := applyProfileNativeExtensionLaunchArgs(args, userData)
+	if present3 != 1 || cli3 != 0 {
+		t.Fatalf("after loadable prefs, CLI must cancel: present=%d cli=%d next=%#v", present3, cli3, next3)
+	}
+	for _, a := range next3 {
 		if strings.Contains(strings.ToLower(a), "--load-extension=") {
-			t.Fatalf("CLI must be stripped when extension already present: %#v", next2)
+			t.Fatalf("CLI must be stripped when Preferences path is loadable: %#v", next3)
 		}
+	}
+}
+
+func TestHealAssignedExtensionPackagePathsRepairsStalePathKeepsLES(t *testing.T) {
+	root := t.TempDir()
+	extID := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	// New package location after upgrade.
+	pkg := filepath.Join(root, "new-install", "extensions", "imported", extID)
+	if err := os.MkdirAll(pkg, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "manifest.json"), []byte(`{"name":"W","version":"1","manifest_version":3,"key":"MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAu"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Real packages need valid key for id — use folder name id fallback path.
+	// Force id via folder name by skipping key derivation issues: use plain id folder.
+	pkg = filepath.Join(root, "new-install", extID)
+	if err := os.MkdirAll(pkg, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "manifest.json"), []byte(`{"name":"W","version":"1","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// resolveExtensionPackageID may not equal extID without key — use base name.
+	extID = strings.ToLower(filepath.Base(pkg))
+	userData := filepath.Join(root, "user")
+	les := filepath.Join(userData, "Default", "Local Extension Settings", extID)
+	if err := os.MkdirAll(les, 0700); err != nil {
+		t.Fatal(err)
+	}
+	vault := filepath.Join(les, "000003.log")
+	if err := os.WriteFile(vault, []byte("wallet-vault-bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Stale Preferences path from previous install root.
+	stale := filepath.Join(root, "old-install", "gone", extID)
+	prefDir := filepath.Join(userData, "Default")
+	if err := os.MkdirAll(prefDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	prefs := map[string]any{
+		"extensions": map[string]any{
+			"settings": map[string]any{
+				extID: map[string]any{
+					"state": float64(1),
+					"path":  stale,
+				},
+			},
+		},
+	}
+	raw, _ := json.Marshal(prefs)
+	if err := os.WriteFile(filepath.Join(prefDir, "Preferences"), raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if canSkipLoadExtensionCLI(userData, pkg) {
+		t.Fatal("stale path must not skip CLI before heal")
+	}
+	healed := healAssignedExtensionPackagePaths(userData, []string{"--load-extension=" + pkg})
+	if healed != 1 {
+		t.Fatalf("healed=%d", healed)
+	}
+	if data, err := os.ReadFile(vault); err != nil || string(data) != "wallet-vault-bytes" {
+		t.Fatalf("LES vault must be untouched: %v %q", err, data)
+	}
+	if !canSkipLoadExtensionCLI(userData, pkg) {
+		t.Fatal("after heal, CLI must be skippable")
+	}
+	if !isExtensionInstalledInProfile(userData, pkg) {
+		t.Fatal("prefs path must point at new package")
 	}
 }
 

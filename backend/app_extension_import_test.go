@@ -238,13 +238,41 @@ func TestProfileHasEquivalentExtensionByIDOrName(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !profileHasEquivalentExtension(root, extID, "") {
-		t.Fatal("existing extension ID should be detected during explicit distribution")
+	// Without a valid package path, residue prefs must NOT block re-import/heal.
+	if profileHasLoadableEquivalentExtension(root, extID, "", "") {
+		t.Fatal("prefs without loadable path must not count as loadable equivalent")
 	}
-	if !profileHasEquivalentExtension(root, "differentid", "MetaMask") {
-		t.Fatal("existing extension name should be detected during explicit distribution")
+	// Add loadable path → then detect.
+	pkg := filepath.Join(root, "pkg")
+	if err := os.MkdirAll(pkg, 0755); err != nil {
+		t.Fatal(err)
 	}
-	if profileHasEquivalentExtension(root, "differentid", "Rabby Wallet") {
+	if err := os.WriteFile(filepath.Join(pkg, "manifest.json"), []byte(`{"name":"MetaMask","version":"1","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	abs, _ := filepath.Abs(pkg)
+	prefs2 := map[string]any{
+		"extensions": map[string]any{
+			"settings": map[string]any{
+				extID: map[string]any{
+					"state":    float64(1),
+					"path":     abs,
+					"manifest": map[string]any{"name": "MetaMask"},
+				},
+			},
+		},
+	}
+	data2, _ := json.Marshal(prefs2)
+	if err := os.WriteFile(filepath.Join(profileDir, "Preferences"), data2, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !profileHasLoadableEquivalentExtension(root, extID, "", pkg) {
+		t.Fatal("loadable prefs path must be detected")
+	}
+	if !profileHasLoadableEquivalentExtension(root, "differentid", "MetaMask", "") {
+		t.Fatal("loadable same-name extension must be detected")
+	}
+	if profileHasLoadableEquivalentExtension(root, "differentid", "Rabby Wallet", "") {
 		t.Fatal("different extension should not be treated as equivalent")
 	}
 }
