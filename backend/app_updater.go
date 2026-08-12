@@ -217,17 +217,16 @@ func (a *App) CheckUpdate() (*UpdateCheckResult, error) {
 }
 
 func fetchLatestReleaseWithFallback(client *http.Client, apiURL, latestPageURL string) (*ghRelease, error) {
-	rel, err := fetchLatestReleaseFromAPI(client, apiURL)
+	// The public /releases/latest redirect does not consume GitHub API quota.
+	// Prefer it for installed clients, which can otherwise exhaust the shared
+	// unauthenticated API allowance when many environments start together.
+	rel, err := fetchLatestReleaseFromRedirect(client, latestPageURL)
 	if err == nil {
 		return rel, nil
 	}
-	// Trigger fallback on 403-style API failures (rate limit or blocked path).
-	if !strings.Contains(err.Error(), "GitHub API 限流") && !strings.Contains(err.Error(), "HTTP 403") {
-		return nil, err
-	}
-	fallback, fallbackErr := fetchLatestReleaseFromRedirect(client, latestPageURL)
+	fallback, fallbackErr := fetchLatestReleaseFromAPI(client, apiURL)
 	if fallbackErr != nil {
-		return nil, fmt.Errorf("GitHub API 不可用且备用地址失败（多为网络无法访问 github.com，请开代理）：%w", fallbackErr)
+		return nil, fmt.Errorf("GitHub Release 页面和 API 均不可用（请检查系统代理/本机转发网关）：页面=%v；API=%w", err, fallbackErr)
 	}
 	return fallback, nil
 }

@@ -75,9 +75,11 @@ func TestPrepareApplyUpdateQuitUnblocksCloseFlow(t *testing.T) {
 	}
 }
 
-func TestFetchLatestReleaseFallsBackToGithubLatestRedirectWhenAPIRateLimited(t *testing.T) {
+func TestFetchLatestReleaseUsesQuotaFreeRedirectBeforeAPI(t *testing.T) {
 	mux := http.NewServeMux()
+	apiCalls := 0
 	mux.HandleFunc("/api/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
 		http.Error(w, "API rate limit exceeded", http.StatusForbidden)
 	})
 	mux.HandleFunc("/releases/latest", func(w http.ResponseWriter, r *http.Request) {
@@ -94,6 +96,9 @@ func TestFetchLatestReleaseFallsBackToGithubLatestRedirectWhenAPIRateLimited(t *
 	if rel.TagName != "v9.9.9" {
 		t.Fatalf("expected fallback tag v9.9.9, got %q", rel.TagName)
 	}
+	if apiCalls != 0 {
+		t.Fatalf("quota-free redirect succeeded but API was called %d times", apiCalls)
+	}
 
 	var exeURL, shaURL string
 	for _, asset := range rel.Assets {
@@ -109,5 +114,23 @@ func TestFetchLatestReleaseFallsBackToGithubLatestRedirectWhenAPIRateLimited(t *
 	}
 	if !strings.Contains(shaURL, "/releases/download/v9.9.9/boost-browser.exe.sha256") {
 		t.Fatalf("fallback sha asset URL not constructed from tag: %q", shaURL)
+	}
+}
+
+func TestFetchLatestReleaseFallsBackToAPIWhenRedirectUnavailable(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "blocked", http.StatusBadGateway)
+	})
+	mux.HandleFunc("/api/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tag_name":"v8.8.8","assets":[]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	rel, err := fetchLatestReleaseWithFallback(&http.Client{Timeout: 2 * time.Second}, srv.URL+"/api/releases/latest", srv.URL+"/releases/latest")
+	if err != nil || rel.TagName != "v8.8.8" {
+		t.Fatalf("expected API fallback v8.8.8, got rel=%+v err=%v", rel, err)
 	}
 }

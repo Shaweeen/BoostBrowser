@@ -100,6 +100,14 @@ func newPublicRemoteHTTPClientWithProxy(timeout time.Duration, allowHTTP bool, o
 			fixedProxy = u
 		}
 	}
+	var systemProxy *url.URL
+	if fixedProxy == nil && !envHTTPProxyConfigured() {
+		if raw := strings.TrimSpace(readWindowsSystemProxy()); raw != "" {
+			if u, err := url.Parse(raw); err == nil && u.Scheme != "" && u.Host != "" {
+				systemProxy = u
+			}
+		}
+	}
 
 	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -114,9 +122,12 @@ func newPublicRemoteHTTPClientWithProxy(timeout time.Duration, allowHTTP bool, o
 		if fixedProxy != nil {
 			return fixedProxy, nil
 		}
+		if systemProxy != nil {
+			return systemProxy, nil
+		}
 		return http.ProxyFromEnvironment(req)
 	}
-	allowLocalProxyHop := fixedProxy != nil || envHTTPProxyConfigured()
+	allowLocalProxyHop := fixedProxy != nil || systemProxy != nil || envHTTPProxyConfigured()
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
