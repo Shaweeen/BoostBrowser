@@ -167,26 +167,41 @@ if ($isShallowOutput[0].Trim() -eq 'true') {
 }
 if ($LASTEXITCODE -ne 0) { throw 'Unable to fetch complete release tag history' }
 
-# Resolve the previous release tag WITHOUT PowerShell caret pitfalls.
-# Windows PowerShell can mangle strings like "$Tag^{}^" (caret is special in
-# some hosts), which made describe fall back to a distant tag (e.g. v1.7.55)
-# and fail the 800-line net-growth gate. Use rev-list/rev-parse instead.
+# Resolve the previous release tag without ANY caret (^) in shell args.
+# PowerShell/cmd often mangle "commit^" / "tag^{}", which made git describe
+# land on an ancient tag (e.g. v1.7.55) and fail the 800-line growth gate.
+# Use: rev-list --parents (no caret) + version-sorted tags merged into parent.
 $tagCommitForParent = @(& git rev-list -n 1 $Tag)
 if ($LASTEXITCODE -ne 0 -or $tagCommitForParent.Count -ne 1) {
     throw "Unable to resolve commit for $Tag"
 }
 $tagCommitForParent = $tagCommitForParent[0].Trim()
-$parentCommitOutput = @(& git rev-parse ('{0}^' -f $tagCommitForParent))
-if ($LASTEXITCODE -ne 0 -or $parentCommitOutput.Count -ne 1) {
-    throw "Unable to resolve parent commit of $Tag ($tagCommitForParent)"
+$parentsLineOutput = @(& git rev-list --parents -n 1 $tagCommitForParent)
+if ($LASTEXITCODE -ne 0 -or $parentsLineOutput.Count -ne 1) {
+    throw "Unable to resolve parents of $Tag ($tagCommitForParent)"
 }
-$parentCommit = $parentCommitOutput[0].Trim()
-$previousTagOutput = @(& git describe --tags --abbrev=0 --match 'v[0-9]*' $parentCommit)
-if ($LASTEXITCODE -ne 0 -or $previousTagOutput.Count -ne 1) {
-    throw "Unable to resolve the release preceding $Tag (parent $parentCommit)"
+$parentParts = @($parentsLineOutput[0].Trim() -split '\s+')
+if ($parentParts.Count -lt 2) {
+    throw "Release commit $tagCommitForParent has no parent; cannot pick health base"
 }
-$PreviousTag = $previousTagOutput[0].Trim()
-Write-Host "Code health base: $PreviousTag (parent of $Tag)" -ForegroundColor Cyan
+$parentCommit = $parentParts[1]
+# Highest version tag reachable from parent, excluding the release being published.
+$mergedTags = @(& git tag -l 'v*.*.*' --merged $parentCommit --sort=-v:refname)
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to list tags merged into parent $parentCommit"
+}
+$PreviousTag = ''
+foreach ($candidate in $mergedTags) {
+    $name = [string]$candidate
+    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+    if ($name -eq $Tag) { continue }
+    $PreviousTag = $name.Trim()
+    break
+}
+if ([string]::IsNullOrWhiteSpace($PreviousTag)) {
+    throw "Unable to resolve the release preceding $Tag (parent $parentCommit, no merged v* tags)"
+}
+Write-Host "Code health base: $PreviousTag (parent=$parentCommit of $Tag)" -ForegroundColor Cyan
 $healthArgs = @(
     '-NoProfile',
     '-ExecutionPolicy',
