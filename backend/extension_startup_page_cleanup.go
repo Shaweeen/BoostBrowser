@@ -44,8 +44,9 @@ func (a *App) registerAssignedExtensionsIntoProfile(userDataDir string, needingI
 		if canSkipLoadExtensionCLI(userDataDir, packageDir) {
 			continue
 		}
-		if !isWebStoreExtensionID(resolveExtensionPackageID(packageDir)) {
-			// 目录名/公钥推导不出稳定 Web Store ID 的包无法预置注册。
+		// Any package with a resolvable id can pre-register (folder name or
+		// web-store key). Prefer Preferences over CLI to avoid onInstalled tabs.
+		if resolveExtensionPackageID(packageDir) == "" {
 			continue
 		}
 		if err := installUnpackedExtensionIntoProfile(userDataDir, packageDir); err != nil {

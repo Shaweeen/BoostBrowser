@@ -28,7 +28,23 @@ type ExtensionImportResult struct {
 	ExtensionVersion string   `json:"extensionVersion"`
 	PreviousVersion  string   `json:"previousVersion"`
 	UpdatedProfiles  []string `json:"updatedProfiles"`
-	Message          string   `json:"message"`
+	// SkippedProfiles: already had the same loadable extension (no overwrite).
+	SkippedCount int `json:"skippedCount,omitempty"`
+	// PrefsInstalledCount: stopped envs where Preferences registration is loadable after assign.
+	PrefsInstalledCount int `json:"prefsInstalledCount,omitempty"`
+	// DeferredRunningCount: envs were running; LaunchArgs bound, Preferences on next cold start.
+	DeferredRunningCount int `json:"deferredRunningCount,omitempty"`
+	Message              string `json:"message"`
+}
+
+// extensionBindResult is the outcome of binding one shared package to profiles.
+// Policy: never wipe LES/Cookies/IndexedDB; skip is decided before bind by
+// filterProfilesMissingEquivalentExtension.
+type extensionBindResult struct {
+	UpdatedProfiles []string
+	PrefsInstalled  int
+	DeferredRunning int
+	FailedPrefs     []string
 }
 
 // GlobalManagedExtension is the backend-authoritative global extension policy.
@@ -195,13 +211,15 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 	if candidateID == "" {
 		candidateID = extractExtensionID(downloadAddress)
 	}
+	requestedN := len(profileIds)
 	if candidateID != "" {
 		missing := a.filterProfilesMissingEquivalentExtension(profileIds, candidateID, "")
 		if len(missing) == 0 {
 			return &ExtensionImportResult{
 				ExtensionID:     candidateID,
 				UpdatedProfiles: []string{},
-				Message:         fmt.Sprintf("所选 %d 个环境已存在同一扩展，未覆盖原扩展", len(profileIds)),
+				SkippedCount:    requestedN,
+				Message:         formatExtensionAssignMessage(candidateID, "", requestedN, requestedN, 0, 0, 0, 0),
 			}, nil
 		}
 		profileIds = missing
@@ -209,10 +227,11 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 
 	extID, extDir, previousVersion, extensionVersion, err := a.downloadAndInstallExtension(downloadAddress)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("扩展分配失败：%w", err)
 	}
 	manifestName := readManifestNameFromDir(extDir)
 	profileIds = a.filterProfilesMissingEquivalentExtension(profileIds, extID, manifestName)
+	skipped := requestedN - len(profileIds)
 	if len(profileIds) == 0 {
 		return &ExtensionImportResult{
 			ExtensionDir:     extDir,
@@ -220,7 +239,8 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 			ExtensionVersion: extensionVersion,
 			PreviousVersion:  previousVersion,
 			UpdatedProfiles:  []string{},
-			Message:          "所选环境已存在同类型、名称或来源的扩展，未覆盖原扩展",
+			SkippedCount:     skipped,
+			Message:          formatExtensionAssignMessage(extID, extensionVersion, requestedN, skipped, 0, 0, 0, 0),
 		}, nil
 	}
 	for _, id := range profileIds {
@@ -229,7 +249,7 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 		}
 	}
 
-	updated, err := a.bindExtensionDirToProfiles(profileIds, extDir)
+	bind, err := a.bindExtensionDirToProfiles(profileIds, extDir)
 	if err != nil {
 		return nil, err
 	}
@@ -240,18 +260,24 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 	assignments.Extensions = upsertProfileExtensionAssignments(assignments.Extensions, profileExtensionRegistryEntry{
 		DownloadAddress: downloadAddress,
 		ExtensionID:     extID,
-		ProfileIDs:      updated,
+		ProfileIDs:      bind.UpdatedProfiles,
 	})
 	if err := a.saveProfileExtensionRegistry(assignments); err != nil {
 		return nil, err
 	}
 	return &ExtensionImportResult{
-		ExtensionDir:     extDir,
-		ExtensionID:      extID,
-		ExtensionVersion: extensionVersion,
-		PreviousVersion:  previousVersion,
-		UpdatedProfiles:  updated,
-		Message:          extensionInstallMessage(previousVersion, extensionVersion, len(updated)),
+		ExtensionDir:         extDir,
+		ExtensionID:          extID,
+		ExtensionVersion:     extensionVersion,
+		PreviousVersion:      previousVersion,
+		UpdatedProfiles:      bind.UpdatedProfiles,
+		SkippedCount:         skipped,
+		PrefsInstalledCount:  bind.PrefsInstalled,
+		DeferredRunningCount: bind.DeferredRunning,
+		Message: formatExtensionAssignMessage(
+			extID, extensionVersion, requestedN, skipped,
+			len(bind.UpdatedProfiles), bind.PrefsInstalled, bind.DeferredRunning, len(bind.FailedPrefs),
+		),
 	}, nil
 }
 
@@ -296,23 +322,26 @@ func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionIm
 			ExtensionDir:    a.globalExtensionDir(candidateID),
 			ExtensionID:     candidateID,
 			UpdatedProfiles: []string{},
-			Message:         fmt.Sprintf("全局分配已覆盖当前 %d 个环境，未重复检测或覆盖扩展", len(targetIDs)),
+			SkippedCount:    len(targetIDs),
+			Message:         formatExtensionAssignMessage(candidateID, "", len(targetIDs), len(targetIDs), 0, 0, 0, 0),
 		}, nil
 	}
 
 	extID, extDir, previousVersion, extensionVersion, err := a.downloadAndInstallExtension(downloadAddress)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("扩展分配失败：%w", err)
 	}
 	missing := a.filterProfilesMissingEquivalentExtension(unchecked, extID, readManifestNameFromDir(extDir))
-	updated := []string{}
+	// Already-complete registry entries + loadable equivalents are skips.
+	skipped := len(targetIDs) - len(missing)
+	bind := &extensionBindResult{}
 	if len(missing) > 0 {
 		for _, profileID := range missing {
 			if err := a.enableExtensionDeveloperModeForProfile(profileID); err != nil {
 				return nil, err
 			}
 		}
-		updated, err = a.bindExtensionDirToProfiles(missing, extDir)
+		bind, err = a.bindExtensionDirToProfiles(missing, extDir)
 		if err != nil {
 			return nil, err
 		}
@@ -326,14 +355,17 @@ func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionIm
 		return nil, err
 	}
 	return &ExtensionImportResult{
-		ExtensionDir:     extDir,
-		ExtensionID:      extID,
-		ExtensionVersion: extensionVersion,
-		PreviousVersion:  previousVersion,
-		UpdatedProfiles:  updated,
-		Message: fmt.Sprintf(
-			"全局分配已执行：新增 %d 个环境，跳过 %d 个已有扩展的环境。请打开一次新分配的环境完成适配；适配后将不再每次启动注入扩展",
-			len(updated), len(targetIDs)-len(updated),
+		ExtensionDir:         extDir,
+		ExtensionID:          extID,
+		ExtensionVersion:     extensionVersion,
+		PreviousVersion:      previousVersion,
+		UpdatedProfiles:      bind.UpdatedProfiles,
+		SkippedCount:         skipped,
+		PrefsInstalledCount:  bind.PrefsInstalled,
+		DeferredRunningCount: bind.DeferredRunning,
+		Message: formatExtensionAssignMessage(
+			extID, extensionVersion, len(targetIDs), skipped,
+			len(bind.UpdatedProfiles), bind.PrefsInstalled, bind.DeferredRunning, len(bind.FailedPrefs),
 		),
 	}, nil
 }
@@ -531,10 +563,49 @@ func extensionSourceKey(value string) string {
 }
 
 func extensionInstallMessage(previousVersion, extensionVersion string, count int) string {
-	if previousVersion != "" && previousVersion != extensionVersion {
-		return fmt.Sprintf("扩展已从 %s 更新到 %s，并写入环境 Profile（方案 A，日常启动不再 --load-extension）；钱包/Cookies 未改动，重启后生效", previousVersion, extensionVersion)
+	return formatExtensionAssignMessage("", extensionVersion, count, 0, count, count, 0, 0)
+}
+
+// formatExtensionAssignMessage is the user-facing assign summary.
+// Policy: skip same loadable extension; Preferences inject for missing; no LES wipe;
+// hot starts do not re-CLI (no extension homepage tabs).
+func formatExtensionAssignMessage(extID, version string, total, skipped, bound, prefsOK, deferred, failed int) string {
+	name := strings.TrimSpace(extID)
+	if ver := strings.TrimSpace(version); ver != "" {
+		if name != "" {
+			name = name + "@" + ver
+		} else {
+			name = ver
+		}
 	}
-	return fmt.Sprintf("扩展 %s 已绑定到 %d 个实例并写入 Profile；日常启动不再命令行加载扩展，钱包/Cookies 未改动", extensionVersion, count)
+	if name == "" {
+		name = "扩展"
+	}
+	if total <= 0 {
+		total = skipped + bound
+	}
+	if bound == 0 && skipped > 0 {
+		return fmt.Sprintf("%s：所选 %d 个环境均已存在同一可加载扩展，已跳过（未覆盖钱包/扩展数据）", name, skipped)
+	}
+	parts := make([]string, 0, 6)
+	parts = append(parts, fmt.Sprintf("%s 分配完成", name))
+	if bound > 0 {
+		parts = append(parts, fmt.Sprintf("新绑定 %d", bound))
+	}
+	if prefsOK > 0 {
+		parts = append(parts, fmt.Sprintf("已写入 Profile %d（日常启动零 CLI，不弹扩展主页）", prefsOK))
+	}
+	if deferred > 0 {
+		parts = append(parts, fmt.Sprintf("运行中延后 %d（关闭环境后再开完成写入）", deferred))
+	}
+	if skipped > 0 {
+		parts = append(parts, fmt.Sprintf("跳过已有 %d", skipped))
+	}
+	if failed > 0 {
+		parts = append(parts, fmt.Sprintf("写入失败 %d", failed))
+	}
+	parts = append(parts, "未改动已有钱包/LES")
+	return strings.Join(parts, "；")
 }
 
 func (a *App) filterProfilesMissingEquivalentExtension(profileIDs []string, extensionID string, manifestName string) []string {
@@ -1254,7 +1325,7 @@ func validateUnpackedExtensionManifest(extDir string) error {
 	return nil
 }
 
-func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) ([]string, error) {
+func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) (*extensionBindResult, error) {
 	a.browserMgr.Mutex.Lock()
 	defer a.browserMgr.Mutex.Unlock()
 	type previousProfileState struct {
@@ -1262,10 +1333,12 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) ([]
 		updatedAt  string
 	}
 	previous := make(map[string]previousProfileState, len(profileIds))
-	updated := make([]string, 0, len(profileIds))
+	result := &extensionBindResult{
+		UpdatedProfiles: make([]string, 0, len(profileIds)),
+	}
 	// Scheme A: install into stopped profiles' user-data immediately so the
-	// next start does not need --load-extension. Running profiles install on
-	// the next cold start (Chrome must not own Preferences concurrently).
+	// next start does not need --load-extension (avoids onInstalled homepage
+	// tabs). Running profiles only get LaunchArgs; Preferences on next cold start.
 	type pendingInstall struct {
 		profileID   string
 		userDataDir string
@@ -1281,18 +1354,20 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) ([]
 			updatedAt:  profile.UpdatedAt,
 		}
 		// Keep path in LaunchArgs as the assignment record (which packages are
-		// bound). Runtime strips --load-extension after profile materialize.
+		// bound). Runtime strips --load-extension when Preferences is loadable.
 		profile.LaunchArgs = addExtensionDirToLaunchArgs(profile.LaunchArgs, extDir)
 		profile.UpdatedAt = time.Now().Format(time.RFC3339)
-		updated = append(updated, id)
-		if !profile.Running {
-			pending = append(pending, pendingInstall{
-				profileID:   id,
-				userDataDir: a.browserMgr.ResolveUserDataDir(profile),
-			})
+		result.UpdatedProfiles = append(result.UpdatedProfiles, id)
+		if profile.Running {
+			result.DeferredRunning++
+			continue
 		}
+		pending = append(pending, pendingInstall{
+			profileID:   id,
+			userDataDir: a.browserMgr.ResolveUserDataDir(profile),
+		})
 	}
-	if len(updated) == 0 {
+	if len(result.UpdatedProfiles) == 0 {
 		return nil, fmt.Errorf("未找到可更新的实例")
 	}
 	if err := a.browserMgr.SaveProfiles(); err != nil {
@@ -1305,30 +1380,45 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) ([]
 		return nil, fmt.Errorf("保存实例扩展配置失败：%w", err)
 	}
 	// Force next start to re-verify extension packages ↔ profile data.
-	a.clearExtensionLaunchReadyForProfilesLocked(updated)
+	a.clearExtensionLaunchReadyForProfilesLocked(result.UpdatedProfiles)
+	a.clearExtensionIntegrityForProfilesLocked(result.UpdatedProfiles)
 	// Materialize while mutex held but Chrome is stopped for these profiles.
 	log := logger.New("Extension")
 	for _, item := range pending {
 		if err := os.MkdirAll(item.userDataDir, 0755); err != nil {
-			log.Warn("扩展 Profile 安装跳过：无法创建用户目录",
+			log.Warn("扩展 Profile 安装失败：无法创建用户目录",
 				logger.F("profile_id", item.profileID),
 				logger.F("error", err.Error()),
 			)
+			result.FailedPrefs = append(result.FailedPrefs, item.profileID)
 			continue
 		}
 		if err := installUnpackedExtensionIntoProfile(item.userDataDir, extDir); err != nil {
-			log.Warn("分配时 Profile 安装失败，将在下次启动重试",
+			log.Warn("分配时 Profile 安装失败，启动时将 heal/CLI 兜底（不触碰 LES）",
 				logger.F("profile_id", item.profileID),
 				logger.F("error", err.Error()),
 			)
+			result.FailedPrefs = append(result.FailedPrefs, item.profileID)
 			continue
 		}
-		log.Info("分配时已将扩展写入环境 Profile（方案 A）",
+		// Success = Preferences path is loadable (Scheme A). Not a full user-extension scan.
+		if !isExtensionInstalledInProfile(item.userDataDir, extDir) {
+			log.Warn("分配后 Preferences 仍不可加载，启动时将 heal",
+				logger.F("profile_id", item.profileID),
+			)
+			result.FailedPrefs = append(result.FailedPrefs, item.profileID)
+			continue
+		}
+		result.PrefsInstalled++
+		log.Info("分配时已将扩展写入环境 Profile（方案 A，热启动零 CLI）",
 			logger.F("profile_id", item.profileID),
 			logger.F("extension_id", resolveExtensionPackageID(extDir)),
 		)
 	}
-	return updated, nil
+	if result.PrefsInstalled == 0 && result.DeferredRunning == 0 && len(result.FailedPrefs) == len(pending) && len(pending) > 0 {
+		return result, fmt.Errorf("扩展已绑定启动参数，但写入 Profile Preferences 全部失败（%d 个环境）。请检查扩展包 manifest 后重试", len(result.FailedPrefs))
+	}
+	return result, nil
 }
 
 func (a *App) removeExtensionDirFromProfilesExcept(extDir string, keepProfiles map[string]bool) ([]string, error) {
@@ -1778,7 +1868,7 @@ func (a *App) InstallExtensionFromCRXURL(profileID string, crxURL string) (strin
 	if len(a.filterProfilesMissingEquivalentExtension([]string{profileID}, extID, extName)) == 0 {
 		return extID, extName, nil
 	}
-	if _, err := a.bindExtensionDirToProfiles([]string{profileID}, extDir); err != nil {
+	if _, err := a.bindExtensionDirToProfiles([]string{profileID}, extDir); err != nil { // bind result unused: CRX helper only needs error
 		return extID, "", err
 	}
 	assignments, err := a.loadProfileExtensionRegistry()

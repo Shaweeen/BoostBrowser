@@ -225,9 +225,11 @@ func profileHasAnyDurableExtensionStorage(userDataDir string) bool {
 	return len(preferenceExtensionIDs(userDataDir)) > 0
 }
 
-// isEnvironmentHotStartSettled means every assigned package already has durable
-// Chrome runtime files (LES/etc.) so start can skip first-adapt work and CLI
-// reinject. Preferences-only registration does NOT count as settled.
+// isEnvironmentHotStartSettled means every assigned package has a loadable
+// Preferences registration (canSkipLoadExtensionCLI). Start then hard-strips
+// --load-extension so Chromium does not re-fire onInstalled homepage tabs.
+// Does NOT scan the user's full extension list — only the assigned bind list.
+// LES alone is not enough (see canSkipLoadExtensionCLI).
 func isEnvironmentHotStartSettled(userDataDir string, launchArgs []string) bool {
 	dirs := activeLoadExtensionDirs(launchArgs)
 	if len(dirs) == 0 {
