@@ -544,24 +544,34 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
-	// Scheme A / MoreLogin-style: Profile owns extensions after first adapt.
-	// Hot-settled or integrity-complete → hard strip ALL --load-extension (P0).
+	// Prefer profile-local materialized packages; keep CLI until durable LES.
+	// Chrome 137+ branded builds need DisableLoadExtensionCommandLineSwitch off.
 	var profileInstalledN, cliFallbackN int
 	if hotSettled || assignmentComplete {
-		args = stripLoadExtensionArgs(args)
-		profileInstalledN = len(assignmentExtIDs)
-		if profileInstalledN == 0 {
-			profileInstalledN = len(activeLoadExtensionDirs(sanitizedProfileLaunchArgs))
+		// Only strip CLI when every assigned package is truly loadable+adapted.
+		// Re-check needingInject: never hard-strip if any package still needs inject.
+		if len(needingInject) == 0 {
+			args = stripLoadExtensionArgs(args)
+			profileInstalledN = len(assignmentExtIDs)
+			if profileInstalledN == 0 {
+				profileInstalledN = len(activeLoadExtensionDirs(sanitizedProfileLaunchArgs))
+			}
+			cliFallbackN = 0
+			log.Info("热启动/完整性已确认：强制零 CLI load，保留用户 Session",
+				logger.F("profile_id", profileId),
+				logger.F("hot_settled", hotSettled),
+				logger.F("assignment_complete", assignmentComplete),
+				logger.F("present", profileInstalledN),
+			)
+		} else {
+			args, profileInstalledN, cliFallbackN = applyProfileNativeExtensionLaunchArgs(args, userDataDir)
+			log.Info("标记完整但仍有包需 CLI，保留注入",
+				logger.F("profile_id", profileId),
+				logger.F("cli_load", cliFallbackN),
+			)
 		}
-		cliFallbackN = 0
-		log.Info("热启动/完整性已确认：强制零 CLI load，保留用户 Session",
-			logger.F("profile_id", profileId),
-			logger.F("hot_settled", hotSettled),
-			logger.F("assignment_complete", assignmentComplete),
-			logger.F("present", profileInstalledN),
-		)
 	} else {
-		// READ-ONLY presence: cancel CLI per package that already has profile data.
+		// First adapt / path heal: keep --load-extension for packages without LES.
 		args, profileInstalledN, cliFallbackN = applyProfileNativeExtensionLaunchArgs(args, userDataDir)
 		if cliFallbackN == 0 && profileInstalledN > 0 {
 			log.Info("只读检测：环境已有扩展，已取消 CLI load",
@@ -577,6 +587,8 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			)
 		}
 	}
+	// Chrome 137+ may ignore --load-extension unless this feature is disabled.
+	args = ensureLoadExtensionCommandLineSwitchEnabled(args)
 	// Extension package repair runs off the critical path after first start
 	// (async). Avoid blocking multi-open on CRX/key network work.
 	// Final authoritative placement pass: fingerprint/profile/API arguments are

@@ -3,6 +3,8 @@ package backend
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -39,30 +41,149 @@ const (
 	chromeExtLocationUnpacked = 4 // LOAD / Load unpacked
 )
 
-// installUnpackedExtensionIntoProfile registers packageDir as a persistent
-// unpacked extension in Preferences (no file copy).
+// materializeExtensionPackageForProfile copies the shared program package into
+// the environment's Default/Extensions/<id>/<version>/ so Chromium can always
+// load it via --load-extension even when:
+//   - branded Chrome 137+ policy is in play (with DisableLoadExtension flag off)
+//   - the install directory later moves (shared path would go stale)
+// If a valid materialization already exists, it is reused (no re-copy).
+func materializeExtensionPackageForProfile(userDataDir, packageDir string) (localPath, extID, version string, err error) {
+	userDataDir = strings.TrimSpace(userDataDir)
+	packageDir = strings.TrimSpace(packageDir)
+	if userDataDir == "" || packageDir == "" {
+		return "", "", "", fmt.Errorf("profile materialize: empty path")
+	}
+	absPkg, err := filepath.Abs(packageDir)
+	if err != nil {
+		return "", "", "", fmt.Errorf("profile materialize: abs path: %w", err)
+	}
+	if err := validateUnpackedExtensionManifest(absPkg); err != nil {
+		return "", "", "", fmt.Errorf("profile materialize: invalid package: %w", err)
+	}
+	extID = resolveExtensionPackageID(absPkg)
+	if extID == "" {
+		return "", "", "", fmt.Errorf("profile materialize: cannot resolve extension id for %s", absPkg)
+	}
+	version = readManifestVersionFromDir(absPkg)
+	if version == "" {
+		version = "0.0.0.0"
+	}
+	// Chrome version folder names: keep safe characters only.
+	verDir := sanitizeExtensionVersionDir(version)
+	dest := filepath.Join(userDataDir, "Default", "Extensions", extID, verDir)
+	if validateUnpackedExtensionManifest(dest) == nil {
+		return dest, extID, version, nil
+	}
+	if err := os.RemoveAll(dest); err != nil && !os.IsNotExist(err) {
+		return "", "", "", fmt.Errorf("profile materialize: clear dest: %w", err)
+	}
+	if err := copyExtensionPackageTree(absPkg, dest); err != nil {
+		_ = os.RemoveAll(dest)
+		return "", "", "", fmt.Errorf("profile materialize: copy: %w", err)
+	}
+	if err := validateUnpackedExtensionManifest(dest); err != nil {
+		_ = os.RemoveAll(dest)
+		return "", "", "", fmt.Errorf("profile materialize: dest invalid after copy: %w", err)
+	}
+	return dest, extID, version, nil
+}
+
+func sanitizeExtensionVersionDir(version string) string {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return "0.0.0.0"
+	}
+	var b strings.Builder
+	for _, r := range version {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "0.0.0.0"
+	}
+	return out
+}
+
+func copyExtensionPackageTree(src, dst string) error {
+	src = filepath.Clean(src)
+	dst = filepath.Clean(dst)
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return os.MkdirAll(dst, 0755)
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0755)
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil // never follow/copy symlinks into profile
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return err
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(out, in)
+		closeErr := out.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	})
+}
+
+// installUnpackedExtensionIntoProfile materializes the package into the profile
+// Extensions tree and registers it in Preferences (path = profile-local copy).
 func installUnpackedExtensionIntoProfile(userDataDir, packageDir string) error {
 	userDataDir = strings.TrimSpace(userDataDir)
 	packageDir = strings.TrimSpace(packageDir)
 	if userDataDir == "" || packageDir == "" {
 		return fmt.Errorf("profile install: empty path")
 	}
-	absPkg, err := filepath.Abs(packageDir)
+	localPath, extID, version, err := materializeExtensionPackageForProfile(userDataDir, packageDir)
 	if err != nil {
-		return fmt.Errorf("profile install: abs path: %w", err)
+		// Fallback: shared path only (older behaviour) if copy fails.
+		absPkg, absErr := filepath.Abs(packageDir)
+		if absErr != nil {
+			return err
+		}
+		if validateUnpackedExtensionManifest(absPkg) != nil {
+			return err
+		}
+		id := resolveExtensionPackageID(absPkg)
+		ver := readManifestVersionFromDir(absPkg)
+		if ver == "" {
+			ver = "0.0.0.0"
+		}
+		if id == "" {
+			return err
+		}
+		logger.New("Extension").Warn("扩展未能物化进环境目录，回退共享包路径",
+			logger.F("error", err.Error()),
+			logger.F("package", absPkg),
+		)
+		return ensurePreferencesUnpackedExtension(userDataDir, id, absPkg, ver)
 	}
-	if err := validateUnpackedExtensionManifest(absPkg); err != nil {
-		return fmt.Errorf("profile install: invalid package: %w", err)
-	}
-	extID := resolveExtensionPackageID(absPkg)
-	if extID == "" {
-		return fmt.Errorf("profile install: cannot resolve extension id for %s", absPkg)
-	}
-	version := readManifestVersionFromDir(absPkg)
-	if version == "" {
-		version = "0.0.0.0"
-	}
-	return ensurePreferencesUnpackedExtension(userDataDir, extID, absPkg, version)
+	return ensurePreferencesUnpackedExtension(userDataDir, extID, localPath, version)
 }
 
 // isExtensionInstalledInProfile reports a Preferences registration that Chromium
@@ -796,4 +917,53 @@ func applyProfileNativeExtensionLaunchArgs(args []string, userDataDir string) (n
 		return base, presentN, 0
 	}
 	return normalizeLoadExtensionArgs(append(base, "--load-extension="+strings.Join(need, ","))), presentN, len(need)
+}
+
+// ensureLoadExtensionCommandLineSwitchEnabled makes --load-extension work on
+// Chrome 137+ branded builds that disable the switch by default.
+// See: DisableLoadExtensionCommandLineSwitch.
+func ensureLoadExtensionCommandLineSwitchEnabled(args []string) []string {
+	hasLoad := false
+	for _, arg := range args {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(arg)), "--load-extension=") {
+			hasLoad = true
+			break
+		}
+	}
+	if !hasLoad {
+		return args
+	}
+	const feature = "DisableLoadExtensionCommandLineSwitch"
+	out := make([]string, 0, len(args)+1)
+	merged := false
+	for _, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		low := strings.ToLower(trimmed)
+		if strings.HasPrefix(low, "--disable-features=") {
+			val := strings.TrimSpace(trimmed[len("--disable-features="):])
+			parts := strings.Split(val, ",")
+			found := false
+			for _, p := range parts {
+				if strings.EqualFold(strings.TrimSpace(p), feature) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				if val == "" {
+					trimmed = "--disable-features=" + feature
+				} else {
+					trimmed = "--disable-features=" + val + "," + feature
+				}
+			}
+			merged = true
+			out = append(out, trimmed)
+			continue
+		}
+		out = append(out, arg)
+	}
+	if !merged {
+		out = append(out, "--disable-features="+feature)
+	}
+	return out
 }

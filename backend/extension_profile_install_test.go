@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestInstallUnpackedExtensionIntoProfileRegistersPrefsNoCopy(t *testing.T) {
+func TestInstallUnpackedExtensionIntoProfileMaterializesAndRegisters(t *testing.T) {
 	root := t.TempDir()
 	pkg := filepath.Join(root, "pkg", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	if err := os.MkdirAll(pkg, 0755); err != nil {
@@ -25,13 +25,18 @@ func TestInstallUnpackedExtensionIntoProfileRegistersPrefsNoCopy(t *testing.T) {
 	if err := installUnpackedExtensionIntoProfile(userData, pkg); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	// Must NOT copy into Default/Extensions (slow + wrong for shared packages).
-	copied := filepath.Join(userData, "Default", "Extensions", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	if _, err := os.Stat(copied); err == nil {
-		t.Fatal("must not copy package into profile Extensions tree")
+	// Must materialize into Default/Extensions/<id>/<version> for reliable CLI load.
+	copied := filepath.Join(userData, "Default", "Extensions", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "1.2.3")
+	if _, err := os.Stat(filepath.Join(copied, "manifest.json")); err != nil {
+		t.Fatalf("expected profile-local package: %v", err)
 	}
-	if !isExtensionInstalledInProfile(userData, pkg) {
-		t.Fatal("expected prefs registration")
+	if !isExtensionInstalledInProfile(userData, copied) {
+		t.Fatal("expected prefs registration for local package")
+	}
+	// LES must not be created by install (wallet-safe).
+	les := filepath.Join(userData, "Default", "Local Extension Settings", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if _, err := os.Stat(les); err == nil {
+		t.Fatal("install must not create LES")
 	}
 	prefIDs := preferenceExtensionIDs(userData)
 	if _, ok := prefIDs["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]; !ok {
@@ -42,13 +47,34 @@ func TestInstallUnpackedExtensionIntoProfileRegistersPrefsNoCopy(t *testing.T) {
 		t.Fatalf("location must be UNPACKED(4): %#v", entry["location"])
 	}
 	path, _ := entry["path"].(string)
-	abs, _ := filepath.Abs(pkg)
-	if normalizeExtensionPath(path) != normalizeExtensionPath(abs) {
-		t.Fatalf("path must point at shared package: %q vs %q", path, abs)
+	if normalizeExtensionPath(path) != normalizeExtensionPath(copied) {
+		t.Fatalf("path must point at profile-local package: %q vs %q", path, copied)
 	}
 	active, _ := entry["active_permissions"].(map[string]any)
 	if active == nil {
 		t.Fatal("active_permissions required")
+	}
+}
+
+func TestEnsureLoadExtensionCommandLineSwitchEnabled(t *testing.T) {
+	args := []string{"--no-first-run", "--load-extension=/tmp/ext"}
+	got := ensureLoadExtensionCommandLineSwitchEnabled(args)
+	found := false
+	for _, a := range got {
+		if strings.Contains(a, "DisableLoadExtensionCommandLineSwitch") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected DisableLoadExtensionCommandLineSwitch in %#v", got)
+	}
+	// no load-extension → no feature
+	got2 := ensureLoadExtensionCommandLineSwitchEnabled([]string{"--no-first-run"})
+	for _, a := range got2 {
+		if strings.Contains(a, "DisableLoadExtensionCommandLineSwitch") {
+			t.Fatal("must not inject feature without load-extension")
+		}
 	}
 }
 

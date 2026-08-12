@@ -340,3 +340,9 @@ behavior is intentionally retired.
 | --- | --- | --- | --- | --- | --- | --- |
 | CLEAN-086 | Startup auto-scan of orphan Chrome folders in `LegacyDataAutoNotice` (`useEffect` + delayed `scanLegacyDataAuto` on every client open) | `v1.7.96` (`25fde03`) | User does not want import prompts except after deleting an environment; startup noise and confusion | Scan only when `LegacyScanPending` after `BrowserProfileDelete` (event `legacy-data:scan-needed`) or settings force scan | `TestLegacyScanOnlyWhenPending`, `TestLegacyFolderDismissalDeletesAndPersists` | Restore startup scan from `git show 25fde03:frontend/src/App.tsx` only if product reverts to always-on discovery. |
 | CLEAN-087 | Dismiss-legacy that only wrote `.boost_notice_dismissed.json` and kept folders on disk | `v1.7.96` | User chose ignore/do-not-import must permanently remove residual data and never re-ask | `BrowserLegacyDataDismissFolders` deletes folders under data root (never registered envs) then records keys | Same tests | Restore keep-on-disk dismiss from `git show 25fde03:backend/app_notice_dismiss.go` only with explicit product approval. |
+
+## v1.7.99 profile-local extension materialize
+
+| ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
+| --- | --- | --- | --- | --- | --- | --- |
+| CLEAN-088 | Assign-time "Preferences only, no copy into Default/Extensions" policy (shared absolute package path only) | `v1.7.98` (`513fb98`) | Shared-path prefs + selective CLI still left empty chrome://extensions on user machines; Chrome 137+ also disables --load-extension by default | Materialize package into `Default/Extensions/<id>/<ver>/`, prefs path = local copy; force `DisableLoadExtensionCommandLineSwitch` when CLI load present; keep CLI until LES | `TestInstallUnpackedExtensionIntoProfileMaterializesAndRegisters`, assign/CLI tests | Prefer materialize; shared-path fallback remains if copy fails. |

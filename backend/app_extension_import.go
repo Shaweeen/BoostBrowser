@@ -1354,9 +1354,11 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) (*e
 	result := &extensionBindResult{
 		UpdatedProfiles: make([]string, 0, len(profileIds)),
 	}
-	// Scheme A: install into stopped profiles' user-data immediately so the
-	// next start does not need --load-extension (avoids onInstalled homepage
-	// tabs). Running profiles only get LaunchArgs; Preferences on next cold start.
+	// Materialize package into each stopped profile (Default/Extensions/…) and
+	// bind LaunchArgs to that profile-local path so --load-extension always
+	// points at a path Chromium can open. Shared program package remains the
+	// source of truth for copies; running profiles only get shared LaunchArgs
+	// until next cold start.
 	type pendingInstall struct {
 		profileID   string
 		userDataDir string
@@ -1371,9 +1373,19 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) (*e
 			launchArgs: append([]string{}, profile.LaunchArgs...),
 			updatedAt:  profile.UpdatedAt,
 		}
-		// Keep path in LaunchArgs as the assignment record (which packages are
-		// bound). Runtime strips --load-extension when Preferences is loadable.
-		profile.LaunchArgs = addExtensionDirToLaunchArgs(profile.LaunchArgs, extDir)
+		userDataDir := a.browserMgr.ResolveUserDataDir(profile)
+		bindPath := extDir
+		if !profile.Running {
+			if local, _, _, mErr := materializeExtensionPackageForProfile(userDataDir, extDir); mErr == nil && local != "" {
+				bindPath = local
+			}
+		}
+		// LaunchArgs record which package path this environment must load.
+		profile.LaunchArgs = addExtensionDirToLaunchArgs(profile.LaunchArgs, bindPath)
+		// Always keep shared path too so heal can re-copy after upgrade moves appRoot.
+		if bindPath != extDir {
+			profile.LaunchArgs = addExtensionDirToLaunchArgs(profile.LaunchArgs, extDir)
+		}
 		profile.UpdatedAt = time.Now().Format(time.RFC3339)
 		result.UpdatedProfiles = append(result.UpdatedProfiles, id)
 		if profile.Running {
@@ -1382,7 +1394,7 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) (*e
 		}
 		pending = append(pending, pendingInstall{
 			profileID:   id,
-			userDataDir: a.browserMgr.ResolveUserDataDir(profile),
+			userDataDir: userDataDir,
 		})
 	}
 	if len(result.UpdatedProfiles) == 0 {
@@ -1411,6 +1423,14 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) (*e
 			result.FailedPrefs = append(result.FailedPrefs, item.profileID)
 			continue
 		}
+		localPath, _, _, matErr := materializeExtensionPackageForProfile(item.userDataDir, extDir)
+		if matErr != nil {
+			log.Warn("扩展物化进环境目录失败，尝试仅写 Preferences",
+				logger.F("profile_id", item.profileID),
+				logger.F("error", matErr.Error()),
+			)
+			localPath = extDir
+		}
 		if err := installUnpackedExtensionIntoProfile(item.userDataDir, extDir); err != nil {
 			log.Warn("分配时 Profile 安装失败，启动时将 heal/CLI 兜底（不触碰 LES）",
 				logger.F("profile_id", item.profileID),
@@ -1419,8 +1439,12 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) (*e
 			result.FailedPrefs = append(result.FailedPrefs, item.profileID)
 			continue
 		}
-		// Success = Preferences path is loadable (Scheme A). Not a full user-extension scan.
-		if !isExtensionInstalledInProfile(item.userDataDir, extDir) {
+		// Success = Preferences path is loadable for the materialised (or shared) package.
+		checkPath := localPath
+		if checkPath == "" {
+			checkPath = extDir
+		}
+		if !isExtensionInstalledInProfile(item.userDataDir, checkPath) && !isExtensionInstalledInProfile(item.userDataDir, extDir) {
 			log.Warn("分配后 Preferences 仍不可加载，启动时将 heal",
 				logger.F("profile_id", item.profileID),
 			)
@@ -1428,9 +1452,10 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) (*e
 			continue
 		}
 		result.PrefsInstalled++
-		log.Info("分配时已将扩展写入环境 Profile（方案 A；首次打开仍注入 CLI 直至 Chrome 写出扩展数据）",
+		log.Info("分配时已将扩展物化并写入环境 Profile（首次打开强制 CLI 加载）",
 			logger.F("profile_id", item.profileID),
 			logger.F("extension_id", resolveExtensionPackageID(extDir)),
+			logger.F("local_path", checkPath),
 		)
 	}
 	// Success policy: at least one stopped environment must have loadable Preferences.
