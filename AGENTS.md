@@ -2,6 +2,28 @@
 
 These rules apply to every code change in this repository.
 
+## Source of truth and release workflow (mandatory)
+
+1. **GitHub is the only source of truth for code.** Develop and commit so that
+   every finished change is on GitHub (push the branch/tag the user uses).
+2. **Windows is the only official pack/publish machine.** After code is on
+   GitHub, the user updates Windows with `git pull` / checkout, then builds and
+   uploads the Release there (`scripts/publish_windows_github_release.ps1` or
+   project bat/ps1).
+3. **Do not treat Mac (or any non-Windows host) as the formal binary publisher.**
+   Do not upload `boost-browser.exe` / Setup installers to GitHub Releases from
+   Mac unless the user explicitly asks for an exception. Notes-only releases or
+   tags from the dev machine are fine when requested.
+4. **Version bumps and release notes** live in the repo on GitHub first; Windows
+   only packages what it pulls.
+5. Prefer small, reviewable commits on the agreed branch (e.g.
+   `release/1.7.95-from-1.7.83` or whatever the user names next), not local-only
+   thrash with many productVersion jumps without push.
+
+User summary (Chinese): 以后在 GitHub 上改好并推送；Windows 电脑 `git` 拉代码后再打包发布。
+
+---
+
 1. Do not stack a new workaround beside an old implementation. Before changing
    a module, search that module and its direct callers for earlier fixes,
    duplicate state, duplicate workers, compatibility branches, polling loops,
