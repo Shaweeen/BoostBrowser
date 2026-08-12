@@ -114,50 +114,14 @@ async function saveMainWindowBoundsSnapshot() {
   return true
 }
 
-function useExtensionIntegrityScanOnOpen() {
-  useEffect(() => {
-    let cancelled = false
-    const run = async () => {
-      try {
-        const {
-          scanExtensionIntegrityAll,
-          dismissExtensionIntegrityNotice,
-        } = await import('./modules/browser/api')
-        const result = await scanExtensionIntegrityAll(false)
-        if (cancelled || result?.alreadyScanned) return
-        if (result?.message && (result.incomplete > 0 || result.repaired > 0)) {
-          const { toast } = await import('./shared/components')
-          if (result.incomplete > 0) {
-            const incompleteIds = Array.isArray(result.incompleteIds) ? result.incompleteIds : []
-            if (incompleteIds.length > 0) {
-              // 用户确认“不再提醒”后持久化，重启/升级后不再重复弹出。
-              toast.warningWithAction(result.message, '不再提醒', () => {
-                void dismissExtensionIntegrityNotice(incompleteIds).then((ok) => {
-                  if (ok) toast.success('已记住，不再提醒这些环境')
-                })
-              })
-            } else {
-              toast.warning(result.message, 6000)
-            }
-          } else {
-            toast.success(result.message)
-          }
-        }
-      } catch {
-        // non-fatal
-      }
-    }
-    const t = window.setTimeout(run, 1200)
-    return () => {
-      cancelled = true
-      window.clearTimeout(t)
-    }
-  }, [])
-}
+// Extension integrity auto-scan on client open is DISABLED by default.
+// It spammed a toast every launch when assigned extensions were not yet
+// adapted in Chrome ("首次适配" / incomplete). Backend APIs
+// BrowserExtensionIntegrityScanAll / DismissNotice remain for manual use.
+// Do not re-enable automatic toast without an explicit settings toggle defaulting OFF.
 
 function useWailsNotifications() {
   const addNotification = useNotificationStore((s) => s.addNotification)
-  useExtensionIntegrityScanOnOpen()
 
   useEffect(() => {
     const runtime = (window as any).runtime

@@ -238,14 +238,31 @@ func TestReadOnlyDetectUsesEnabledPreferencesWithoutWriting(t *testing.T) {
 	if !extensionAlreadyPresentInProfileReadOnly(userData, pkg) {
 		t.Fatal("enabled prefs+path must count as present")
 	}
-	// Read-only path must not mutate Preferences.
+	// Prefs alone still needs CLI for first adapt; detect must not write Preferences.
 	_, need := selectLoadExtensionCLIReadOnly(userData, []string{"--load-extension=" + pkg})
-	if len(need) != 0 {
-		t.Fatalf("CLI must be cancelled: %#v", need)
+	if len(need) != 1 {
+		t.Fatalf("prefs-only must keep CLI until durable LES: need=%#v", need)
 	}
 	after, _ := os.ReadFile(prefPath)
 	if string(before) != string(after) {
 		t.Fatal("read-only detect must not rewrite Preferences")
+	}
+	// After Chrome durable runtime exists, CLI can cancel — still read-only.
+	les := filepath.Join(userData, "Default", "Local Extension Settings", extID)
+	if err := os.MkdirAll(les, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(les, "000003.log"), []byte("vault"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before2, _ := os.ReadFile(prefPath)
+	_, need2 := selectLoadExtensionCLIReadOnly(userData, []string{"--load-extension=" + pkg})
+	if len(need2) != 0 {
+		t.Fatalf("prefs+LES must cancel CLI: %#v", need2)
+	}
+	after2, _ := os.ReadFile(prefPath)
+	if string(before2) != string(after2) {
+		t.Fatal("read-only detect must not rewrite Preferences after LES")
 	}
 }
 

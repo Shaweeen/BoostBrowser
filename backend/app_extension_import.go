@@ -593,10 +593,10 @@ func formatExtensionAssignMessage(extID, version string, total, skipped, bound, 
 		parts = append(parts, fmt.Sprintf("新绑定 %d", bound))
 	}
 	if prefsOK > 0 {
-		parts = append(parts, fmt.Sprintf("已写入 Profile %d（日常启动零 CLI，不弹扩展主页）", prefsOK))
+		parts = append(parts, fmt.Sprintf("已写入 Profile %d（请关闭后重新打开环境一次以加载扩展）", prefsOK))
 	}
 	if deferred > 0 {
-		parts = append(parts, fmt.Sprintf("运行中延后 %d（关闭环境后再开完成写入）", deferred))
+		parts = append(parts, fmt.Sprintf("运行中延后 %d（必须先关闭环境再分配才能写入）", deferred))
 	}
 	if skipped > 0 {
 		parts = append(parts, fmt.Sprintf("跳过已有 %d", skipped))
@@ -1410,13 +1410,21 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) (*e
 			continue
 		}
 		result.PrefsInstalled++
-		log.Info("分配时已将扩展写入环境 Profile（方案 A，热启动零 CLI）",
+		log.Info("分配时已将扩展写入环境 Profile（方案 A；首次打开仍注入 CLI 直至 Chrome 写出扩展数据）",
 			logger.F("profile_id", item.profileID),
 			logger.F("extension_id", resolveExtensionPackageID(extDir)),
 		)
 	}
-	if result.PrefsInstalled == 0 && result.DeferredRunning == 0 && len(result.FailedPrefs) == len(pending) && len(pending) > 0 {
-		return result, fmt.Errorf("扩展已绑定启动参数，但写入 Profile Preferences 全部失败（%d 个环境）。请检查扩展包 manifest 后重试", len(result.FailedPrefs))
+	// Success policy: at least one stopped environment must have loadable Preferences.
+	// All-running → user must stop browsers first. Prefs all failed → hard error.
+	if len(pending) == 0 && result.DeferredRunning > 0 && result.PrefsInstalled == 0 {
+		return result, fmt.Errorf("所选环境均在运行中，无法写入扩展 Profile。请先关闭这些环境后再点「分配」（否则浏览器内看不到扩展）")
+	}
+	if len(pending) > 0 && result.PrefsInstalled == 0 {
+		return result, fmt.Errorf("扩展未能写入任何环境的 Preferences（失败 %d 个）。请检查扩展包是否完整、环境目录是否可写后重试", len(result.FailedPrefs))
+	}
+	if len(result.FailedPrefs) > 0 && result.PrefsInstalled == 0 {
+		return result, fmt.Errorf("扩展 Preferences 写入全部失败（%d 个环境）", len(result.FailedPrefs))
 	}
 	return result, nil
 }

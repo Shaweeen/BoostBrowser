@@ -40,8 +40,10 @@ func (a *App) registerAssignedExtensionsIntoProfile(userDataDir string, needingI
 		if packageDir == "" || validateUnpackedExtensionManifest(packageDir) != nil {
 			continue
 		}
-		// 已注册的包跳过：幂等（Profile 注册已存在时不能重复计数/重复写入）。
-		if canSkipLoadExtensionCLI(userDataDir, packageDir) {
+		// Already registered in Preferences (loadable path): skip rewrite.
+		// Do not use canSkipLoadExtensionCLI here — prefs-only still needs CLI
+		// for first adapt, but registration itself is already done.
+		if isExtensionInstalledInProfile(userDataDir, packageDir) {
 			continue
 		}
 		// Any package with a resolvable id can pre-register (folder name or

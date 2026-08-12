@@ -150,9 +150,9 @@ func everyAssignedHasDurableRuntime(userDataDir string, launchArgs []string) boo
 		return true
 	}
 	for _, dir := range dirs {
-		// Integrity-complete is used to hard-strip --load-extension. Require a
-		// loadable Preferences registration, not LES alone (upgrade-safe).
-		if !isExtensionInstalledInProfile(userDataDir, dir) {
+		// Integrity-complete / hard-strip CLI: loadable Preferences AND Chrome
+		// has written durable runtime (same gate as canSkipLoadExtensionCLI).
+		if !canSkipLoadExtensionCLI(userDataDir, dir) {
 			return false
 		}
 	}

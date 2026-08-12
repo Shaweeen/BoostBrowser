@@ -556,15 +556,29 @@ func extensionPreferencesPathLoadable(userDataDir, extID, absPkg string) bool {
 }
 
 // canSkipLoadExtensionCLI is the start-path gate for cancelling --load-extension.
-// Requires a loadable Preferences registration (valid package path on disk).
 //
-// LES/wallet vault alone is NOT enough: after client upgrade the absolute package
-// path in Preferences often points at the old install dir, while LES still has
-// wallet data. Treating LES as "skip CLI" strips --load-extension and Chrome
-// shows zero toolbar extensions — vault stays but UI "all extensions dropped".
+// Both required:
+//  1. Preferences ENABLED + package path still loadable on disk
+//     (LES alone is NOT enough — upgrade can leave a stale absolute path while
+//     the wallet vault remains → strip CLI → empty toolbar).
+//  2. Chrome has already written durable runtime data under this extension id
+//     (LES / Extension State / extension IndexedDB). Preferences-only rows
+//     written at assign time do not prove Chromium loaded the package; keeping
+//     CLI until first real adapt fixes "分配成功但 chrome://extensions 为空".
+//
 // Never writes disk.
 func canSkipLoadExtensionCLI(userDataDir, packageDir string) bool {
-	return isExtensionInstalledInProfile(userDataDir, packageDir)
+	if !isExtensionInstalledInProfile(userDataDir, packageDir) {
+		return false
+	}
+	extID := resolveExtensionPackageID(packageDir)
+	if extID == "" {
+		extID = strings.ToLower(filepath.Base(packageDir))
+	}
+	if extID == "" {
+		return false
+	}
+	return extensionHasDurableRuntimeFiles(userDataDir, extID)
 }
 
 // healAssignedExtensionPackagePaths rewrites only Preferences path/state for

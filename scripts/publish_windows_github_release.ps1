@@ -204,8 +204,8 @@ if ([string]::IsNullOrWhiteSpace($PreviousTag)) {
 Write-Host "Code health base: $PreviousTag (parent=$parentCommit of $Tag)" -ForegroundColor Cyan
 # 1.7.95 is a recovery line: baseline v1.7.83 + extension-only commits. Net is
 # ~800 lines; packaging/docs noise can push slightly over MaxNetGrowth=800.
-if ($Version -eq '1.7.95' -and [string]::IsNullOrWhiteSpace($ApprovedGrowthReason)) {
-    $ApprovedGrowthReason = 'v1.7.95 extension recovery from v1.7.83 (path heal + proxy CRX + assign stability + publish health-base fix)'
+if (($Version -eq '1.7.95' -or $Version -eq '1.7.96') -and [string]::IsNullOrWhiteSpace($ApprovedGrowthReason)) {
+    $ApprovedGrowthReason = "v$Version extension recovery from v1.7.83 (path heal + proxy CRX + assign must-load + no auto integrity toast)"
 }
 $healthArgs = @(
     '-NoProfile',

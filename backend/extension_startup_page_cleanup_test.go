@@ -51,11 +51,9 @@ func TestExtensionIDFromPageURL(t *testing.T) {
 	}
 }
 
-// TestRegisterAssignedExtensionsIntoProfile guards the root cause: a package
-// that Chrome has never registered gets a Scheme A Preferences registration
-// before launch, so canSkipLoadExtensionCLI turns true and the next start no
-// longer re-injects --load-extension (which re-fires onInstalled and reopens
-// the wallet welcome page on every start).
+// TestRegisterAssignedExtensionsIntoProfile: Scheme A Preferences registration
+// is written before launch. CLI is kept until Chrome durable runtime exists
+// (prefs alone is not enough). After LES exists, CLI can be skipped.
 func TestRegisterAssignedExtensionsIntoProfile(t *testing.T) {
 	root := t.TempDir()
 	userDataDir := filepath.Join(root, "profile")
@@ -81,12 +79,22 @@ func TestRegisterAssignedExtensionsIntoProfile(t *testing.T) {
 	if registered != 1 {
 		t.Fatalf("expected 1 package registered, got %d", registered)
 	}
-	if !canSkipLoadExtensionCLI(userDataDir, pkgDir) {
-		t.Fatal("after Scheme A registration the package must skip CLI injection")
+	if canSkipLoadExtensionCLI(userDataDir, pkgDir) {
+		t.Fatal("prefs-only registration must keep CLI for first Chrome adapt")
 	}
 	// Idempotent: a second pass must register nothing new.
 	if again := app.registerAssignedExtensionsIntoProfile(userDataDir, []string{pkgDir}); again != 0 {
 		t.Fatalf("expected idempotent re-run to register 0, got %d", again)
+	}
+	les := filepath.Join(userDataDir, "Default", "Local Extension Settings", extID)
+	if err := os.MkdirAll(les, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(les, "000003.log"), []byte("vault"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !canSkipLoadExtensionCLI(userDataDir, pkgDir) {
+		t.Fatal("prefs+LES must skip CLI injection")
 	}
 }
 

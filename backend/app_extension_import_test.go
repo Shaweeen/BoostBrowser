@@ -744,7 +744,8 @@ func TestGlobalExtensionDistributionChecksOnlyNewProfilesOnExplicitAction(t *tes
 }
 
 func TestAssignWritesPreferencesAndHotStartNeedsZeroCLI(t *testing.T) {
-	// Assign → Preferences loadable → isEnvironmentHotStartSettled → no --load-extension.
+	// Assign → Preferences loadable (required success) → first start still keeps
+	// --load-extension until Chrome durable LES exists → then zero CLI.
 	root := t.TempDir()
 	app := NewApp(root)
 	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
@@ -775,17 +776,28 @@ func TestAssignWritesPreferencesAndHotStartNeedsZeroCLI(t *testing.T) {
 	if !isExtensionInstalledInProfile(userData, extDir) {
 		t.Fatal("after assign, Preferences must be loadable")
 	}
-	if !isEnvironmentHotStartSettled(userData, args) {
-		t.Fatal("Preferences-loadable assign must settle hot start (zero CLI)")
+	// Prefs-only must NOT strip CLI (first adapt so Chrome actually loads package).
+	if isEnvironmentHotStartSettled(userData, args) {
+		t.Fatal("prefs-only after assign must keep CLI for first open")
 	}
 	next, present, cli := applyProfileNativeExtensionLaunchArgs(args, userData)
-	if cli != 0 || present != 1 {
-		t.Fatalf("hot path must strip CLI: present=%d cli=%d args=%v", present, cli, next)
+	if cli != 1 || present != 0 {
+		t.Fatalf("first open after assign must inject CLI: present=%d cli=%d args=%v", present, cli, next)
 	}
-	for _, a := range next {
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(a)), "--load-extension=") {
-			t.Fatalf("CLI load must be absent after assign: %v", next)
-		}
+	// Simulate Chrome writing durable runtime after first load.
+	les := filepath.Join(userData, "Default", "Local Extension Settings", extID)
+	if err := os.MkdirAll(les, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(les, "000003.log"), []byte("vault"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !isEnvironmentHotStartSettled(userData, args) {
+		t.Fatal("prefs+LES must settle hot start (zero CLI)")
+	}
+	next2, present2, cli2 := applyProfileNativeExtensionLaunchArgs(args, userData)
+	if cli2 != 0 || present2 != 1 {
+		t.Fatalf("after LES, CLI must strip: present=%d cli=%d args=%v", present2, cli2, next2)
 	}
 
 	// Second assign: same extension → skip, do not overwrite Preferences bytes.
