@@ -113,6 +113,55 @@ export async function createBrowserProfile(input: BrowserProfileInput): Promise<
   return profile
 }
 
+export interface DeletedEnvironmentDataOffer {
+  archiveKey: string
+  targetProfileId: string
+  targetProfileName: string
+  archivedProfileName: string
+  archivedAt: string
+  matchReason: string
+}
+
+export async function findDeletedEnvironmentDataOffers(profileIds: string[]): Promise<DeletedEnvironmentDataOffer[]> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserProfileFindDeletedDataOffers) {
+    return (await bindings.BrowserProfileFindDeletedDataOffers(profileIds || [])) || []
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.BrowserProfileFindDeletedDataOffers) {
+    return (await goApp.BrowserProfileFindDeletedDataOffers(profileIds || [])) || []
+  }
+  return []
+}
+
+export async function restoreDeletedEnvironmentData(targetProfileId: string, archiveKey: string): Promise<void> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserProfileRestoreDeletedData) {
+    await bindings.BrowserProfileRestoreDeletedData(targetProfileId, archiveKey)
+    return
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.BrowserProfileRestoreDeletedData) {
+    await goApp.BrowserProfileRestoreDeletedData(targetProfileId, archiveKey)
+    return
+  }
+  throw new Error('当前客户端不支持恢复已删除环境数据')
+}
+
+export async function ignoreDeletedEnvironmentData(archiveKey: string): Promise<void> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserProfileIgnoreDeletedData) {
+    await bindings.BrowserProfileIgnoreDeletedData(archiveKey)
+    return
+  }
+  const goApp = (window as any).go?.main?.App
+  if (goApp?.BrowserProfileIgnoreDeletedData) {
+    await goApp.BrowserProfileIgnoreDeletedData(archiveKey)
+    return
+  }
+  throw new Error('当前客户端不支持忽略已删除环境数据')
+}
+
 export async function batchCreateBrowserProfiles(
   prefix: string,
   startIndex: number,

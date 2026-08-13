@@ -3,7 +3,8 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { FolderOpen, Layers } from 'lucide-react'
 import { Button, Card, ConfirmModal, FormItem, Input, Modal, Select, Textarea, toast } from '../../../shared/components'
 import type { BrowserCore, BrowserProfileInput, BrowserProxy, BrowserGroup } from '../types'
-import { createBrowserProfile, fetchAllTags, fetchBrowserCores, fetchBrowserProfiles, fetchBrowserProxies, fetchBrowserSettings, fetchGroups, listKnownExtensionPackages, openUserDataDir, syncKnownExtensionsToProfiles, updateBrowserProfile } from '../api'
+import { createBrowserProfile, fetchAllTags, fetchBrowserCores, fetchBrowserProfiles, fetchBrowserProxies, fetchBrowserSettings, fetchGroups, findDeletedEnvironmentDataOffers, ignoreDeletedEnvironmentData, listKnownExtensionPackages, openUserDataDir, restoreDeletedEnvironmentData, syncKnownExtensionsToProfiles, updateBrowserProfile } from '../api'
+import type { DeletedEnvironmentDataOffer } from '../api'
 import { FingerprintPanel } from '../components/FingerprintPanel'
 import { TagInput } from '../components/TagInput'
 import { GroupSelector } from '../components/GroupSelector'
@@ -46,6 +47,24 @@ export function BrowserEditPage() {
   const [isDirty, setIsDirty] = useState(false)
   const [leaveConfirm, setLeaveConfirm] = useState(false)
   const [saveError, setSaveError] = useState('')
+  const [deletedDataOffer, setDeletedDataOffer] = useState<DeletedEnvironmentDataOffer | null>(null)
+  const [deletedDataBusy, setDeletedDataBusy] = useState(false)
+
+  const syncKnownExtensionsIfRequested = async (profileIds: string[]) => {
+    if (profileIds.length === 0) return
+    const packages = await listKnownExtensionPackages().catch(() => [])
+    if (packages.length === 0) return
+    const ok = window.confirm(
+      `当前已有 ${packages.length} 个扩展包。\n是否将已有扩展同步到新环境？\n\n同步后首次打开该环境会完成适配；数据完整后不再重复验证。`,
+    )
+    if (!ok) return
+    try {
+      const result = await syncKnownExtensionsToProfiles(profileIds)
+      toast.success(result?.message || '扩展已同步到新环境')
+    } catch (syncErr: any) {
+      toast.error(syncErr?.message || '同步扩展失败')
+    }
+  }
 
   useEffect(() => {
     const loadData = async () => {
@@ -105,27 +124,21 @@ export function BrowserEditPage() {
       if (isCreate) {
         const created = await createBrowserProfile(payload)
         toast.success('环境已创建')
-        // 方案 A：新建环境时询问是否同步已有扩展
-        const packages = await listKnownExtensionPackages().catch(() => [])
-        if (created?.profileId && packages.length > 0) {
-          const ok = window.confirm(
-            `当前已有 ${packages.length} 个扩展包。\n是否将已有扩展同步到新环境「${created.profileName || created.profileId}」？\n\n同步后首次打开该环境会完成适配；数据完整后不再重复验证。`,
-          )
-          if (ok) {
-            try {
-              const result = await syncKnownExtensionsToProfiles([created.profileId])
-              toast.success(result?.message || '扩展已同步到新环境')
-            } catch (syncErr: any) {
-              toast.error(syncErr?.message || '同步扩展失败')
-            }
-          }
+        const offers = created?.profileId
+          ? await findDeletedEnvironmentDataOffers([created.profileId]).catch(() => [])
+          : []
+        if (offers.length > 0) {
+          setDeletedDataOffer(offers[0])
+        } else {
+          await syncKnownExtensionsIfRequested(created?.profileId ? [created.profileId] : [])
+          navigate('/browser/list')
         }
       } else if (id) {
         await updateBrowserProfile(id, payload)
         toast.success('环境已更新')
+        navigate('/browser/list')
       }
       setIsDirty(false)
-      navigate('/browser/list')
     } catch (error: any) {
       setSaveError(typeof error === 'string' ? error : error?.message || '保存失败')
     } finally {
@@ -135,6 +148,37 @@ export function BrowserEditPage() {
 
   const handleBack = () => {
     if (isDirty) { setLeaveConfirm(true) } else { navigate('/browser/list') }
+  }
+
+  const handleRestoreDeletedData = async () => {
+    if (!deletedDataOffer || deletedDataBusy) return
+    setDeletedDataBusy(true)
+    try {
+      await restoreDeletedEnvironmentData(deletedDataOffer.targetProfileId, deletedDataOffer.archiveKey)
+      toast.success('已导入已删除环境的浏览器数据；Cookies、扩展与钱包数据保持原样')
+      setDeletedDataOffer(null)
+      navigate('/browser/list')
+    } catch (error: any) {
+      toast.error(error?.message || '导入已删除环境数据失败')
+    } finally {
+      setDeletedDataBusy(false)
+    }
+  }
+
+  const handleIgnoreDeletedData = async () => {
+    if (!deletedDataOffer || deletedDataBusy) return
+    setDeletedDataBusy(true)
+    try {
+      await ignoreDeletedEnvironmentData(deletedDataOffer.archiveKey)
+      toast.info('已按你的选择不导入；该归档不会再次提示，将在删除满 6 个月后自动清理')
+      await syncKnownExtensionsIfRequested([deletedDataOffer.targetProfileId])
+      setDeletedDataOffer(null)
+      navigate('/browser/list')
+    } catch (error: any) {
+      toast.error(error?.message || '记录忽略选择失败')
+    } finally {
+      setDeletedDataBusy(false)
+    }
   }
 
   const defaultCore = cores.find(c => c.isDefault)
@@ -298,6 +342,26 @@ export function BrowserEditPage() {
         footer={<Button onClick={() => setSaveError('')}>知道了</Button>}
       >
         <div className="text-[var(--color-text-secondary)]">{saveError}</div>
+      </Modal>
+
+      <Modal
+        open={!!deletedDataOffer}
+        onClose={handleIgnoreDeletedData}
+        title="发现已删除环境的数据"
+        width="480px"
+        closable={!deletedDataBusy}
+        footer={
+          <>
+            <Button variant="secondary" onClick={handleIgnoreDeletedData} disabled={deletedDataBusy}>不导入</Button>
+            <Button onClick={handleRestoreDeletedData} loading={deletedDataBusy}>导入数据</Button>
+          </>
+        }
+      >
+        <div className="space-y-3 text-sm text-[var(--color-text-secondary)]">
+          <p>新建环境“{deletedDataOffer?.targetProfileName}”与已删除环境“{deletedDataOffer?.archivedProfileName}”的{deletedDataOffer?.matchReason}，是否导入原数据？</p>
+          <p className="text-xs text-[var(--color-text-muted)]">仅在新建环境尚未使用时可导入。导入会恢复原 Cookies、扩展与钱包本地数据，不会读取或上传其中内容。</p>
+          <p className="text-xs text-[var(--color-text-muted)]">选择“不导入”后不再提醒；归档会在删除满 6 个月后自动清理并写入日志。</p>
+        </div>
       </Modal>
     </div>
   )

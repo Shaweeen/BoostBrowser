@@ -250,6 +250,17 @@ func (a *App) startup(ctx context.Context) {
 	a.browserMgr.InitData()
 	a.initializeActiveDataCompatibility(activeDataRoot, dataExisted)
 	if !a.panelMode {
+		// Deletion archives are not active user data. Check their six-month
+		// retention once during ordinary startup only; no archive watcher runs.
+		if result, err := a.browserMgr.CleanupExpiredDeletedEnvironmentData(time.Now()); err != nil {
+			a.lifecycleLog("deleted-data-retention", "state=failed", "error="+err.Error())
+		} else if result.Removed > 0 {
+			a.lifecycleLog("deleted-data-retention", "state=removed", fmt.Sprintf("count=%d", result.Removed), "retention=6mo")
+		} else {
+			a.lifecycleLog("deleted-data-retention", "state=checked", fmt.Sprintf("retained=%d", result.Skipped))
+		}
+	}
+	if !a.panelMode {
 		// 默认使用随 BrowserStudio 打包/下载到 chrome/ 目录内的独立 Google Chrome 内核；不再引用系统安装的 Chrome。
 		a.ensureBundledGoogleChromeCore()
 		// 同步内存态，确保后续默认内核解析使用刚注册的内置 Chrome。
@@ -355,7 +366,6 @@ func (a *App) startup(ctx context.Context) {
 	// window and only touches stopped environments.
 	a.lifecycleLog("cache-auto-clean", "state=scheduled", "initialDelay=2m", "pollInterval=6h")
 	a.startCacheAutoCleanScheduler()
-	// a.startBrowserRuntimeReconciler()
 	// Shared layout-hold flag root for main confiner ↔ panel tile coordination.
 	setLayoutHoldRoot(a.appRoot)
 
@@ -697,6 +707,43 @@ func (a *App) BrowserProfileSetKeywords(profileId string, keywords []string) (*B
 
 func (a *App) BrowserProfileCreate(input BrowserProfileInput) (*BrowserProfile, error) {
 	return a.browserMgr.Create(input)
+}
+
+// BrowserProfileFindDeletedDataOffers is called immediately after a user
+// creates an environment. It returns only exact, non-secret archive metadata;
+// the frontend must still ask before any archived browser directory is moved.
+func (a *App) BrowserProfileFindDeletedDataOffers(profileIDs []string) ([]browser.ProfileDataArchiveOffer, error) {
+	if a == nil || a.browserMgr == nil {
+		return nil, fmt.Errorf("应用尚未初始化")
+	}
+	return a.browserMgr.FindDeletedEnvironmentDataOffers(profileIDs)
+}
+
+// BrowserProfileRestoreDeletedData is the explicit user-confirmed path for a
+// freshly-created matching environment. It never merges or overwrites a
+// browser folder that has already been used.
+func (a *App) BrowserProfileRestoreDeletedData(targetProfileID, archiveKey string) error {
+	if a == nil || a.browserMgr == nil {
+		return fmt.Errorf("应用尚未初始化")
+	}
+	if err := a.browserMgr.RestoreDeletedEnvironmentDataOffer(targetProfileID, archiveKey); err != nil {
+		return err
+	}
+	a.lifecycleLog("deleted-data-recovery", "action=imported", "target_profile_id="+strings.TrimSpace(targetProfileID))
+	return nil
+}
+
+// BrowserProfileIgnoreDeletedData records a "do not import" choice. The
+// archive remains recoverable until the six-month retention cleanup.
+func (a *App) BrowserProfileIgnoreDeletedData(archiveKey string) error {
+	if a == nil || a.browserMgr == nil {
+		return fmt.Errorf("应用尚未初始化")
+	}
+	if err := a.browserMgr.IgnoreDeletedEnvironmentDataOffer(archiveKey); err != nil {
+		return err
+	}
+	a.lifecycleLog("deleted-data-recovery", "action=ignored")
+	return nil
 }
 
 // BrowserProfileBatchCreate 批量创建实例配置

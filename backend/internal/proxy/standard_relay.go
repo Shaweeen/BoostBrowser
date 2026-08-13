@@ -116,37 +116,36 @@ func (m *StandardRelayManager) acquireOnce(
 	m.mu.Unlock()
 
 	if working == "" {
-		// Protocol-labelled provider lists are frequently wrong. Probe declared
-		// scheme first, then alternates under a short bounded timeout (kept on
-		// every start for connectivity — not a disposable check).
-		var upstreamDialer C.Dialer
-		if options.Mode == ProxyNetworkModeAuto || options.Mode == ProxyNetworkModeLocalGateway {
+		// Probe the environment proxy itself first. TUN already captures that
+		// transport at the OS layer, and a directly reachable proxy needs no
+		// extra local-VPN hop. This prevents Auto from creating an unnecessary
+		// Browser -> local gateway -> environment proxy chain on every launch.
+		// Only a failed direct probe falls back to a local gateway. Explicit
+		// local_gateway mode retains the user's requested two-hop route.
+		probeConfig := &SpeedTestConfig{Timeout: 6 * time.Second, TCPTimeout: 3 * time.Second, URLs: []string{defaultTestURL}}
+		var err error
+		if options.Mode == ProxyNetworkModeLocalGateway {
 			gateway = m.discoverLocalGatewayCached(options.LocalGatewayURL)
-			if gateway != "" {
-				upstreamDialer, _ = newUpstreamGatewayDialer(gateway)
-			}
-			if options.Mode == ProxyNetworkModeLocalGateway && upstreamDialer == nil {
+			upstreamDialer, dialerErr := newUpstreamGatewayDialer(gateway)
+			if gateway == "" || dialerErr != nil || upstreamDialer == nil {
 				return "", "", fmt.Errorf("未检测到可用的本地 VPN HTTP/SOCKS 网关；请确认非 TUN 模式端口并填写本地 VPN 网关")
 			}
-		}
-		var err error
-		working, err = detectWorkingStandardProxyConfigWithDialer(src, &SpeedTestConfig{
-			Timeout:    6 * time.Second,
-			TCPTimeout: 3 * time.Second,
-			URLs:       []string{defaultTestURL},
-		}, upstreamDialer)
-		if err != nil && options.Mode == ProxyNetworkModeAuto && upstreamDialer != nil {
-			// Local gateway may be alive while blocking this particular
-			// provider endpoint. Auto mode falls back to direct/TUN routing.
-			gateway = ""
-			working, err = DetectWorkingStandardProxyConfig(src, &SpeedTestConfig{
-				Timeout:    6 * time.Second,
-				TCPTimeout: 3 * time.Second,
-				URLs:       []string{defaultTestURL},
-			})
+			working, err = detectWorkingStandardProxyConfigWithDialer(src, probeConfig, upstreamDialer)
+		} else {
+			working, err = DetectWorkingStandardProxyConfig(src, probeConfig)
+			if err != nil && options.Mode == ProxyNetworkModeAuto {
+				gateway = m.discoverLocalGatewayCached(options.LocalGatewayURL)
+				if gateway != "" {
+					if upstreamDialer, dialerErr := newUpstreamGatewayDialer(gateway); dialerErr == nil && upstreamDialer != nil {
+						working, err = detectWorkingStandardProxyConfigWithDialer(src, probeConfig, upstreamDialer)
+					} else {
+						gateway = ""
+					}
+				}
+			}
 		}
 		if err != nil {
-			return "", "", fmt.Errorf("代理协议/认证验证失败；非 TUN 请填写本地 VPN 网关，TUN 请确认代理服务器连接已由 VPN 正常转发且未形成代理回环: %w", err)
+			return "", "", fmt.Errorf("代理协议/认证验证失败；自动模式已先尝试环境代理直连，再尝试本地 VPN 网关。非 TUN 请确认网关端口，TUN 请确认代理服务器未被重复转发: %w", err)
 		}
 		working = strings.TrimSpace(working)
 		relayKey = standardRelayKey(working, gateway)

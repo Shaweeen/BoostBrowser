@@ -47,6 +47,21 @@ func TestEnvironmentFrameLooksLikeMainAcceptsWalletTitledBrowser(t *testing.T) {
 	}
 }
 
+func TestMinimizedMainBrowserFrameEligibilityExcludesPopupHosts(t *testing.T) {
+	if !minimizedMainBrowserFrameEligible("Chrome_WidgetWin_1", "MetaMask", false, 0) {
+		t.Fatal("a minimized main browser with a wallet tab must remain tile-eligible")
+	}
+	if minimizedMainBrowserFrameEligible("Chrome_WidgetWin_1", "MetaMask Notification", true, 0) {
+		t.Fatal("owned wallet popup must not become an environment tile target")
+	}
+	if minimizedMainBrowserFrameEligible("Chrome_WidgetWin_1", "MetaMask", false, WS_POPUP) {
+		t.Fatal("popup-style window must not become an environment tile target")
+	}
+	if minimizedMainBrowserFrameEligible("Other_Window", "New Tab", false, 0) {
+		t.Fatal("non-Chromium top-level window must not be accepted")
+	}
+}
+
 func TestClampRectToBoundsLiftsPopupAboveTaskbar(t *testing.T) {
 	// Work area ends at y=1000 (taskbar below). Popup 400x600 placed too low.
 	_, y, w, h := clampRectToBounds(100, 700, 400, 600, 0, 0, 1920, 1000, false)

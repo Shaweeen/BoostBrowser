@@ -847,6 +847,72 @@ func TestGlobalExtensionDistributionHealsUnusableRegistration(t *testing.T) {
 	}
 }
 
+func TestSyncKnownExtensionsSkipsExistingLoadableExtension(t *testing.T) {
+	root := t.TempDir()
+	app := NewApp(root)
+	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
+	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
+	globalDir := app.globalExtensionDir(extID)
+	if err := os.MkdirAll(globalDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(globalDir, "manifest.json"), []byte(`{"name":"MetaMask","version":"1.0","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.saveGlobalExtensionRegistry(globalExtensionRegistry{Extensions: []globalExtensionRegistryEntry{{
+		DownloadAddress: extID,
+		ExtensionID:     extID,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	existing, err := app.browserMgr.Create(BrowserProfileInput{ProfileName: "已有扩展"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manualDir := filepath.Join(root, "manual", extID)
+	if err := os.MkdirAll(manualDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(manualDir, "manifest.json"), []byte(`{"name":"MetaMask","version":"0.9","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	existingData := app.browserMgr.ResolveUserDataDir(existing)
+	if err := installUnpackedExtensionIntoProfile(existingData, manualDir); err != nil {
+		t.Fatal(err)
+	}
+	prefsPath := filepath.Join(existingData, "Default", "Preferences")
+	before, err := os.ReadFile(prefsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	missing, err := app.browserMgr.Create(BrowserProfileInput{ProfileName: "待同步"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := app.BrowserExtensionSyncKnownToProfiles([]string{existing.ProfileId, missing.ProfileId})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.UpdatedProfiles) != 1 || result.UpdatedProfiles[0] != missing.ProfileId || result.SkippedCount != 1 {
+		t.Fatalf("sync result must bind only missing profile: %#v", result)
+	}
+	after, err := os.ReadFile(prefsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("known-extension sync must not rewrite an existing loadable extension registration")
+	}
+	if hasExtensionDirInLaunchArgs(app.browserMgr.Profiles[existing.ProfileId].LaunchArgs, globalDir) {
+		t.Fatalf("existing extension must not gain duplicate managed launch arg: %#v", app.browserMgr.Profiles[existing.ProfileId].LaunchArgs)
+	}
+	if !hasExtensionDirInLaunchArgs(app.browserMgr.Profiles[missing.ProfileId].LaunchArgs, globalDir) {
+		t.Fatalf("missing profile must receive managed launch arg: %#v", app.browserMgr.Profiles[missing.ProfileId].LaunchArgs)
+	}
+}
+
 func TestProfileDeletionArchivesOwnedDataRetainsSnapshotsAndRemovesExtensionReferences(t *testing.T) {
 	root := t.TempDir()
 	app := NewApp(root)

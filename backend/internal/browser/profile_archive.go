@@ -16,6 +16,12 @@ const (
 	profileArchiveDirectory  = "deleted-environments"
 )
 
+// ProfileDataArchiveRetention is deliberately measured in calendar months,
+// not a fixed day count: an archive created on the 31st expires six calendar
+// months later. Expiry is evaluated only during normal main-client startup;
+// there is no continuous archive watcher.
+const ProfileDataArchiveRetentionMonths = 6
+
 // ProfileDataArchiveManifest records only the environment-to-folder linkage
 // needed for user-confirmed recovery. It never reads or stores page content,
 // Cookies, extension storage, wallet vaults, mnemonics or private keys.
@@ -37,6 +43,27 @@ type ProfileDataArchiveManifest struct {
 	UpdatedAt           string   `json:"updatedAt,omitempty"`
 	ArchivedAt          string   `json:"archivedAt"`
 	Reason              string   `json:"reason"`
+	// IgnoredAt records an explicit "do not import" decision. Ignored archives
+	// are never offered again, but stay recoverable until their retention date.
+	IgnoredAt string `json:"ignoredAt,omitempty"`
+}
+
+// ProfileDataArchiveOffer is deliberately non-secret. It is sufficient to let
+// the UI ask whether a freshly-created environment should reuse a deleted
+// environment's browser folder without reading Cookies or wallet storage.
+type ProfileDataArchiveOffer struct {
+	ArchiveKey          string `json:"archiveKey"`
+	TargetProfileID     string `json:"targetProfileId"`
+	TargetProfileName   string `json:"targetProfileName"`
+	ArchivedProfileName string `json:"archivedProfileName"`
+	ArchivedAt          string `json:"archivedAt"`
+	MatchReason         string `json:"matchReason"`
+}
+
+type ProfileDataArchiveCleanupResult struct {
+	Removed int      `json:"removed"`
+	Skipped int      `json:"skipped"`
+	Keys    []string `json:"keys"`
 }
 
 type ProfileDataArchiveMove struct {
@@ -227,4 +254,313 @@ func ListProfileDataArchives(archiveRoot string) ([]ProfileDataArchiveManifest, 
 		archives = append(archives, manifest)
 	}
 	return archives, nil
+}
+
+// FindDeletedEnvironmentDataOffers finds one exact, user-actionable recovery
+// archive for each freshly-created profile. The match is intentionally narrow:
+// same user-data identity when the user chose one, otherwise the same visible
+// environment name. It never inspects archived Chrome, Cookie, extension or
+// wallet content.
+func (m *Manager) FindDeletedEnvironmentDataOffers(profileIDs []string) ([]ProfileDataArchiveOffer, error) {
+	m.InitData()
+	m.Mutex.Lock()
+	defer m.Mutex.Unlock()
+
+	offers := make([]ProfileDataArchiveOffer, 0, len(profileIDs))
+	seenProfiles := make(map[string]bool, len(profileIDs))
+	for _, rawID := range profileIDs {
+		profileID := strings.TrimSpace(rawID)
+		if profileID == "" || seenProfiles[profileID] {
+			continue
+		}
+		seenProfiles[profileID] = true
+		profile := m.Profiles[profileID]
+		if profile == nil || profile.Running || m.BrowserProcesses[profileID] != nil {
+			continue
+		}
+		offer, err := m.findDeletedEnvironmentDataOfferLocked(profile)
+		if err != nil {
+			return nil, err
+		}
+		if offer != nil {
+			offers = append(offers, *offer)
+		}
+	}
+	return offers, nil
+}
+
+func (m *Manager) findDeletedEnvironmentDataOfferLocked(target *Profile) (*ProfileDataArchiveOffer, error) {
+	archiveRoot := m.ProfileRecoveryArchiveRoot()
+	archives, err := ListProfileDataArchives(archiveRoot)
+	if err != nil {
+		return nil, err
+	}
+	var chosen *ProfileDataArchiveManifest
+	var chosenReason string
+	for i := range archives {
+		archive := archives[i]
+		if !archive.DataAvailable || strings.TrimSpace(archive.IgnoredAt) != "" || archive.ProfileID == target.ProfileId {
+			continue
+		}
+		reason := archiveMatchReason(target, &archive)
+		if reason == "" {
+			continue
+		}
+		if chosen == nil || archiveArchivedTime(archive).After(archiveArchivedTime(*chosen)) {
+			candidate := archive
+			chosen = &candidate
+			chosenReason = reason
+		}
+	}
+	if chosen == nil {
+		return nil, nil
+	}
+	return &ProfileDataArchiveOffer{
+		ArchiveKey:          chosen.ArchivedDataDir,
+		TargetProfileID:     target.ProfileId,
+		TargetProfileName:   target.ProfileName,
+		ArchivedProfileName: chosen.ProfileName,
+		ArchivedAt:          chosen.ArchivedAt,
+		MatchReason:         chosenReason,
+	}, nil
+}
+
+// IgnoreDeletedEnvironmentDataOffer records an explicit user choice. Ignored
+// archives remain on disk until their normal six-month retention expires, but
+// are never shown automatically again.
+func (m *Manager) IgnoreDeletedEnvironmentDataOffer(archiveKey string) error {
+	m.Mutex.Lock()
+	defer m.Mutex.Unlock()
+	archiveRoot := m.ProfileRecoveryArchiveRoot()
+	manifest, err := readProfileDataArchiveManifest(archiveRoot, archiveKey)
+	if err != nil {
+		return err
+	}
+	if !manifest.DataAvailable {
+		return fmt.Errorf("恢复归档已不存在")
+	}
+	manifest.IgnoredAt = time.Now().UTC().Format(time.RFC3339Nano)
+	return writeProfileDataArchiveManifest(archiveRoot, manifest)
+}
+
+// RestoreDeletedEnvironmentDataOffer moves an archived browser profile into a
+// freshly-created, still-empty target environment. It never merges browser
+// folders: if the target contains anything besides BrowserStudio's identity
+// pointer, it refuses rather than risking Cookies, extensions or wallet data.
+func (m *Manager) RestoreDeletedEnvironmentDataOffer(targetProfileID, archiveKey string) error {
+	m.InitData()
+	m.Mutex.Lock()
+	defer m.Mutex.Unlock()
+	target := m.Profiles[strings.TrimSpace(targetProfileID)]
+	if target == nil {
+		return fmt.Errorf("目标环境不存在")
+	}
+	if target.Running || m.BrowserProcesses[target.ProfileId] != nil {
+		return fmt.Errorf("请先停止目标环境再导入已删除环境的数据")
+	}
+	archiveRoot := m.ProfileRecoveryArchiveRoot()
+	manifest, err := readProfileDataArchiveManifest(archiveRoot, archiveKey)
+	if err != nil {
+		return err
+	}
+	if !manifest.DataAvailable || strings.TrimSpace(manifest.IgnoredAt) != "" {
+		return fmt.Errorf("该恢复归档不可用或已被忽略")
+	}
+	if archiveMatchReason(target, &manifest) == "" {
+		return fmt.Errorf("恢复归档与新建环境不匹配，已取消导入以保护数据")
+	}
+
+	archiveDir, err := profileArchiveDataPath(archiveRoot, manifest.ArchivedDataDir)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(archiveDir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("恢复归档目录不可用")
+	}
+	destination := m.ResolveUserDataDir(target)
+	if err := removeFreshProfileDataShell(destination); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
+		return fmt.Errorf("创建目标数据目录失败: %w", err)
+	}
+	if err := os.Rename(archiveDir, destination); err != nil {
+		return fmt.Errorf("导入恢复归档失败，原数据仍保留: %w", err)
+	}
+	if err := m.WriteProfileDataPointer(target, "closed", 0, time.Now()); err != nil {
+		// Do not leave a moved archive without its recovery index when the new
+		// environment pointer cannot be written. Put the complete directory back
+		// first; a later manual recovery remains possible and no wallet/Cookie
+		// data is stranded in a half-imported state.
+		rollbackErr := os.Rename(destination, archiveDir)
+		if rollbackErr == nil {
+			_ = os.MkdirAll(destination, 0700)
+			_ = m.WriteProfileDataPointer(target, "closed", 0, time.Now())
+		}
+		return errors.Join(
+			fmt.Errorf("更新新建环境的数据指向失败，已取消导入: %w", err),
+			rollbackErr,
+		)
+	}
+	if err := os.Remove(profileDataArchiveManifestPath(archiveRoot, manifest.ArchivedDataDir)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("数据已导入，但清理恢复索引失败: %w", err)
+	}
+	return nil
+}
+
+// CleanupExpiredDeletedEnvironmentData removes only BrowserStudio-created
+// deletion archives that have existed for at least six calendar months. It is
+// called once during ordinary main-client startup, never by a
+// continuous watcher. Active profile data is not inside this archive root.
+func (m *Manager) CleanupExpiredDeletedEnvironmentData(now time.Time) (ProfileDataArchiveCleanupResult, error) {
+	m.InitData()
+	m.Mutex.Lock()
+	defer m.Mutex.Unlock()
+	result := ProfileDataArchiveCleanupResult{Keys: []string{}}
+	archiveRoot := m.ProfileRecoveryArchiveRoot()
+	archives, err := ListProfileDataArchives(archiveRoot)
+	if err != nil {
+		return result, err
+	}
+	for _, archive := range archives {
+		if !archive.DataAvailable || !profileDataArchiveExpired(archive, now) {
+			result.Skipped++
+			continue
+		}
+		archiveDir, pathErr := profileArchiveDataPath(archiveRoot, archive.ArchivedDataDir)
+		if pathErr != nil {
+			result.Skipped++
+			continue
+		}
+		info, statErr := os.Lstat(archiveDir)
+		if statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			result.Skipped++
+			continue
+		}
+		if m.archiveDirectoryInUseLocked(archiveDir) {
+			// A user may deliberately configure an absolute custom data folder.
+			// Never treat a directory currently owned by an active environment as
+			// disposable merely because an old sidecar happens to reference it.
+			result.Skipped++
+			continue
+		}
+		if err := os.RemoveAll(archiveDir); err != nil {
+			return result, fmt.Errorf("删除过期环境恢复归档失败: %w", err)
+		}
+		if err := os.Remove(profileDataArchiveManifestPath(archiveRoot, archive.ArchivedDataDir)); err != nil && !os.IsNotExist(err) {
+			return result, fmt.Errorf("删除过期环境恢复索引失败: %w", err)
+		}
+		result.Removed++
+		result.Keys = append(result.Keys, archive.ArchivedDataDir)
+	}
+	return result, nil
+}
+
+func (m *Manager) archiveDirectoryInUseLocked(archiveDir string) bool {
+	archiveDir = strings.ToLower(filepath.ToSlash(filepath.Clean(archiveDir)))
+	for _, profile := range m.Profiles {
+		if profile == nil {
+			continue
+		}
+		resolved := strings.ToLower(filepath.ToSlash(filepath.Clean(m.ResolveUserDataDir(profile))))
+		if resolved == archiveDir {
+			return true
+		}
+	}
+	return false
+}
+
+func archiveMatchReason(target *Profile, archive *ProfileDataArchiveManifest) string {
+	if target == nil || archive == nil {
+		return ""
+	}
+	if original := strings.TrimSpace(archive.OriginalUserDataDir); original != "" &&
+		strings.TrimSpace(target.UserDataDir) != "" &&
+		strings.EqualFold(filepath.Clean(original), filepath.Clean(target.UserDataDir)) {
+		return "数据目录一致"
+	}
+	if name := strings.TrimSpace(target.ProfileName); name != "" && strings.EqualFold(name, strings.TrimSpace(archive.ProfileName)) {
+		return "环境名称一致"
+	}
+	return ""
+}
+
+func archiveArchivedTime(archive ProfileDataArchiveManifest) time.Time {
+	at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(archive.ArchivedAt))
+	if err != nil {
+		at, _ = time.Parse(time.RFC3339, strings.TrimSpace(archive.ArchivedAt))
+	}
+	return at
+}
+
+func profileDataArchiveExpired(archive ProfileDataArchiveManifest, now time.Time) bool {
+	anchor := archiveArchivedTime(archive)
+	return !anchor.IsZero() && !now.Before(anchor.AddDate(0, ProfileDataArchiveRetentionMonths, 0))
+}
+
+func profileDataArchiveManifestPath(archiveRoot, archiveKey string) string {
+	return filepath.Join(archiveRoot, archiveKey+".profile.json")
+}
+
+func profileArchiveDataPath(archiveRoot, archiveKey string) (string, error) {
+	archiveKey = strings.TrimSpace(archiveKey)
+	if archiveKey == "" || archiveKey == "." || archiveKey == ".." || filepath.Base(archiveKey) != archiveKey {
+		return "", fmt.Errorf("恢复归档标识无效")
+	}
+	return filepath.Join(archiveRoot, archiveKey), nil
+}
+
+func readProfileDataArchiveManifest(archiveRoot, archiveKey string) (ProfileDataArchiveManifest, error) {
+	var manifest ProfileDataArchiveManifest
+	if _, err := profileArchiveDataPath(archiveRoot, archiveKey); err != nil {
+		return manifest, err
+	}
+	data, err := os.ReadFile(profileDataArchiveManifestPath(archiveRoot, archiveKey))
+	if err != nil {
+		return manifest, fmt.Errorf("读取恢复归档索引失败: %w", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil || manifest.Version != 1 || manifest.ArchivedDataDir != archiveKey {
+		return ProfileDataArchiveManifest{}, fmt.Errorf("恢复归档索引无效")
+	}
+	return manifest, nil
+}
+
+func writeProfileDataArchiveManifest(archiveRoot string, manifest ProfileDataArchiveManifest) error {
+	if _, err := profileArchiveDataPath(archiveRoot, manifest.ArchivedDataDir); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	return fsutil.WriteFileAtomic(profileDataArchiveManifestPath(archiveRoot, manifest.ArchivedDataDir), data, 0600)
+}
+
+func removeFreshProfileDataShell(destination string) error {
+	info, err := os.Lstat(destination)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("新建环境的数据目录不可安全替换")
+	}
+	entries, err := os.ReadDir(destination)
+	if err != nil {
+		return fmt.Errorf("读取新建环境数据目录失败: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != ProfileDataPointerFileName || entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("新建环境已开始使用，已取消导入以保护现有数据")
+		}
+	}
+	if len(entries) == 1 {
+		if err := os.Remove(filepath.Join(destination, ProfileDataPointerFileName)); err != nil {
+			return fmt.Errorf("清理新建环境身份指向失败: %w", err)
+		}
+	}
+	if err := os.Remove(destination); err != nil {
+		return fmt.Errorf("清理空的新建环境数据目录失败: %w", err)
+	}
+	return nil
 }

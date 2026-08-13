@@ -894,10 +894,14 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 		// Authoritative window-sync registry first: the start path recorded the
 		// verified main frame, so a second window or popup can never win. The
 		// handle is re-validated (still a window, same owner PID, still a main
-		// frame) before being trusted.
+		// frame) before being trusted. A minimized registry frame is also valid:
+		// it is the main client’s launch-time identity and must be restored by an
+		// explicit arrange request rather than discarded as "no window".
 		if entry, ok := registryEntries[profileID]; ok {
-			if hwnd := validRuntimeSnapshotWindow(entry); hwnd != 0 && isMainEnvironmentBrowserFrame(hwnd, getWindowTitle(hwnd)) {
-				return hwnd
+			if hwnd := validRuntimeSnapshotWindow(entry); hwnd != 0 {
+				if isMainEnvironmentBrowserFrame(hwnd, getWindowTitle(hwnd)) {
+					return hwnd
+				}
 			}
 		}
 		// Prefer live main-frame resolution so we do not tile a wallet popup.
@@ -1297,7 +1301,7 @@ func (a *App) addFollowerToSyncLocal(profileId string) error {
 	// 再次检查是否已存在（避免竞态）
 	for _, fid := range syncState.followerIds {
 		if fid == profileId {
-		syncState.mu.Unlock()
+			syncState.mu.Unlock()
 			return fmt.Errorf("环境 %s 已在跟随列表中", profileId)
 		}
 	}

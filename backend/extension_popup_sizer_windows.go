@@ -4,6 +4,7 @@ package backend
 
 import (
 	"runtime"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -149,11 +150,29 @@ func isMainEnvironmentBrowserFrame(hwnd windows.HWND, title string) bool {
 	if isAuxiliaryIMEWindowTitleOrClass(title, getWindowClassName(hwnd)) {
 		return false
 	}
+	if isWindowMinimized(hwnd) {
+		// A minimized environment no longer has a trustworthy client rectangle
+		// on all Windows builds. Its frame was already selected by the client at
+		// launch, so accept only an unowned, non-popup Chromium top-level frame.
+		// This is the recovery path for taskbar -> sync-assistant arrangement;
+		// wallet/OAuth popup windows remain excluded by owner/style checks.
+		owner, _, _ := procGetWindow.Call(uintptr(hwnd), GW_OWNER)
+		style, _, _ := procGetWindowLongW.Call(uintptr(hwnd), GWL_STYLE)
+		return minimizedMainBrowserFrameEligible(getWindowClassName(hwnd), title, owner != 0, style)
+	}
 	w, h, ok := getClientSize(hwnd)
 	if !ok {
 		return false
 	}
 	return environmentFrameLooksLikeMain(w, h, title)
+}
+
+func minimizedMainBrowserFrameEligible(className, title string, hasOwner bool, style uintptr) bool {
+	primaryClass := strings.EqualFold(className, "Chrome_WidgetWin_1") || strings.EqualFold(className, "Chrome_MainWindow")
+	if !primaryClass || hasOwner || style&WS_POPUP != 0 {
+		return false
+	}
+	return !looksLikeServiceWorkerDevToolsTitle(title) && !isAuxiliaryIMEWindowTitleOrClass(title, className)
 }
 
 func getWindowClassName(hwnd windows.HWND) string {

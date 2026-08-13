@@ -106,6 +106,42 @@ func TestInstallIntoProfileDoesNotTouchLocalExtensionSettings(t *testing.T) {
 	}
 }
 
+func TestInstallPreservesExistingInvalidProfileExtensionDirectory(t *testing.T) {
+	root := t.TempDir()
+	extID := "cccccccccccccccccccccccccccccccc"
+	pkg := filepath.Join(root, "pkg", extID)
+	if err := os.MkdirAll(pkg, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "manifest.json"), []byte(`{"name":"W","version":"1.0","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	userData := filepath.Join(root, "user")
+	existing := filepath.Join(userData, "Default", "Extensions", extID, "1.0")
+	if err := os.MkdirAll(existing, 0755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(existing, "do-not-delete.txt")
+	if err := os.WriteFile(sentinel, []byte("user-owned-extension-files"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := installUnpackedExtensionIntoProfile(userData, pkg); err != nil {
+		t.Fatalf("safe shared-path fallback must still register extension: %v", err)
+	}
+	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "user-owned-extension-files" {
+		t.Fatalf("existing profile extension directory must be preserved: %v %q", err, data)
+	}
+	entry, ok := readPreferencesExtensionEntry(userData, extID)
+	if !ok {
+		t.Fatal("shared-path fallback must register extension")
+	}
+	path, _ := entry["path"].(string)
+	if normalizeExtensionPath(path) != normalizeExtensionPath(pkg) {
+		t.Fatalf("fallback must use verified shared package, got %q", path)
+	}
+}
+
 func TestApplyProfileNativeKeepsCLIUntilChromeDataExists(t *testing.T) {
 	root := t.TempDir()
 	extID := "cccccccccccccccccccccccccccccccc"

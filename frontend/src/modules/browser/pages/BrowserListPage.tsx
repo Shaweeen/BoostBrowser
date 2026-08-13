@@ -1724,7 +1724,7 @@ export function BrowserListPage() {
               />
             </FormItem>
           </div>
-          <p className="-mt-4 text-xs text-[var(--color-text-muted)]">非 TUN 时 VPN 只负责第一跳传输，网站最终看到环境选择的代理池 IP。</p>
+          <p className="-mt-4 text-xs text-[var(--color-text-muted)]">自动模式先直连环境代理（TUN 也只经过这一跳）；仅直连失败时才回退本地 VPN 网关，避免重复转发。网站最终看到环境选择的代理池 IP。</p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <FormItem label="启动就绪超时（毫秒）" hint="默认 3000，慢机器可调到 5000-10000">
               <Input

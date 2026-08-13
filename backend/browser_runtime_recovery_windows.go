@@ -41,35 +41,6 @@ var (
 	unquotedUserDataValueRe = regexp.MustCompile(`(?i)(?:^|\s)--user-data-dir=([^"\s]+)`)
 )
 
-func (a *App) startBrowserRuntimeReconciler() {
-	if a == nil {
-		return
-	}
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.New("Browser").Error("runtime reconciler goroutine panic recovered",
-					logger.F("error", r),
-				)
-			}
-		}()
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						logger.New("Browser").Error("reconcileBrowserRuntimeStateOnce panic recovered",
-							logger.F("error", r),
-						)
-					}
-				}()
-				a.reconcileBrowserRuntimeStateOnce()
-			}()
-		}
-	}()
-}
-
 // RefreshBrowserRuntimeState explicitly rescans the system and takes over
 // browser instances that survived a main-client restart (watchdog restart or
 // the manual “refresh running state” button). Returns true when at least one

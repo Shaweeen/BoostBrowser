@@ -106,9 +106,9 @@ func extensionIDFromPageURL(rawURL string) string {
 // closeAssignedExtensionAutoPagesAfterStart 在环境启动后的短窗口内，关闭已
 // 分配扩展自动打开的 chrome-extension:// 页面（onInstalled/onStartup 触发）。
 // 只关闭属于本次分配清单的扩展页面，绝不关闭 http(s) 工作标签或其他扩展。
-// 有界重试：慢启动/多开冷启动时扩展页面可能晚几秒才弹出，单次清扫会漏，
-// 因此做至多 3 次递增延时清扫（总计约 8s），到点即终止，绝不成为常驻后台
-// worker。用户稍后手动打开的扩展页面不在窗口内，不受影响。
+// 有界重试：仅覆盖浏览器交接给用户前的极短启动窗口（总计不超过约 2 秒），
+// 到点即终止，绝不成为常驻后台 worker。这样不会在用户已经开始操作后关闭其
+// 主动打开的扩展页面。
 func closeAssignedExtensionAutoPagesAfterStart(debugPort int, launchArgs []string) {
 	defer func() { _ = recover() }()
 	if debugPort <= 0 {
@@ -118,11 +118,10 @@ func closeAssignedExtensionAutoPagesAfterStart(debugPort int, launchArgs []strin
 	if len(assignedIDs) == 0 {
 		return
 	}
-	// 给扩展加载与自动弹页留出时间；窗口太短会导致清扫时页面还没创建。
+	// 给扩展加载与自动弹页留出时间；仅在启动交接前做两次短扫。
 	delays := []time.Duration{
-		2500 * time.Millisecond,
-		2500 * time.Millisecond,
-		3000 * time.Millisecond,
+		1200 * time.Millisecond,
+		800 * time.Millisecond,
 	}
 	for i, delay := range delays {
 		time.Sleep(delay)

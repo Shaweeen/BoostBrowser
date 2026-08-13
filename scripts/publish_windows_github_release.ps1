@@ -86,7 +86,11 @@ Require-File $NotesPath
 $preflight = Join-Path $PSScriptRoot 'preflight_windows_release.ps1'
 if (Test-Path -LiteralPath $preflight) {
     Write-Host "Running preflight_windows_release.ps1 -ExpectedVersion $Version ..." -ForegroundColor Cyan
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $preflight -ExpectedVersion $Version
+    $preflightArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $preflight, '-ExpectedVersion', $Version)
+    if (-not [string]::IsNullOrWhiteSpace($ApprovedGrowthReason)) {
+        $preflightArgs += @('-ApprovedGrowthReason', $ApprovedGrowthReason)
+    }
+    & powershell.exe @preflightArgs
     if ($LASTEXITCODE -ne 0) { throw 'Preflight failed. Fix version/tag/ledger/dirty tree before packaging.' }
 } else {
     $trackedChanges = @(& git status --porcelain --untracked-files=no)

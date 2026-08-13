@@ -502,7 +502,7 @@ export function CoreManagementPage() {
               value={settingsForm.proxyNetworkMode || 'auto'}
               onChange={e => setSettingsForm(prev => ({ ...prev, proxyNetworkMode: e.target.value as BrowserSettings['proxyNetworkMode'] }))}
               options={[
-                { value: 'auto', label: '自动（本地 VPN 网关优先）' },
+                { value: 'auto', label: '自动（环境代理优先，失败后本地 VPN 网关）' },
                 { value: 'local_gateway', label: '本地 VPN 网关（非 TUN）' },
                 { value: 'tun', label: 'TUN 接管第一跳' },
                 { value: 'direct', label: '直接连接' },

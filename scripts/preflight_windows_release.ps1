@@ -3,7 +3,8 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\preflight_windows_release.ps1 -ExpectedVersion 1.7.98
 param(
     [Parameter(Mandatory = $true)]
-    [string]$ExpectedVersion
+    [string]$ExpectedVersion,
+    [string]$ApprovedGrowthReason = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -76,8 +77,8 @@ foreach ($c in $mergedTags) {
 if ([string]::IsNullOrWhiteSpace($PreviousTag)) { Fail "No previous tag for health base" }
 Ok "health base = $PreviousTag (parent of $Tag)"
 
-$growthReason = ''
-if ($ExpectedVersion -match '^1\.7\.(9[5-9]|98)$') {
+$growthReason = $ApprovedGrowthReason.Trim()
+if ($growthReason -eq '' -and $ExpectedVersion -match '^1\.7\.(9[5-9]|98)$') {
     $growthReason = "v$ExpectedVersion recovery from v1.7.83 (preflight)"
 }
 $healthArgs = @(

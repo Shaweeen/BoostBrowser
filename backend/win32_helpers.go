@@ -16,34 +16,34 @@ import (
 // ============================================================================
 
 const (
-	WM_MOUSEMOVE   = 0x0200
-	WM_LBUTTONDOWN = 0x0201
-	WM_LBUTTONUP   = 0x0202
-	WM_RBUTTONDOWN = 0x0204
-	WM_RBUTTONUP   = 0x0205
-	WM_MBUTTONDOWN = 0x0207
-	WM_MBUTTONUP   = 0x0208
-	WM_MOUSEWHEEL  = 0x020A
-	WM_MOUSEHWHEEL = 0x020E
-	WM_KEYDOWN     = 0x0100
-	WM_KEYUP       = 0x0101
-	WM_CHAR        = 0x0102
-	WM_SYSKEYDOWN  = 0x0104
-	WM_SYSKEYUP    = 0x0105
-	WM_CLOSE       = 0x0010
-	MK_LBUTTON     = 0x0001
-	MK_RBUTTON     = 0x0002
-	MK_SHIFT       = 0x0004
-	MK_CONTROL     = 0x0008
-	MK_MBUTTON     = 0x0010
-	MK_NONE        = 0x0000
-	SWP_NOSIZE     = 0x0001
-	SWP_NOMOVE     = 0x0002
-	SWP_NOZORDER   = 0x0004
-	SWP_NOACTIVATE = 0x0010
-	SWP_SHOWWINDOW = 0x0040
-	GW_HWNDPREV    = 3
-	GW_OWNER       = 4
+	WM_MOUSEMOVE        = 0x0200
+	WM_LBUTTONDOWN      = 0x0201
+	WM_LBUTTONUP        = 0x0202
+	WM_RBUTTONDOWN      = 0x0204
+	WM_RBUTTONUP        = 0x0205
+	WM_MBUTTONDOWN      = 0x0207
+	WM_MBUTTONUP        = 0x0208
+	WM_MOUSEWHEEL       = 0x020A
+	WM_MOUSEHWHEEL      = 0x020E
+	WM_KEYDOWN          = 0x0100
+	WM_KEYUP            = 0x0101
+	WM_CHAR             = 0x0102
+	WM_SYSKEYDOWN       = 0x0104
+	WM_SYSKEYUP         = 0x0105
+	WM_CLOSE            = 0x0010
+	MK_LBUTTON          = 0x0001
+	MK_RBUTTON          = 0x0002
+	MK_SHIFT            = 0x0004
+	MK_CONTROL          = 0x0008
+	MK_MBUTTON          = 0x0010
+	MK_NONE             = 0x0000
+	SWP_NOSIZE          = 0x0001
+	SWP_NOMOVE          = 0x0002
+	SWP_NOZORDER        = 0x0004
+	SWP_NOACTIVATE      = 0x0010
+	SWP_SHOWWINDOW      = 0x0040
+	GW_HWNDPREV         = 3
+	GW_OWNER            = 4
 	WS_EX_TOPMOST       = 0x00000008
 	WS_EX_TOOLWINDOW    = 0x00000080
 	WS_EX_DLGMODALFRAME = 0x00000001
@@ -97,6 +97,7 @@ var (
 	procEnumWindows              = user32dll.NewProc("EnumWindows")
 	procGetWindowThreadProcessID = user32dll.NewProc("GetWindowThreadProcessId")
 	procIsWindowVisible          = user32dll.NewProc("IsWindowVisible")
+	procIsIconic                 = user32dll.NewProc("IsIconic")
 	procGetWindowTextLengthW     = user32dll.NewProc("GetWindowTextLengthW")
 	procGetForegroundWindow      = user32dll.NewProc("GetForegroundWindow")
 	procShowWindow               = user32dll.NewProc("ShowWindow")
@@ -189,6 +190,14 @@ func isWindowVisible(hwnd windows.HWND) bool {
 	return ret != 0
 }
 
+// isWindowMinimized deliberately uses IsIconic instead of visibility. A
+// minimized Chrome frame is still the user's running environment and must be
+// eligible for an explicit "arrange" command from the sync assistant.
+func isWindowMinimized(hwnd windows.HWND) bool {
+	ret, _, _ := procIsIconic.Call(uintptr(hwnd))
+	return ret != 0
+}
+
 func isAuxiliaryIMEWindowTitleOrClass(title, className string) bool {
 	lowerTitle := strings.ToLower(strings.TrimSpace(title))
 	lowerClass := strings.ToLower(strings.TrimSpace(className))
@@ -236,7 +245,8 @@ type processWindowsBatchSearch struct {
 
 func scoreBrowserTopLevelWindow(hwnd windows.HWND) (processWindowCandidate, bool) {
 	visible, _, _ := procIsWindowVisible.Call(uintptr(hwnd))
-	if visible == 0 {
+	minimized := isWindowMinimized(hwnd)
+	if visible == 0 && !minimized {
 		return processWindowCandidate{}, false
 	}
 
@@ -258,8 +268,14 @@ func scoreBrowserTopLevelWindow(hwnd windows.HWND) (processWindowCandidate, bool
 		}
 	}
 	clientW, clientH, ok := getClientSize(hwnd)
-	if !ok || !browserTopLevelClientSizeAllowed(clientW, clientH) {
+	if (!ok || !browserTopLevelClientSizeAllowed(clientW, clientH)) && !minimized {
 		return processWindowCandidate{}, false
+	}
+	// Windows can report a 0×0 client area while a top-level frame is iconic.
+	// Keep it in the candidate set; isMainEnvironmentBrowserFrame applies the
+	// stricter class/owner/style checks before a tile operation uses it.
+	if !ok {
+		clientW, clientH = 0, 0
 	}
 
 	score := len(title) + 10000 + clientW*clientH/1000

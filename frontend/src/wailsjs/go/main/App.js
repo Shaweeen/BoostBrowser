@@ -178,6 +178,18 @@ export function BrowserProfileDeleteWithCache(arg1, arg2) {
   return window['go']['main']['App']['BrowserProfileDeleteWithCache'](arg1, arg2);
 }
 
+export function BrowserProfileFindDeletedDataOffers(arg1) {
+  return window['go']['main']['App']['BrowserProfileFindDeletedDataOffers'](arg1);
+}
+
+export function BrowserProfileRestoreDeletedData(arg1, arg2) {
+  return window['go']['main']['App']['BrowserProfileRestoreDeletedData'](arg1, arg2);
+}
+
+export function BrowserProfileIgnoreDeletedData(arg1) {
+  return window['go']['main']['App']['BrowserProfileIgnoreDeletedData'](arg1);
+}
+
 export function BrowserProfileGetCode(arg1) {
   return window['go']['main']['App']['BrowserProfileGetCode'](arg1);
 }

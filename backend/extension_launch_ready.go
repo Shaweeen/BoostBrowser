@@ -26,8 +26,9 @@ import (
 //     reloads from the profile (protects wallet accounts / extension storage).
 //  4. Re-assign / remove clears the marker → one more adapt pass is required.
 //
-// Prep skips (scan/seed) also apply when ready. Post-start tab CDP cleanup was
-// removed — do not reintroduce it as a substitute for selective inject.
+// Prep skips (scan/seed) also apply when ready. A separate, short one-shot
+// startup cleanup may close extension pages that auto-open before handoff; it
+// is not a recurring monitor and must never replace selective injection.
 const extensionLaunchReadyMarkerName = ".boost_extension_launch_ready"
 
 type extensionLaunchReadyMarker struct {
@@ -303,6 +304,7 @@ func writeExtensionLaunchReadyMarker(userDataDir, profileID, assignmentFingerpri
 //     profile vault/settings under that ID — never overwrite those vaults);
 //   - missing LES on first open is OK once the package ID is stable, so Chrome
 //     can create vaults under the correct path on first use.
+//
 // Existing vault/account files are never modified here.
 func verifyAssignedExtensionsAgainstProfileData(userDataDir string, launchArgs []string) bool {
 	dirs := activeLoadExtensionDirs(launchArgs)
@@ -350,6 +352,7 @@ func verifyAssignedExtensionsAgainstProfileData(userDataDir string, launchArgs [
 //   - never overwrite, truncate, or delete existing Preferences entries,
 //     Local Extension Settings contents, Cookies, IndexedDB, or wallet state;
 //   - never write fake vault/account payloads.
+//
 // Returns how many packages lacked a stable key before repair, and how many
 // empty LES directories were created.
 func (a *App) completeAssignedExtensionProfileData(userDataDir string, launchArgs []string) (missingKeysBefore, createdScaffolds int) {

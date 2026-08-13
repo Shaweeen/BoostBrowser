@@ -39,7 +39,6 @@ type ExtensionIntegrityScanResult struct {
 }
 
 var (
-	extensionIntegrityScanOnce sync.Once
 	extensionIntegrityScanDone bool
 	extensionIntegrityScanMu   sync.Mutex
 )
@@ -334,8 +333,28 @@ func (a *App) BrowserExtensionSyncKnownToProfiles(profileIds []string) (*Extensi
 		}, nil
 	}
 	updatedSet := map[string]struct{}{}
+	skippedSet := map[string]struct{}{}
 	for _, pkg := range packages {
-		bind, err := a.bindExtensionDirToProfiles(profileIds, pkg)
+		// "同步已知扩展" is still an explicit user action, but it must obey
+		// the same no-overwrite rule as manual/global assignment. In particular,
+		// do not replace a loadable extension registration merely because this
+		// package is also known by BrowserStudio.
+		extID := resolveExtensionPackageID(pkg)
+		missing := a.filterProfilesMissingEquivalentExtension(profileIds, extID, readManifestNameFromDir(pkg))
+		missingSet := make(map[string]struct{}, len(missing))
+		for _, id := range missing {
+			missingSet[id] = struct{}{}
+		}
+		for _, id := range profileIds {
+			if _, needsBind := missingSet[id]; !needsBind {
+				skippedSet[id] = struct{}{}
+			}
+		}
+		if len(missing) == 0 {
+			continue
+		}
+
+		bind, err := a.bindExtensionDirToProfiles(missing, pkg)
 		if err != nil {
 			logger.New("Extension").Warn("同步扩展到环境失败",
 				logger.F("package", pkg),
@@ -356,12 +375,17 @@ func (a *App) BrowserExtensionSyncKnownToProfiles(profileIds []string) (*Extensi
 	}
 	return &ExtensionImportResult{
 		UpdatedProfiles: updated,
-		Message:         formatSyncKnownMessage(len(packages), len(updated)),
+		SkippedCount:    len(skippedSet),
+		Message:         formatSyncKnownMessage(len(packages), len(updated), len(skippedSet)),
 	}, nil
 }
 
-func formatSyncKnownMessage(pkgCount, profileCount int) string {
-	return fmt.Sprintf("已将 %d 个扩展包同步到 %d 个环境；首次打开环境完成适配后将停止重复验证", pkgCount, profileCount)
+func formatSyncKnownMessage(pkgCount, profileCount, skippedCount int) string {
+	message := fmt.Sprintf("已将 %d 个扩展包同步到 %d 个环境", pkgCount, profileCount)
+	if skippedCount > 0 {
+		message += fmt.Sprintf("；跳过已有可加载扩展的 %d 个环境（未覆盖钱包/扩展数据）", skippedCount)
+	}
+	return message + "；首次打开环境完成适配后将停止重复验证"
 }
 
 // collectKnownExtensionPackages returns unique absolute package dirs from global

@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { Layers } from 'lucide-react'
 import { Button, Card, ConfirmModal, FormItem, Input, Modal, Select, Textarea, toast } from '../../../shared/components'
 import type { BrowserCore, BrowserProfileInput, BrowserProxy, BrowserGroup } from '../types'
-import { batchCreateBrowserProfiles, fetchAllTags, fetchBrowserCores, fetchBrowserProxies, fetchBrowserSettings, fetchGroups, listKnownExtensionPackages, syncKnownExtensionsToProfiles } from '../api'
+import { batchCreateBrowserProfiles, fetchAllTags, fetchBrowserCores, fetchBrowserProxies, fetchBrowserSettings, fetchGroups, findDeletedEnvironmentDataOffers, ignoreDeletedEnvironmentData, listKnownExtensionPackages, restoreDeletedEnvironmentData, syncKnownExtensionsToProfiles } from '../api'
+import type { DeletedEnvironmentDataOffer } from '../api'
 import { FingerprintPanel } from '../components/FingerprintPanel'
 import { TagInput } from '../components/TagInput'
 import { GroupSelector } from '../components/GroupSelector'
@@ -45,6 +46,26 @@ export function BatchCreatePage() {
   const [isDirty, setIsDirty] = useState(false)
   const [leaveConfirm, setLeaveConfirm] = useState(false)
   const [saveError, setSaveError] = useState('')
+  const [deletedDataOffers, setDeletedDataOffers] = useState<DeletedEnvironmentDataOffer[]>([])
+  const [deletedDataBusy, setDeletedDataBusy] = useState(false)
+  const [createdProfileIds, setCreatedProfileIds] = useState<string[]>([])
+  const [restoredProfileIds, setRestoredProfileIds] = useState<string[]>([])
+
+  const syncKnownExtensionsIfRequested = async (profileIds: string[]) => {
+    if (profileIds.length === 0) return
+    const packages = await listKnownExtensionPackages().catch(() => [])
+    if (packages.length === 0) return
+    const ok = window.confirm(
+      `当前已有 ${packages.length} 个扩展包。\n是否同步到本次新建的 ${profileIds.length} 个环境？\n\n同步后各环境首次打开完成适配即可；完整后不再重复验证。`,
+    )
+    if (!ok) return
+    try {
+      const result = await syncKnownExtensionsToProfiles(profileIds)
+      toast.success(result?.message || '扩展已同步到新环境')
+    } catch (syncErr: any) {
+      toast.error(syncErr?.message || '同步扩展失败')
+    }
+  }
 
   useEffect(() => {
     const loadData = async () => {
@@ -95,23 +116,17 @@ export function BatchCreatePage() {
       const lastName = created[created.length - 1]?.profileName
       const range = firstName && lastName ? `（${firstName} 至 ${lastName}）` : ''
       toast.success(`成功创建 ${created.length} 个实例${range}`)
-      const packages = await listKnownExtensionPackages().catch(() => [])
       const ids = (created || []).map((p: { profileId?: string }) => p.profileId).filter(Boolean) as string[]
-      if (packages.length > 0 && ids.length > 0) {
-        const ok = window.confirm(
-          `当前已有 ${packages.length} 个扩展包。\n是否同步到本次新建的 ${ids.length} 个环境？\n\n同步后各环境首次打开完成适配即可；完整后不再重复验证。`,
-        )
-        if (ok) {
-          try {
-            const result = await syncKnownExtensionsToProfiles(ids)
-            toast.success(result?.message || '扩展已同步到新环境')
-          } catch (syncErr: any) {
-            toast.error(syncErr?.message || '同步扩展失败')
-          }
-        }
+      const offers = await findDeletedEnvironmentDataOffers(ids).catch(() => [])
+      if (offers.length > 0) {
+        setCreatedProfileIds(ids)
+        setRestoredProfileIds([])
+        setDeletedDataOffers(offers)
+      } else {
+        await syncKnownExtensionsIfRequested(ids)
+        navigate('/browser/list')
       }
       setIsDirty(false)
-      navigate('/browser/list')
     } catch (error: any) {
       setSaveError(typeof error === 'string' ? error : error?.message || '批量创建失败')
     } finally {
@@ -121,6 +136,56 @@ export function BatchCreatePage() {
 
   const handleBack = () => {
     if (isDirty) { setLeaveConfirm(true) } else { navigate('/browser/list') }
+  }
+
+  const handleRestoreDeletedData = async () => {
+    if (deletedDataOffers.length === 0 || deletedDataBusy) return
+    setDeletedDataBusy(true)
+    try {
+      const pendingOffers = [...deletedDataOffers]
+      const restored = new Set(restoredProfileIds)
+      for (let index = 0; index < pendingOffers.length; index++) {
+        const offer = pendingOffers[index]
+        await restoreDeletedEnvironmentData(offer.targetProfileId, offer.archiveKey)
+        restored.add(offer.targetProfileId)
+        setRestoredProfileIds(Array.from(restored))
+        // Persist partial progress. If a later item cannot be restored, the
+        // dialog only keeps the untouched archives and retry is safe.
+        setDeletedDataOffers(pendingOffers.slice(index + 1))
+      }
+      toast.success(`已导入 ${restored.size} 个已删除环境的数据；Cookies、扩展与钱包数据保持原样`)
+      await syncKnownExtensionsIfRequested(createdProfileIds.filter(id => !restored.has(id)))
+      setDeletedDataOffers([])
+      setCreatedProfileIds([])
+      setRestoredProfileIds([])
+      navigate('/browser/list')
+    } catch (error: any) {
+      toast.error(error?.message || '导入已删除环境数据失败')
+    } finally {
+      setDeletedDataBusy(false)
+    }
+  }
+
+  const handleIgnoreDeletedData = async () => {
+    if (deletedDataOffers.length === 0 || deletedDataBusy) return
+    setDeletedDataBusy(true)
+    try {
+      const pendingOffers = [...deletedDataOffers]
+      for (let index = 0; index < pendingOffers.length; index++) {
+        await ignoreDeletedEnvironmentData(pendingOffers[index].archiveKey)
+        setDeletedDataOffers(pendingOffers.slice(index + 1))
+      }
+      toast.info('已按你的选择不导入；这些归档不会再次提示，将在删除满 6 个月后自动清理')
+      await syncKnownExtensionsIfRequested(createdProfileIds.filter(id => !restoredProfileIds.includes(id)))
+      setDeletedDataOffers([])
+      setCreatedProfileIds([])
+      setRestoredProfileIds([])
+      navigate('/browser/list')
+    } catch (error: any) {
+      toast.error(error?.message || '记录忽略选择失败')
+    } finally {
+      setDeletedDataBusy(false)
+    }
   }
 
   const defaultCore = cores.find(c => c.isDefault)
@@ -295,6 +360,28 @@ export function BatchCreatePage() {
         footer={<Button onClick={() => setSaveError('')}>知道了</Button>}
       >
         <div className="text-[var(--color-text-secondary)]">{saveError}</div>
+      </Modal>
+
+      <Modal
+        open={deletedDataOffers.length > 0}
+        onClose={handleIgnoreDeletedData}
+        title="发现已删除环境的数据"
+        width="520px"
+        closable={!deletedDataBusy}
+        footer={
+          <>
+            <Button variant="secondary" onClick={handleIgnoreDeletedData} disabled={deletedDataBusy}>不导入</Button>
+            <Button onClick={handleRestoreDeletedData} loading={deletedDataBusy}>导入 {deletedDataOffers.length} 个环境数据</Button>
+          </>
+        }
+      >
+        <div className="space-y-3 text-sm text-[var(--color-text-secondary)]">
+          <p>本次新建的 {deletedDataOffers.length} 个环境与已删除环境的数据目录或名称完全匹配，是否导入原数据？</p>
+          <div className="max-h-40 overflow-y-auto rounded border border-[var(--color-border-default)] divide-y divide-[var(--color-border-default)]">
+            {deletedDataOffers.map(offer => <div key={offer.archiveKey} className="px-3 py-2 text-xs">{offer.targetProfileName} ← {offer.archivedProfileName}（{offer.matchReason}）</div>)}
+          </div>
+          <p className="text-xs text-[var(--color-text-muted)]">只导入尚未使用的新建环境。选择“不导入”后不再提示；归档会在删除满 6 个月后自动清理并写入日志。</p>
+        </div>
       </Modal>
     </div>
   )

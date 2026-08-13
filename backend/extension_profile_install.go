@@ -24,7 +24,8 @@ import (
 // Reliable unpacked persistence (same as chrome://extensions "Load unpacked"):
 //   - extensions.ui.developer_mode = true
 //   - extensions.settings[id] with location = 4 (UNPACKED/LOAD)
-//   - path = absolute path to the shared program package (no per-profile copy)
+//   - path = a verified profile-local package when it can be materialized, or
+//     the verified shared program package as a non-destructive fallback
 //   - active_permissions / granted_permissions filled from manifest
 //   - state = 1 (ENABLED)
 // Then strip --load-extension when registration is already valid.
@@ -32,7 +33,8 @@ import (
 // Policy:
 //   - never touch Local Extension Settings / Cookies / IndexedDB (wallets);
 //   - never wipe an existing Preferences.settings[id] vault-bearing entry;
-//   - no multi-MB package copy on the start critical path;
+//   - package copies only happen during explicit assignment, never on the
+//     environment-start critical path;
 //   - CLI --load-extension only as fallback when prefs registration fails.
 
 // Chromium Extension::Location
@@ -46,7 +48,11 @@ const (
 // load it via --load-extension even when:
 //   - branded Chrome 137+ policy is in play (with DisableLoadExtension flag off)
 //   - the install directory later moves (shared path would go stale)
+//
 // If a valid materialization already exists, it is reused (no re-copy).
+// An existing invalid/non-empty directory is never removed or overwritten:
+// it may be Chrome-owned extension code from a previous version. In that
+// case the caller safely falls back to registering the verified shared package.
 func materializeExtensionPackageForProfile(userDataDir, packageDir string) (localPath, extID, version string, err error) {
 	userDataDir = strings.TrimSpace(userDataDir)
 	packageDir = strings.TrimSpace(packageDir)
@@ -74,16 +80,30 @@ func materializeExtensionPackageForProfile(userDataDir, packageDir string) (loca
 	if validateUnpackedExtensionManifest(dest) == nil {
 		return dest, extID, version, nil
 	}
-	if err := os.RemoveAll(dest); err != nil && !os.IsNotExist(err) {
-		return "", "", "", fmt.Errorf("profile materialize: clear dest: %w", err)
+	if _, statErr := os.Stat(dest); statErr == nil {
+		if directoryHasAnyFile(dest) {
+			return "", "", "", fmt.Errorf("profile materialize: existing profile extension directory is invalid and was preserved: %s", dest)
+		}
+		// Only an empty directory is safe to remove. It cannot contain Chrome
+		// extension code or wallet data.
+		if err := os.Remove(dest); err != nil {
+			return "", "", "", fmt.Errorf("profile materialize: remove empty dest: %w", err)
+		}
+	} else if !os.IsNotExist(statErr) {
+		return "", "", "", fmt.Errorf("profile materialize: inspect dest: %w", statErr)
 	}
-	if err := copyExtensionPackageTree(absPkg, dest); err != nil {
-		_ = os.RemoveAll(dest)
+	staging := dest + ".boost-staging-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	if err := copyExtensionPackageTree(absPkg, staging); err != nil {
+		_ = os.RemoveAll(staging)
 		return "", "", "", fmt.Errorf("profile materialize: copy: %w", err)
 	}
-	if err := validateUnpackedExtensionManifest(dest); err != nil {
-		_ = os.RemoveAll(dest)
+	if err := validateUnpackedExtensionManifest(staging); err != nil {
+		_ = os.RemoveAll(staging)
 		return "", "", "", fmt.Errorf("profile materialize: dest invalid after copy: %w", err)
+	}
+	if err := os.Rename(staging, dest); err != nil {
+		_ = os.RemoveAll(staging)
+		return "", "", "", fmt.Errorf("profile materialize: promote staging: %w", err)
 	}
 	return dest, extID, version, nil
 }
@@ -334,35 +354,35 @@ func ensurePreferencesUnpackedExtension(userDataDir, extID, absPackageDir, versi
 	if existing == nil {
 		settings[extID] = map[string]any{
 			"active_permissions": map[string]any{
-				"api":                 apiPerms,
-				"explicit_host":       hostPerms,
+				"api":                  apiPerms,
+				"explicit_host":        hostPerms,
 				"manifest_permissions": apiPerms,
-				"scriptable_host":     hostPerms,
+				"scriptable_host":      hostPerms,
 			},
 			"granted_permissions": map[string]any{
-				"api":                 apiPerms,
-				"explicit_host":       hostPerms,
+				"api":                  apiPerms,
+				"explicit_host":        hostPerms,
 				"manifest_permissions": apiPerms,
-				"scriptable_host":     hostPerms,
+				"scriptable_host":      hostPerms,
 			},
-			"commands":                     map[string]any{},
-			"content_settings":             []any{},
-			"creation_flags":               float64(1),
-			"from_webstore":                false,
-			"incognito_content_settings":   []any{},
-			"incognito_preferences":        map[string]any{},
-			"install_time":                 now,
-			"first_install_time":           now,
-			"last_update_time":             now,
-			"location":                     float64(chromeExtLocationUnpacked),
-			"manifest":                     manifestObj,
-			"path":                         absPackageDir,
-			"preferences":                  map[string]any{},
-			"regular_only_preferences":     map[string]any{},
-			"state":                        float64(1),
-			"was_installed_by_default":     false,
-			"was_installed_by_oem":         false,
-			"withholding_permissions":      false,
+			"commands":                   map[string]any{},
+			"content_settings":           []any{},
+			"creation_flags":             float64(1),
+			"from_webstore":              false,
+			"incognito_content_settings": []any{},
+			"incognito_preferences":      map[string]any{},
+			"install_time":               now,
+			"first_install_time":         now,
+			"last_update_time":           now,
+			"location":                   float64(chromeExtLocationUnpacked),
+			"manifest":                   manifestObj,
+			"path":                       absPackageDir,
+			"preferences":                map[string]any{},
+			"regular_only_preferences":   map[string]any{},
+			"state":                      float64(1),
+			"was_installed_by_default":   false,
+			"was_installed_by_oem":       false,
+			"withholding_permissions":    false,
 		}
 	} else {
 		// Heal registration without wiping Chrome-written wallet metadata.
@@ -904,6 +924,7 @@ func disableUnassignedProfileExtensions(userDataDir string, assignedDirs map[str
 // applyProfileNativeExtensionLaunchArgs is the START-PATH policy (read-only):
 //   - if the environment already has the extension → cancel CLI for that package
 //   - otherwise keep --load-extension for first adapt only
+//
 // Never writes Preferences, LES, Cookies, or package files.
 func applyProfileNativeExtensionLaunchArgs(args []string, userDataDir string) (next []string, present, needCLI int) {
 	args = normalizeLoadExtensionArgs(args)

@@ -137,7 +137,7 @@ export function BrowserSettingsModal({ open, onClose, settings: initSettings, co
               value={settings.proxyNetworkMode || 'auto'}
               onChange={e => setSettings(p => ({ ...p, proxyNetworkMode: e.target.value as BrowserSettings['proxyNetworkMode'] }))}
               options={[
-                { value: 'auto', label: '自动（本地 VPN 网关优先，失败后直连/TUN）' },
+                { value: 'auto', label: '自动（环境代理优先，失败后本地 VPN 网关）' },
                 { value: 'local_gateway', label: '本地 VPN 网关（非 TUN 双层代理）' },
                 { value: 'tun', label: 'TUN 接管第一跳' },
                 { value: 'direct', label: '直接连接 IP 代理服务器' },
@@ -150,7 +150,7 @@ export function BrowserSettingsModal({ open, onClose, settings: initSettings, co
               onChange={e => setSettings(p => ({ ...p, localVpnProxy: e.target.value }))}
               placeholder="例如：http://127.0.0.1:7897 或 socks5://127.0.0.1:7891"
             />
-            <p className="mt-1 text-xs text-[var(--color-text-muted)]">非 TUN 模式下作为第一跳；最终网站出口仍是环境选择的 IP 代理。</p>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">自动模式仅在环境代理直连失败时使用此第一跳；TUN 接管时不叠加本地网关，最终出口仍是环境选择的 IP 代理。</p>
           </FormItem>
         </div>
       </Modal>

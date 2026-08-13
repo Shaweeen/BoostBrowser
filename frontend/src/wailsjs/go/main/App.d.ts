@@ -90,6 +90,12 @@ export function BrowserProfileDelete(arg1:string):Promise<void>;
 
 export function BrowserProfileDeleteWithCache(arg1:string,arg2:boolean):Promise<void>;
 
+export function BrowserProfileFindDeletedDataOffers(arg1:Array<string>):Promise<Array<browser.ProfileDataArchiveOffer>>;
+
+export function BrowserProfileRestoreDeletedData(arg1:string,arg2:string):Promise<void>;
+
+export function BrowserProfileIgnoreDeletedData(arg1:string):Promise<void>;
+
 export function BrowserProfileGetCode(arg1:string):Promise<string>;
 
 export function BrowserGlobalExtensionImport(arg1:string):Promise<backend.ExtensionImportResult>;
