@@ -93,19 +93,24 @@ func TestProfileExtensionRecoveryRejectsIdentityMismatchAndDoesNotWrite(t *testi
 	}
 }
 
-func TestStripBrowserStudioManagedExtensionLaunchArgsKeepsUserPackage(t *testing.T) {
+func TestProfileExtensionRecoveryKeepsSavedManagedPackageAndEnablesCLI(t *testing.T) {
 	root := t.TempDir()
 	managed := filepath.Join(root, "data", "extensions", "imported")
 	user := filepath.Join(root, "user-extension")
-	args, suppressed := stripBrowserStudioManagedExtensionLaunchArgs([]string{
+	args := []string{
 		"--load-extension=" + filepath.Join(managed, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") + "," + user,
 		"--proxy-server=direct://",
-	}, managed)
-	if suppressed != 1 {
-		t.Fatalf("suppressed = %d, want 1", suppressed)
 	}
+	args, recovered := appendProfileExtensionRecoveryLaunchArgs(args, filepath.Join(root, "profile"))
+	if recovered != 0 {
+		t.Fatalf("unexpected recovery count = %d", recovered)
+	}
+	args = ensureLoadExtensionCommandLineSwitchEnabled(normalizeLoadExtensionArgs(args))
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, user) || strings.Contains(joined, managed) {
-		t.Fatalf("unexpected args after strip: %v", args)
+	if !strings.Contains(joined, user) || !strings.Contains(joined, managed) {
+		t.Fatalf("saved extension paths must survive startup: %v", args)
+	}
+	if !strings.Contains(joined, "DisableLoadExtensionCommandLineSwitch") {
+		t.Fatalf("Chrome 137+ CLI compatibility switch missing: %v", args)
 	}
 }

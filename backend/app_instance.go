@@ -446,38 +446,28 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = append(args, effectiveFingerprintArgs...)
-	// BrowserStudio-managed unpacked packages are intentionally not injected at
-	// start. User-installed Chrome/Web Store extensions have priority; manager
-	// assignments remain metadata until their installation can be performed via a
-	// Chromium-owned path instead of editing Preferences.
-	runtimeProfileLaunchArgs, suppressedManagedPackages := stripBrowserStudioManagedExtensionLaunchArgs(
-		sanitizedProfileLaunchArgs,
-		a.extensionPackageRoot(),
-		filepath.Join(a.appRoot, "extensions", "imported"),
-	)
-	if suppressedManagedPackages > 0 {
-		log.Info("启动时跳过 BrowserStudio 托管扩展注入，优先保留用户浏览器扩展",
-			logger.F("profile_id", profileId),
-			logger.F("suppressed_packages", suppressedManagedPackages),
-		)
-	}
-	args = append(args, runtimeProfileLaunchArgs...)
+	// A legacy environment can keep the only verified copy of an assigned
+	// extension in its saved --load-extension path. Do not strip that path: doing
+	// so makes the extension disappear while its Chrome-owned wallet/extension
+	// state remains in data. These arguments are used for this launch only; no
+	// Preferences, Local State, Cookies, or extension storage is rewritten.
+	args = append(args, sanitizedProfileLaunchArgs...)
 	args = append(args, sanitizedExtraLaunchArgs...)
-	if isCloakSelectedCore {
-		// Cloak/ungoogled Chromium needs its local Web Store bridge; branded
-		// Chrome does not. This is prepared once per client process and injected
-		// only into Cloak starts, never persisted as a user/global extension.
-		if helperDir := a.cloakWebStoreHelperForLaunch(); helperDir != "" {
-			args = addExtensionDirToLaunchArgs(args, helperDir)
-		}
-	}
+	// Do not inject BrowserStudio's Web Store helper at environment startup.
+	// Existing user extensions and their original extension IDs take priority;
+	// the helper is not required to run those extensions and must not become an
+	// unexpected extra item in chrome://extensions.
 	args = appendChromeTestingInfobarSuppressArg(args, isCloakSelectedCore)
 	// One bounded, read-only recovery pass: only if Chromium's Preferences no
 	// longer knows an extension while its profile-owned package still exists with
 	// a stable matching ID. It neither edits the profile nor runs after startup.
 	args, recoveredUserExtensions := appendProfileExtensionRecoveryLaunchArgs(args, userDataDir)
+	args = normalizeLoadExtensionArgs(args)
+	// Chrome 137+ disables --load-extension by default. Apply the compatibility
+	// switch whenever this launch has an existing extension path, including a
+	// legacy saved assignment, not only when the bounded recovery found one.
+	args = ensureLoadExtensionCommandLineSwitchEnabled(args)
 	if recoveredUserExtensions > 0 {
-		args = ensureLoadExtensionCommandLineSwitchEnabled(args)
 		log.Info("已为本次启动临时恢复用户已有扩展（未改写浏览器数据）",
 			logger.F("profile_id", profileId),
 			logger.F("recovered_extensions", recoveredUserExtensions),
@@ -511,7 +501,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
-	userLaunchExtensionCount := len(activeLoadExtensionDirs(runtimeProfileLaunchArgs))
+	userLaunchExtensionCount := len(activeLoadExtensionDirs(sanitizedProfileLaunchArgs))
 	if userLaunchExtensionCount > 0 {
 		log.Info("启动时保留用户指定的扩展启动参数（不改写用户数据）",
 			logger.F("profile_id", profileId),
