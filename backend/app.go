@@ -53,23 +53,26 @@ type App struct {
 	version          string
 	activationStatus activation.Status
 
-	forceQuit          bool       // 强制退出标志，用于跳过 OnBeforeClose 的拦截
-	quitMode           quitMode   // 退出模式：全量退出 / 仅退出应用
-	maintenanceMu      sync.Mutex // 维护类操作（初始化/导入/导出）互斥锁
-	browserCloseMu     sync.Mutex // 环境关闭按 Profile ID/PID 串行确认写盘
-	bridgeMu           sync.Mutex
-	xrayBridgeRefs     map[string]string
-	rabbyImportMu      sync.Mutex
-	rabbyImports       map[string]*rabbyWalletImportSession
-	rabbyImportActive  map[string]bool
-	legacyRecoveryMu   sync.Mutex
-	legacyRecovery     *legacyDataRecoverySession
-	startupDataMu      sync.RWMutex
-	startupDataStatus  StartupDataCompatibilityStatus
-	stopServicesOnce   sync.Once
-	finalizeOnce       sync.Once
-	updateMu           sync.Mutex
-	verifiedUpdatePath string
+	forceQuit           bool       // 强制退出标志，用于跳过 OnBeforeClose 的拦截
+	quitMode            quitMode   // 退出模式：全量退出 / 仅退出应用
+	maintenanceMu       sync.Mutex // 维护类操作（初始化/导入/导出）互斥锁
+	browserCloseMu      sync.Mutex // 环境关闭按 Profile ID/PID 串行确认写盘
+	bridgeMu            sync.Mutex
+	xrayBridgeRefs      map[string]string
+	rabbyImportMu       sync.Mutex
+	rabbyImports        map[string]*rabbyWalletImportSession
+	rabbyImportActive   map[string]bool
+	legacyRecoveryMu    sync.Mutex
+	legacyRecovery      *legacyDataRecoverySession
+	startupDataMu       sync.RWMutex
+	startupDataStatus   StartupDataCompatibilityStatus
+	stopServicesOnce    sync.Once
+	finalizeOnce        sync.Once
+	updateMu            sync.Mutex
+	verifiedUpdatePath  string
+	cloakStoreOnce      sync.Once
+	cloakStoreHelperDir string
+	cloakStoreHelperErr error
 
 	// syncProfileReloadAt throttles the sync assistant's periodic SQLite
 	// profile-table reload (the panel process is a separate process whose
@@ -248,6 +251,10 @@ func (a *App) startup(ctx context.Context) {
 	// 一次性迁移：若 SQLite 表为空则从旧文件导入
 	a.migrateToSQLite()
 	a.browserMgr.InitData()
+	// Extension packages used to live beside the executable. Migrate those
+	// program files before any environment can be opened, preserving every
+	// profile, wallet vault, Cookie and legacy package in place.
+	a.migrateLegacyExtensionPackageStore()
 	a.initializeActiveDataCompatibility(activeDataRoot, dataExisted)
 	if !a.panelMode {
 		// Deletion archives are not active user data. Check their six-month

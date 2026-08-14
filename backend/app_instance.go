@@ -191,6 +191,10 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 	sanitizedProfileLaunchArgs, managedProfileArgs := sanitizeManagedLaunchArgs(profile.LaunchArgs)
 	sanitizedProfileLaunchArgs, managedWindowPlacementArgs := sanitizeManagedWindowPlacementArgs(sanitizedProfileLaunchArgs)
+	// Resolve only BrowserStudio-owned legacy extension paths to the migrated
+	// data/ package for this launch. Saved user arguments and external paths are
+	// deliberately left untouched.
+	sanitizedProfileLaunchArgs = a.resolveLegacyManagedExtensionLaunchArgs(sanitizedProfileLaunchArgs)
 	sanitizedExtraLaunchArgs, managedExtraArgs := sanitizeManagedLaunchArgs(normalizedExtraLaunchArgs)
 	logManagedLaunchArgOverrides(log, profileId, "profile.launchArgs", managedProfileArgs)
 	logManagedLaunchArgOverrides(log, profileId, "profile.launchArgs.windowPlacement", managedWindowPlacementArgs)
@@ -447,6 +451,14 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	args = append(args, effectiveFingerprintArgs...)
 	args = append(args, sanitizedProfileLaunchArgs...)
 	args = append(args, sanitizedExtraLaunchArgs...)
+	if isCloakSelectedCore {
+		// Cloak/ungoogled Chromium needs its local Web Store bridge; branded
+		// Chrome does not. This is prepared once per client process and injected
+		// only into Cloak starts, never persisted as a user/global extension.
+		if helperDir := a.cloakWebStoreHelperForLaunch(); helperDir != "" {
+			args = addExtensionDirToLaunchArgs(args, helperDir)
+		}
+	}
 	args = appendChromeTestingInfobarSuppressArg(args, isCloakSelectedCore)
 	args, _, _ = applyProfileNativeExtensionLaunchArgs(args, userDataDir)
 	args = ensureLoadExtensionCommandLineSwitchEnabled(args)

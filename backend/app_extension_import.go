@@ -318,13 +318,20 @@ func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionIm
 		}
 	}
 	if len(unchecked) == 0 && candidateID != "" && extensionManifestExists(a.globalExtensionDir(candidateID)) {
-		return &ExtensionImportResult{
-			ExtensionDir:    a.globalExtensionDir(candidateID),
-			ExtensionID:     candidateID,
-			UpdatedProfiles: []string{},
-			SkippedCount:    len(targetIDs),
-			Message:         formatExtensionAssignMessage(candidateID, "", len(targetIDs), len(targetIDs), 0, 0, 0, 0),
-		}, nil
+		// Registry completion is only a record of a past click. It is not proof
+		// that every current environment still has a loadable package after an
+		// upgrade, manual data restore or a moved install directory.
+		missing := a.filterProfilesMissingEquivalentExtension(targetIDs, candidateID, readManifestNameFromDir(a.globalExtensionDir(candidateID)))
+		if len(missing) == 0 {
+			return &ExtensionImportResult{
+				ExtensionDir:    a.globalExtensionDir(candidateID),
+				ExtensionID:     candidateID,
+				UpdatedProfiles: []string{},
+				SkippedCount:    len(targetIDs),
+				Message:         formatExtensionAssignMessage(candidateID, "", len(targetIDs), len(targetIDs), 0, 0, 0, 0),
+			}, nil
+		}
+		unchecked = missing
 	}
 
 	extID, extDir, previousVersion, extensionVersion, err := a.downloadAndInstallExtension(downloadAddress)
@@ -506,9 +513,8 @@ func (a *App) downloadAndInstallExtension(downloadAddress string) (string, strin
 			if isChromiumWebStoreHelperExtension(extID, extDir) {
 				return "", "", "", "", fmt.Errorf("不能分配内置 Web Store 助手扩展。请重新从 Chrome 网上应用店或 .crx 导入业务扩展（需代理）")
 			}
-			// Reuse the program package without a network round-trip. Missing
-			// manifest keys are repaired at environment start (and after a real
-			// CRX re-download) so offline distribution and unit tests stay fast.
+			// Reuse the verified program package without a network round-trip.
+			// Assignment itself still validates each target environment below.
 			version := readManifestVersionFromDir(extDir)
 			return extID, extDir, version, version, nil
 		}
@@ -547,7 +553,7 @@ func (a *App) downloadAndInstallExtension(downloadAddress string) (string, strin
 		version := readManifestVersionFromDir(extDir)
 		return extID, extDir, version, version, nil
 	}
-	extDir, previousVersion, extensionVersion, err := installUnpackedExtension(a.appRoot, extID, zipPayload, publicKey)
+	extDir, previousVersion, extensionVersion, err := installUnpackedExtensionAt(a.extensionPackageRoot(), extID, zipPayload, publicKey)
 	if err != nil {
 		return "", "", "", "", err
 	}
@@ -1198,8 +1204,18 @@ func unzipBytes(data []byte, dest string) error {
 	return nil
 }
 
+// installUnpackedExtension keeps the historical helper contract used by unit
+// tests and offline tools. Application code uses installUnpackedExtensionAt
+// with App.extensionPackageRoot so package code survives an application update.
 func installUnpackedExtension(appRoot string, extID string, zipPayload []byte, publicKey []byte) (string, string, string, error) {
-	parent := filepath.Join(appRoot, "extensions", "imported")
+	return installUnpackedExtensionAt(filepath.Join(appRoot, "extensions", "imported"), extID, zipPayload, publicKey)
+}
+
+func installUnpackedExtensionAt(parent string, extID string, zipPayload []byte, publicKey []byte) (string, string, string, error) {
+	parent = strings.TrimSpace(parent)
+	if parent == "" {
+		return "", "", "", fmt.Errorf("创建扩展目录失败：目录为空")
+	}
 	if err := os.MkdirAll(parent, 0755); err != nil {
 		return "", "", "", fmt.Errorf("创建扩展目录失败：%w", err)
 	}
@@ -1483,7 +1499,7 @@ func (a *App) profileExtensionRegistryPath() string {
 }
 
 func (a *App) globalExtensionDir(extensionID string) string {
-	return filepath.Join(a.appRoot, "extensions", "imported", safePathName(strings.TrimSpace(extensionID)))
+	return filepath.Join(a.extensionPackageRoot(), safePathName(strings.TrimSpace(extensionID)))
 }
 
 func (a *App) loadGlobalExtensionRegistry() (globalExtensionRegistry, error) {

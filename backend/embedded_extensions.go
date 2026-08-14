@@ -37,12 +37,15 @@ const (
 	cloakWebStoreHelperVersionFn = ".embedded_version"
 )
 
-// cloakWebStoreHelperPath 返回 helper 扩展在用户机上的目标路径。
+// cloakWebStoreHelperPath returns the helper's persistent package path. It is
+// deliberately under data/: the installer/updater may replace application
+// files, but must never make an already usable Cloak environment lose Chrome
+// Web Store support.
 func cloakWebStoreHelperPath(appRoot string) string {
 	if strings.TrimSpace(appRoot) == "" {
 		return ""
 	}
-	return filepath.Join(appRoot, "extensions", cloakWebStoreHelperDirName)
+	return filepath.Join(appRoot, "data", "extensions", cloakWebStoreHelperDirName)
 }
 
 // embeddedHelperFingerprint 计算 embed 资源里 chromium-web-store 整棵树的 sha256
