@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { FolderOpen, Layers } from 'lucide-react'
 import { Button, Card, ConfirmModal, FormItem, Input, Modal, Select, Textarea, toast } from '../../../shared/components'
 import type { BrowserCore, BrowserProfileInput, BrowserProxy, BrowserGroup } from '../types'
-import { createBrowserProfile, fetchAllTags, fetchBrowserCores, fetchBrowserProfiles, fetchBrowserProxies, fetchBrowserSettings, fetchGroups, findDeletedEnvironmentDataOffers, ignoreDeletedEnvironmentData, listKnownExtensionPackages, openUserDataDir, restoreDeletedEnvironmentData, syncKnownExtensionsToProfiles, updateBrowserProfile } from '../api'
+import { createBrowserProfile, fetchAllTags, fetchBrowserCores, fetchBrowserProfiles, fetchBrowserProxies, fetchBrowserSettings, fetchGroups, findDeletedEnvironmentDataOffers, ignoreDeletedEnvironmentData, openUserDataDir, restoreDeletedEnvironmentData, updateBrowserProfile } from '../api'
 import type { DeletedEnvironmentDataOffer } from '../api'
 import { FingerprintPanel } from '../components/FingerprintPanel'
 import { TagInput } from '../components/TagInput'
@@ -49,22 +49,6 @@ export function BrowserEditPage() {
   const [saveError, setSaveError] = useState('')
   const [deletedDataOffer, setDeletedDataOffer] = useState<DeletedEnvironmentDataOffer | null>(null)
   const [deletedDataBusy, setDeletedDataBusy] = useState(false)
-
-  const syncKnownExtensionsIfRequested = async (profileIds: string[]) => {
-    if (profileIds.length === 0) return
-    const packages = await listKnownExtensionPackages().catch(() => [])
-    if (packages.length === 0) return
-    const ok = window.confirm(
-      `当前已有 ${packages.length} 个扩展包。\n是否将已有扩展同步到新环境？\n\n同步后首次打开该环境会完成适配；数据完整后不再重复验证。`,
-    )
-    if (!ok) return
-    try {
-      const result = await syncKnownExtensionsToProfiles(profileIds)
-      toast.success(result?.message || '扩展已同步到新环境')
-    } catch (syncErr: any) {
-      toast.error(syncErr?.message || '同步扩展失败')
-    }
-  }
 
   useEffect(() => {
     const loadData = async () => {
@@ -130,7 +114,6 @@ export function BrowserEditPage() {
         if (offers.length > 0) {
           setDeletedDataOffer(offers[0])
         } else {
-          await syncKnownExtensionsIfRequested(created?.profileId ? [created.profileId] : [])
           navigate('/browser/list')
         }
       } else if (id) {
@@ -171,7 +154,6 @@ export function BrowserEditPage() {
     try {
       await ignoreDeletedEnvironmentData(deletedDataOffer.archiveKey)
       toast.info('已按你的选择不导入；该归档不会再次提示，将在删除满 6 个月后自动清理')
-      await syncKnownExtensionsIfRequested([deletedDataOffer.targetProfileId])
       setDeletedDataOffer(null)
       navigate('/browser/list')
     } catch (error: any) {

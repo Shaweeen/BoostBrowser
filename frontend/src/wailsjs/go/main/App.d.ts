@@ -136,10 +136,6 @@ export function BrowserLegacyDataDismissFolders(arg1:Array<string>):Promise<void
 
 export function BrowserLegacyDataClearDismissed():Promise<void>;
 
-export function BrowserExtensionSyncKnownToProfiles(arg1:Array<string>):Promise<backend.ExtensionImportResult>;
-
-export function BrowserExtensionListKnownPackages():Promise<Array<Record<string, string>>>;
-
 export function BrowserProfileList():Promise<Array<browser.Profile>>;
 
 export function BrowserProfileListByTag(arg1:string):Promise<Array<browser.Profile>>;

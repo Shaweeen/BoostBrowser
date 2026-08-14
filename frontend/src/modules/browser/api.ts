@@ -534,35 +534,6 @@ export async function clearLegacyDataDismissed(): Promise<boolean> {
   return true
 }
 
-export async function syncKnownExtensionsToProfiles(profileIds: string[]): Promise<ExtensionImportResult> {
-  const bindings: any = await getBindings()
-  if (bindings?.BrowserExtensionSyncKnownToProfiles) {
-    return await bindings.BrowserExtensionSyncKnownToProfiles(profileIds)
-  }
-  const goApp = (window as any).go?.main?.App
-  if (goApp?.BrowserExtensionSyncKnownToProfiles) {
-    return await goApp.BrowserExtensionSyncKnownToProfiles(profileIds)
-  }
-  return {
-    extensionDir: '',
-    extensionId: '',
-    updatedProfiles: profileIds,
-    message: '当前没有可同步的扩展（开发预览）',
-  }
-}
-
-export async function listKnownExtensionPackages(): Promise<Array<{ extensionId: string; name: string; packagePath: string }>> {
-  const bindings: any = await getBindings()
-  if (bindings?.BrowserExtensionListKnownPackages) {
-    return (await bindings.BrowserExtensionListKnownPackages()) || []
-  }
-  const goApp = (window as any).go?.main?.App
-  if (goApp?.BrowserExtensionListKnownPackages) {
-    return (await goApp.BrowserExtensionListKnownPackages()) || []
-  }
-  return []
-}
-
 // ============================================================================
 // Instance API
 // ============================================================================

@@ -270,14 +270,6 @@ export function BrowserLegacyDataClearDismissed() {
   return window['go']['main']['App']['BrowserLegacyDataClearDismissed']();
 }
 
-export function BrowserExtensionSyncKnownToProfiles(arg1) {
-  return window['go']['main']['App']['BrowserExtensionSyncKnownToProfiles'](arg1);
-}
-
-export function BrowserExtensionListKnownPackages() {
-  return window['go']['main']['App']['BrowserExtensionListKnownPackages']();
-}
-
 export function BrowserProfileList() {
   return window['go']['main']['App']['BrowserProfileList']();
 }
