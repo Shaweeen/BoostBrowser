@@ -257,8 +257,8 @@ Require-File $RepairSource
 $RepairText = [IO.File]::ReadAllText($RepairSource)
 $TargetVersionPattern = '(?m)^(\s*\[string\]\$TargetVersion\s*=\s*)''v[^'']+'''
 $RepairReplacement = '$1' + [char]39 + $Tag + [char]39
+if (-not [regex]::IsMatch($RepairText, $TargetVersionPattern)) { throw 'Unable to find the repair script target version' }
 $VersionedRepairText = [regex]::Replace($RepairText, $TargetVersionPattern, $RepairReplacement)
-if ($VersionedRepairText -eq $RepairText) { throw 'Unable to stamp the repair script target version' }
 [IO.File]::WriteAllText($RepairPath, $VersionedRepairText, [Text.Encoding]::ASCII)
 
 Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue

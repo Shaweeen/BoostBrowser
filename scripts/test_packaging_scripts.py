@@ -455,7 +455,8 @@ class PackagingScriptsTest(unittest.TestCase):
 
         publisher = self.read("scripts/publish_windows_github_release.ps1")
         self.assertIn("TargetVersionPattern", publisher)
-        self.assertIn("Unable to stamp the repair script target version", publisher)
+        self.assertIn("[regex]::IsMatch($RepairText, $TargetVersionPattern)", publisher)
+        self.assertNotIn("$VersionedRepairText -eq $RepairText", publisher)
 
     def test_no_active_script_keeps_old_machine_specific_paths(self):
         for path in (ROOT / "scripts").rglob("*"):
