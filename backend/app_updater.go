@@ -580,17 +580,9 @@ func (a *App) ApplyUpdate(newExePath string) error {
 
 	// 清理可能残留的成功标记
 	_ = os.Remove(a.resolveAppPath(filepath.Join("data", successMarker)))
-	// Reuse the normal UUID data identity chain before replacing the EXE. This
-	// only attaches/aligns an existing data/<UUID> directory; it never moves or
-	// rewrites Cookies, extension storage, sessions or application state.
-	if _, err := a.reconcileProfileUUIDData(); err != nil {
-		return fmt.Errorf("更新前环境 UUID 数据完整性校验失败，已取消更新: %w", err)
-	}
-	// Capture the extension identity record immediately before replacement.
-	// This stores IDs only and never reads wallet/Cookie/extension values.
-	if err := a.captureProfileExtensionInventory(); err != nil {
-		return fmt.Errorf("更新前保存扩展身份清单失败，已取消更新以保护用户扩展: %w", err)
-	}
+	// UUID/Cookie/extension/application-state integrity and Chrome 148 alignment
+	// are owned by the new executable's single --post-update maintenance pass.
+	// Do not duplicate those scans before replacement.
 	a.prepareApplyUpdateQuit()
 
 	pid := os.Getpid()

@@ -175,8 +175,8 @@ $AssetRoot = if ($env:BOOST_KERNEL_SRC) { $env:BOOST_KERNEL_SRC } else { $RepoRo
 $CloakKernelSrc = "$AssetRoot\chrome\cloak-146.0.7680.177"
 $GoogleKernelSrc = "$AssetRoot\chrome\google-148.0.7778.167"
 $GoogleKernelCompatMarker = "$GoogleKernelSrc\chrome-for-testing.marker"
-$BundleGoogleKernel = (-not $ManagerOnly) -and (Test-Path -LiteralPath "$GoogleKernelSrc\chrome.exe") -and (Test-Path -LiteralPath $GoogleKernelCompatMarker)
-$GoogleKernelCleanupLine = if ($BundleGoogleKernel) { '  RMDir /r "`$INSTDIR\chrome\google-148.0.7778.167"' } else { '  ; Preserve any existing optional Google 148 kernel.' }
+$BundleGoogleKernel = -not $ManagerOnly
+$GoogleKernelCleanupLine = if ($BundleGoogleKernel) { '  RMDir /r "`$INSTDIR\chrome\google-148.0.7778.167"' } else { '  ; Manager-only upgrade preserves the installed Chrome 148 kernel.' }
 $BinSrc = "$AssetRoot\bin"
 # Optional helper extension is intentionally not staged for the self-use clean
 # build. Users requested no default/search helper extension in packaged installs.
@@ -188,6 +188,8 @@ Require-Path $UpdaterExe "Missing $UpdaterExe. Run scripts\build_release.ps1 fir
 Require-Path $ActivationCheckExe "Missing $ActivationCheckExe. Run scripts\build_release.ps1 first."
 if (-not $ManagerOnly) {
     Require-Path "$CloakKernelSrc\chrome.exe" "Missing CloakBrowser kernel: $CloakKernelSrc\chrome.exe"
+    Require-Path "$GoogleKernelSrc\chrome.exe" "Missing required Chrome 148 kernel: $GoogleKernelSrc\chrome.exe"
+    Require-Path $GoogleKernelCompatMarker "Missing Chrome for Testing marker: $GoogleKernelCompatMarker"
 }
 Require-Path $Icon "Missing icon: $Icon"
 Require-Path $ScopedProcessCleanup "Missing scoped process cleanup helper: $ScopedProcessCleanup"
@@ -217,11 +219,7 @@ if (-not $ManagerOnly -and (Test-Path -LiteralPath $BinSrc)) { Copy-Dir $BinSrc 
 if (-not $ManagerOnly) {
     New-Item -ItemType Directory -Force -Path "$Stage\chrome" | Out-Null
     Copy-Dir $CloakKernelSrc "$Stage\chrome\cloak-146.0.7680.177"
-    if ($BundleGoogleKernel) {
-        Copy-Dir $GoogleKernelSrc "$Stage\chrome\google-148.0.7778.167"
-    } else {
-        Write-Host "Optional extension-compatible Chrome fallback missing; skipped: $GoogleKernelSrc" -ForegroundColor Yellow
-    }
+    Copy-Dir $GoogleKernelSrc "$Stage\chrome\google-148.0.7778.167"
 }
 # Never package a data directory. Existing browser profiles, Cookies and wallet
 # extension state must remain owned by the installed client.

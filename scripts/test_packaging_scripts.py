@@ -44,13 +44,16 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertIn("chrome-for-testing.marker", installer)
         self.assertIn("$BundleGoogleKernel", installer)
         self.assertIn("$GoogleKernelCleanupLine", installer)
-        self.assertIn("Preserve any existing optional Google 148 kernel", installer)
+        self.assertIn("Missing required Chrome 148 kernel", installer)
+        self.assertIn("Manager-only upgrade preserves the installed Chrome 148 kernel", installer)
         self.assertIn("chrome-for-testing.marker", wrapper)
         self.assertIn("install_chrome_for_testing_kernel.ps1", wrapper)
+        self.assertIn("Chrome 148 is required", wrapper)
         self.assertNotIn("C:\\Program Files\\Google\\Chrome\\Application", wrapper)
         self.assertIn("chrome-for-testing-public/$Version/win64/chrome-win64.zip", downloader)
         self.assertIn('Version = "148.0.7778.167"', downloader)
         self.assertIn("chrome-for-testing.marker", stage_assets)
+        self.assertIn('$RequiredKernels = @("cloak-146.0.7680.177", "google-148.0.7778.167")', stage_assets)
 
     def test_installer_bundles_and_conditionally_installs_windows_runtimes(self):
         installer = self.read("scripts/build_installer.ps1")
@@ -216,6 +219,35 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertNotIn("importGlobalExtension(", submit_body)
         self.assertIn("importGlobalExtension(item.downloadAddress)", distribute_body)
         self.assertIn("只有点击“分配”才会检测并安装", submit_body)
+
+    def test_integrity_and_extension_recovery_run_only_post_update(self):
+        startup = self.read("backend/app.go")
+        startup = startup.split("func (a *App) startup(ctx context.Context) {", 1)[1].split(
+            "func (a *App) ReloadConfig() error", 1
+        )[0]
+        environment_start = self.read("backend/app_instance.go")
+        updater = self.read("backend/app_updater.go")
+        post_update = self.read("backend/post_update_maintenance.go")
+        main = self.read("main.go")
+
+        for forbidden in [
+            "reconcileProfileUUIDData()",
+            "captureProfileExtensionInventory()",
+            "prepareProfileExtensionRecovery(",
+            "migrateLegacyExtensionPackageStore()",
+            "ensureBundledGoogleChromeCore()",
+            "autoDetectCores()",
+            "setChrome148AsGlobalDefault(",
+        ]:
+            self.assertNotIn(forbidden, startup)
+            self.assertNotIn(forbidden, environment_start)
+        self.assertNotIn("reconcileProfileUUIDData()", updater)
+        self.assertNotIn("captureProfileExtensionInventory()", updater)
+        self.assertIn("func (a *App) RunPostUpdateMaintenance() error", post_update)
+        self.assertIn("prepareProfileExtensionRecovery(", post_update)
+        self.assertIn('bundledChrome148RelativeDir = "chrome/google-148.0.7778.167"', post_update)
+        self.assertIn("if postUpdateMode {", main)
+        self.assertIn("app.RunPostUpdateMaintenance()", main)
 
     def test_profile_delete_removes_owned_data_and_sync_accepts_arranged_windows(self):
         manager = self.read("backend/internal/browser/profile.go")

@@ -458,6 +458,11 @@ func main() {
 			if startupDebugEnabled {
 				log.Printf("后端 startup 已完成")
 			}
+			if postUpdateMode {
+				if maintenanceErr := app.RunPostUpdateMaintenance(); maintenanceErr != nil {
+					log.Printf("升级后一次性完整性维护未全部完成: %v", maintenanceErr)
+				}
+			}
 			// 升级后首次启动检测：updater 看到 .update_success 标记才会清掉 .bak 备份
 			for _, arg := range os.Args[1:] {
 				if arg == "--post-update" {

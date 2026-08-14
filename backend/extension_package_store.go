@@ -22,8 +22,8 @@ func (a *App) legacyGlobalExtensionDir(extensionID string) string {
 	return filepath.Join(a.appRoot, "extensions", "imported", safePathName(strings.TrimSpace(extensionID)))
 }
 
-// migrateLegacyExtensionPackageStore is a bounded startup migration, not a
-// watcher. It copies only a valid extension program package when the new
+// migrateLegacyExtensionPackageStore is a bounded post-update migration, not a
+// startup task or watcher. It copies only a valid extension program package when the new
 // persistent store has no package. It never deletes or rewrites a legacy
 // package, Chrome profile, Cookies, Local Extension Settings or wallet data.
 func (a *App) migrateLegacyExtensionPackageStore() {

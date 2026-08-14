@@ -59,11 +59,11 @@ browser:
         - core_id: bundled-cloak-chromium-latest
           core_name: Chromium 146
           core_path: chrome\cloak-146.0.7680.177
-          is_default: true
+          is_default: false
         - core_id: bundled-google-chrome-latest
           core_name: Google Chrome 148.0.7778.167（内置隔离）
           core_path: chrome\google-148.0.7778.167
-          is_default: false
+          is_default: true
     proxies: []
     profiles: []
 launch_server:

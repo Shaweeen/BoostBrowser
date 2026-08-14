@@ -201,12 +201,7 @@ func (a *App) startup(ctx context.Context) {
 		log.Error("创建 data 目录失败", logger.F("error", err))
 	}
 
-	if !a.panelMode {
-		// Self-use clean build: do not deploy the bundled chromium-web-store helper
-		// extension by default. Users can still import/install their own extensions
-		// manually; no default/search helper extension should appear on startup.
-		a.ensureDefaultCores()
-	} else {
+	if a.panelMode {
 		log.Info("同步面板子进程启动：跳过主窗口扩展部署与默认内核维护")
 	}
 
@@ -248,47 +243,15 @@ func (a *App) startup(ctx context.Context) {
 	// 一次性迁移：若 SQLite 表为空则从旧文件导入
 	a.migrateToSQLite()
 	a.browserMgr.InitData()
+	// Ordinary client startup only opens the existing application database. UUID,
+	// Cookie/extension presence, legacy package and archive checks belong to the
+	// single post-update maintenance pass, never to every client/environment open.
+	a.setStartupDataCompatibilityStatus(StartupDataCompatibilityStatus{
+		ActiveDataPath: activeDataRoot,
+		ExistingData:   dataExisted,
+		Message:        "已直接使用现有 data；完整性校验仅在版本更新时执行一次",
+	})
 	if !a.panelMode {
-		if count, reconcileErr := a.reconcileProfileUUIDData(); reconcileErr != nil {
-			log.Error("环境 UUID 与 data 目录校验失败", logger.F("error", reconcileErr.Error()))
-			a.lifecycleLog("profile-uuid-data-reconcile", "state=failed", "error="+reconcileErr.Error())
-		} else {
-			a.lifecycleLog("profile-uuid-data-reconcile", "state=complete", fmt.Sprintf("reconciled=%d", count))
-		}
-	}
-	// Extension packages used to live beside the executable. Migrate those
-	// program files before any environment can be opened, preserving every
-	// profile, wallet vault, Cookie and legacy package in place.
-	a.migrateLegacyExtensionPackageStore()
-	a.initializeActiveDataCompatibility(activeDataRoot, dataExisted)
-	if !a.panelMode {
-		// Deletion archives are not active user data. Check their six-month
-		// retention once during ordinary startup only; no archive watcher runs.
-		if result, err := a.browserMgr.CleanupExpiredDeletedEnvironmentData(time.Now()); err != nil {
-			a.lifecycleLog("deleted-data-retention", "state=failed", "error="+err.Error())
-		} else if result.Removed > 0 {
-			a.lifecycleLog("deleted-data-retention", "state=removed", fmt.Sprintf("count=%d", result.Removed), "retention=6mo")
-		} else {
-			a.lifecycleLog("deleted-data-retention", "state=checked", fmt.Sprintf("retained=%d", result.Skipped))
-		}
-	}
-	if !a.panelMode {
-		// 启动先扫描 chrome/，优先把扩展兼容的 Chrome for Testing 148
-		// 注册为默认内核；不引用系统安装的 Chrome。
-		a.ensureBundledGoogleChromeCore()
-		// 同步内存态，确保后续默认内核解析使用刚注册的内置 Chrome。
-		_ = a.browserMgr.ListCores()
-		// 只记录扩展 ID，不读取钱包/Cookie/扩展存储内容。该清单位于 data/
-		// 并随升级保留，用于注册丢失时按完全相同 ID 恢复。
-		if err := a.captureProfileExtensionInventory(); err != nil {
-			logger.New("Extension").Warn("启动时记录扩展身份失败", logger.F("error", err.Error()))
-		}
-		// 路径有效性扫描只写诊断日志，不参与内核选择。延后执行可避免大量
-		// 浏览器内核目录在主窗口首次加载的关键路径上同步触盘。
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			a.autoDetectCores()
-		}()
 		a.loadProxies()
 		a.reconcileProfileProxyBindings()
 	} else {

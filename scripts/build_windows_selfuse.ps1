@@ -105,7 +105,7 @@ Run-Step "Preparing CloakBrowser kernel" {
     Write-Host "CloakBrowser kernel OK: $cloakChrome" -ForegroundColor Green
 }
 
-Run-Step "Preparing optional extension-compatible Chrome fallback" {
+Run-Step "Preparing required extension-compatible Chrome 148" {
     if ($ManagerOnly) {
         Write-Host "Manager-only edition: Chrome fallback redistribution is disabled" -ForegroundColor Green
         return
@@ -114,7 +114,7 @@ Run-Step "Preparing optional extension-compatible Chrome fallback" {
     $googleExe = Join-Path $googleDst 'chrome.exe'
     $compatMarker = Join-Path $googleDst 'chrome-for-testing.marker'
     if ($SkipGoogleFallback) {
-        Write-Host "Skipping Google fallback by request" -ForegroundColor Yellow
+        throw "Chrome 148 is required for environment extension compatibility; -SkipGoogleFallback cannot be used for a formal private build"
     } elseif ((Test-Path $googleExe) -and (Test-Path $compatMarker)) {
         Write-Host "Extension-compatible Chrome fallback already exists: $googleExe" -ForegroundColor Green
     } else {
