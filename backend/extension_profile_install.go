@@ -988,3 +988,30 @@ func ensureLoadExtensionCommandLineSwitchEnabled(args []string) []string {
 	}
 	return out
 }
+
+// ensureChromePreferencesFile and ensureJSONMap are retained solely for the
+// legacy explicit assignment compatibility helpers below. They are never called
+// from environment startup or ordinary extension distribution.
+func ensureChromePreferencesFile(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return fsutil.WriteFileAtomic(path, []byte("{}"), 0o644)
+}
+
+func ensureJSONMap(parent map[string]any, key string) map[string]any {
+	if existing, ok := parent[key].(map[string]any); ok {
+		return existing
+	}
+	created := map[string]any{}
+	parent[key] = created
+	return created
+}

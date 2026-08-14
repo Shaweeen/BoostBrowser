@@ -781,10 +781,6 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	s.mu.Unlock()
 	s.runWorker(func() { s.cdpKeyDispatchLoop(s.stopCh, s.cdpKeyQueue) })
 	s.runWorker(func() { s.pageInputDispatchLoop(s.stopCh, s.pageInputQueue) })
-	// Popup geometry is owned solely by the main-process environmentPopupConfiner
-	// (position-only). InputSyncer does not run a parallel SetWindowPos loop —
-	// dual writers caused wallet flicker under multi-open + sync.
-
 	// 安装全局鼠标和键盘钩子。启动必须等待安装结果；旧逻辑在安装
 	// 失败时仍立即返回成功，前端因此会显示“同步中”但没有任何事件。
 	s.runWorker(func() {
@@ -1153,13 +1149,10 @@ func (s *InputSyncer) EndLayoutUpdate() {
 	atomic.StoreInt32(&s.layoutUpdating, 0)
 }
 
-// holdPopupConfinementForLayout stops the main confiner during any tile/stack
-// from main or panel. Panel has no confiner but still writes the shared flag.
+// holdPopupConfinementForLayout protects the brief explicit tile/stack operation
+// from concurrent coordinate mapping. It does not start or control any browser
+// popup watcher.
 func holdPopupConfinementForLayout(hold bool) {
-	if app := environmentPopupApp.Load(); app != nil {
-		app.holdEnvironmentPopupConfinement(hold)
-		return
-	}
 	setSharedLayoutHold(hold)
 }
 
@@ -1730,9 +1723,8 @@ func mapChromeInputTarget(screenX, screenY int, masterMain, followerMain windows
 	return followerMain, lparam, ok
 }
 
-// listChromePopupSurfaces / chromePopupListSearch remain available for diagnostics
-// and tests. Continuous relative-align SetWindowPos was removed: the main
-// environmentPopupConfiner is the sole geometry writer (position-only).
+// listChromePopupSurfaces / chromePopupListSearch remain available for
+// diagnostics and input targeting. They never move, resize or monitor popups.
 
 type chromePopupListSearch struct {
 	main      windows.HWND

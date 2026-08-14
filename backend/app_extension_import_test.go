@@ -277,46 +277,6 @@ func TestProfileHasEquivalentExtensionByIDOrName(t *testing.T) {
 	}
 }
 
-func TestEnableExtensionDeveloperModePreservesExistingSettings(t *testing.T) {
-	root := t.TempDir()
-	profileDir := filepath.Join(root, "Default")
-	if err := os.MkdirAll(profileDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	prefs := map[string]any{
-		"extensions": map[string]any{
-			"settings": map[string]any{"keep": map[string]any{"state": float64(1)}},
-		},
-	}
-	data, _ := json.Marshal(prefs)
-	if err := os.MkdirAll(profileDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(profileDir, "Preferences"), data, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	enableExtensionDeveloperMode(root)
-
-	outData, err := os.ReadFile(filepath.Join(profileDir, "Preferences"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out map[string]any
-	if err := json.Unmarshal(outData, &out); err != nil {
-		t.Fatal(err)
-	}
-	extensions := out["extensions"].(map[string]any)
-	ui := extensions["ui"].(map[string]any)
-	if ui["developer_mode"] != true {
-		t.Fatalf("developer mode was not enabled: %#v", ui)
-	}
-	settings := extensions["settings"].(map[string]any)
-	if _, ok := settings["keep"]; !ok {
-		t.Fatal("existing extension settings were overwritten")
-	}
-}
-
 func TestBrowserProfileCreateDoesNotApplyGlobalExtensionWithoutDistribution(t *testing.T) {
 	root := t.TempDir()
 	app := NewApp(root)
@@ -391,38 +351,6 @@ func TestBindExtensionRestoresInMemoryProfileWhenPersistenceFails(t *testing.T) 
 	got := app.browserMgr.Profiles["profile-1"]
 	if !reflect.DeepEqual(got.LaunchArgs, []string{"--no-first-run"}) || got.UpdatedAt != "before" {
 		t.Fatalf("failed write leaked into in-memory profile: %+v", got)
-	}
-}
-
-func TestDeveloperModeDoesNotRewritePreferencesForRunningEnvironment(t *testing.T) {
-	root := t.TempDir()
-	app := NewApp(root)
-	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
-	profile := &browser.Profile{
-		ProfileId:   "profile-1",
-		ProfileName: "one",
-		UserDataDir: filepath.Join("data", "profiles", "profile-1"),
-		Running:     true,
-	}
-	app.browserMgr.Profiles[profile.ProfileId] = profile
-	prefsPath := filepath.Join(app.browserMgr.ResolveUserDataDir(profile), "Default", "Preferences")
-	if err := os.MkdirAll(filepath.Dir(prefsPath), 0755); err != nil {
-		t.Fatal(err)
-	}
-	original := []byte(`{"extensions":{"settings":{"wallet":{"state":"keep"}}}}`)
-	if err := os.WriteFile(prefsPath, original, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := app.enableExtensionDeveloperModeForProfile(profile.ProfileId); err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile(prefsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, original) {
-		t.Fatalf("running Chrome Preferences were rewritten: %s", got)
 	}
 }
 
@@ -743,7 +671,7 @@ func TestGlobalExtensionDistributionChecksOnlyNewProfilesOnExplicitAction(t *tes
 	}
 }
 
-func TestAssignRegistersStoppedProfileWithoutTouchingWalletData(t *testing.T) {
+func TestAssignRecordsStoppedProfileWithoutRewritingChromePreferences(t *testing.T) {
 	root := t.TempDir()
 	app := NewApp(root)
 	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
@@ -763,8 +691,8 @@ func TestAssignRegistersStoppedProfileWithoutTouchingWalletData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.PrefsInstalledCount != 1 {
-		t.Fatalf("stopped profile must receive loadable registration, got prefs=%d msg=%q", result.PrefsInstalledCount, result.Message)
+	if result.PrefsInstalledCount != 0 {
+		t.Fatalf("assignment must not write Chromium Preferences, got prefs=%d msg=%q", result.PrefsInstalledCount, result.Message)
 	}
 	if result.SkippedCount != 0 {
 		t.Fatalf("fresh profile should not skip: %#v", result)
@@ -783,19 +711,8 @@ func TestAssignRegistersStoppedProfileWithoutTouchingWalletData(t *testing.T) {
 		t.Fatalf("same extension must skip: %#v", second)
 	}
 	userData := app.browserMgr.ResolveUserDataDir(profile)
-	prefsData, err := os.ReadFile(filepath.Join(userData, "Default", "Preferences"))
-	if err != nil {
-		t.Fatalf("read developer-mode Preferences: %v", err)
-	}
-	var prefs map[string]any
-	if err := json.Unmarshal(prefsData, &prefs); err != nil {
-		t.Fatalf("decode Preferences: %v", err)
-	}
-	extensions, _ := prefs["extensions"].(map[string]any)
-	settings, _ := extensions["settings"].(map[string]any)
-	entry, _ := settings[extID].(map[string]any)
-	if entry == nil || entry["state"] != float64(1) {
-		t.Fatalf("assignment must create enabled loadable registration: %#v", settings)
+	if _, err := os.Stat(filepath.Join(userData, "Default", "Preferences")); !os.IsNotExist(err) {
+		t.Fatalf("assignment must not create or rewrite Chromium Preferences, err=%v", err)
 	}
 	if !strings.Contains(second.Message, "跳过") && !strings.Contains(second.Message, "已存在") {
 		t.Fatalf("skip message should be clear: %q", second.Message)
@@ -803,8 +720,8 @@ func TestAssignRegistersStoppedProfileWithoutTouchingWalletData(t *testing.T) {
 }
 
 func TestGlobalExtensionDistributionHealsUnusableRegistration(t *testing.T) {
-	// Preferences residue must not block explicit re-distribution. Healing may
-	// update the managed path/state but must preserve extension storage.
+	// Preferences residue must not block an explicit user action, but it belongs
+	// to Chromium and must never be healed by rewriting the profile file.
 	root := t.TempDir()
 	app := NewApp(root)
 	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
@@ -827,6 +744,10 @@ func TestGlobalExtensionDistributionHealsUnusableRegistration(t *testing.T) {
 	if err := os.WriteFile(prefsPath, []byte(`{"extensions":{"settings":{"nkbihfbeogaeaoehlefnkodbefgpgknn":{"manifest":{"name":"MetaMask"}}}}}`), 0644); err != nil {
 		t.Fatal(err)
 	}
+	beforePrefs, err := os.ReadFile(prefsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	result, err := app.BrowserGlobalExtensionImport(extID)
 	if err != nil {
 		t.Fatal(err)
@@ -842,8 +763,8 @@ func TestGlobalExtensionDistributionHealsUnusableRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(afterPrefs), `"path"`) || !strings.Contains(string(afterPrefs), `"state": 1`) {
-		t.Fatalf("assignment must heal a loadable enabled registration: %s", afterPrefs)
+	if string(beforePrefs) != string(afterPrefs) {
+		t.Fatalf("assignment must preserve Chromium Preferences exactly: before=%s after=%s", beforePrefs, afterPrefs)
 	}
 }
 

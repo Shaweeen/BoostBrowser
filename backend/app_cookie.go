@@ -37,6 +37,26 @@ type cdpTarget struct {
 	OpenerID             string `json:"openerId,omitempty"`
 }
 
+// listCDPTargets is shared by wallet import and input sync. It is a single
+// request made by an explicit user operation; it does not manage browser tabs.
+func listCDPTargets(debugPort int) ([]cdpTarget, error) {
+	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/json/list", debugPort))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var targets []cdpTarget
+	if err := json.Unmarshal(body, &targets); err != nil {
+		return nil, err
+	}
+	return targets, nil
+}
+
 type cdpBrowserVersion struct {
 	WebSocketDebuggerUrl string `json:"webSocketDebuggerUrl"`
 }

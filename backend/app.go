@@ -79,9 +79,6 @@ type App struct {
 	// in-memory profile map only loads once).
 	syncProfileReloadAt time.Time
 
-	// envPopup confines extension/wallet/secondary Chrome windows to each
-	// running environment's main window. Main client only; single owner.
-	envPopup *environmentPopupConfiner
 }
 
 // NewApp 创建新的应用实例
@@ -373,7 +370,7 @@ func (a *App) startup(ctx context.Context) {
 	// window and only touches stopped environments.
 	a.lifecycleLog("cache-auto-clean", "state=scheduled", "initialDelay=2m", "pollInterval=6h")
 	a.startCacheAutoCleanScheduler()
-	// Shared layout-hold flag root for main confiner ↔ panel tile coordination.
+	// Shared layout-hold flag for the short, explicit tile operation only.
 	setLayoutHoldRoot(a.appRoot)
 
 	if a.panelMode {
@@ -391,12 +388,6 @@ func (a *App) startup(ctx context.Context) {
 	// （例如第三方库内部并发 map 读写），所以先从启动路径移除，避免后台任务拖垮主程序。
 	// 手动代理测速入口仍保留；后续如需自动测速，应改为独立子进程隔离崩溃。
 	a.speedScheduler = nil
-
-	if !a.panelMode {
-		// Single owner for wallet/extension/secondary window geometry across every
-		// running environment. Sync assistant must not run a parallel SetWindowPos loop.
-		a.registerEnvironmentPopupConfiner()
-	}
 
 	log.Info("应用启动成功")
 	a.lifecycleLog("startup-complete")

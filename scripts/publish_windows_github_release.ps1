@@ -254,7 +254,12 @@ Assert-WindowsPE $MainExe
 Assert-WindowsPE $UpdaterExe
 Assert-WindowsPE $SetupExe
 Require-File $RepairSource
-Copy-Item -LiteralPath $RepairSource -Destination $RepairPath -Force
+$RepairText = [IO.File]::ReadAllText($RepairSource)
+$TargetVersionPattern = '(?m)^(\s*\[string\]\$TargetVersion\s*=\s*)''v[^'']+'''
+$RepairReplacement = '$1' + [char]39 + $Tag + [char]39
+$VersionedRepairText = [regex]::Replace($RepairText, $TargetVersionPattern, $RepairReplacement)
+if ($VersionedRepairText -eq $RepairText) { throw 'Unable to stamp the repair script target version' }
+[IO.File]::WriteAllText($RepairPath, $VersionedRepairText, [Text.Encoding]::ASCII)
 
 Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
 Compress-Archive -LiteralPath $MainExe -DestinationPath $ZipPath -CompressionLevel Optimal

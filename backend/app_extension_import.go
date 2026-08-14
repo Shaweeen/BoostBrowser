@@ -171,10 +171,9 @@ func (a *App) BrowserProfileRemoveExtension(profileIds []string, downloadAddress
 	a.browserMgr.Mutex.Unlock()
 	a.clearExtensionLaunchReadyForProfiles(updated)
 
-	// Scheme A: LaunchArgs no longer drive daily load, so unbind must also
-	// disable the extension inside each stopped profile's Preferences.
-	// Wallet LES / Cookies are preserved for re-assign.
-	disableAssignedExtensionOnProfiles(a, updated, extDir)
+	// Removing a BrowserStudio assignment only removes BrowserStudio metadata.
+	// Never edit Chrome Preferences here: user-installed extensions, wallet
+	// storage and any Chrome-owned enablement state remain entirely Chromium's.
 
 	if !stillReferenced && !a.globalExtensionRegistered(extID) {
 		_ = os.RemoveAll(extDir)
@@ -213,7 +212,9 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 	}
 	requestedN := len(profileIds)
 	if candidateID != "" {
-		missing := a.filterProfilesMissingEquivalentExtension(profileIds, candidateID, "")
+		missing := a.filterProfilesMissingExplicitExtensionAssignment(
+			profileIds, candidateID, "", a.globalExtensionDir(candidateID),
+		)
 		if len(missing) == 0 {
 			return &ExtensionImportResult{
 				ExtensionID:     candidateID,
@@ -230,7 +231,7 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 		return nil, fmt.Errorf("扩展分配失败：%w", err)
 	}
 	manifestName := readManifestNameFromDir(extDir)
-	profileIds = a.filterProfilesMissingEquivalentExtension(profileIds, extID, manifestName)
+	profileIds = a.filterProfilesMissingExplicitExtensionAssignment(profileIds, extID, manifestName, extDir)
 	skipped := requestedN - len(profileIds)
 	if len(profileIds) == 0 {
 		return &ExtensionImportResult{
@@ -243,12 +244,6 @@ func (a *App) BrowserProfileImportExtension(profileIds []string, downloadAddress
 			Message:          formatExtensionAssignMessage(extID, extensionVersion, requestedN, skipped, 0, 0, 0, 0),
 		}, nil
 	}
-	for _, id := range profileIds {
-		if err := a.enableExtensionDeveloperModeForProfile(id); err != nil {
-			return nil, err
-		}
-	}
-
 	bind, err := a.bindExtensionDirToProfiles(profileIds, extDir)
 	if err != nil {
 		return nil, err
@@ -321,7 +316,9 @@ func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionIm
 		// Registry completion is only a record of a past click. It is not proof
 		// that every current environment still has a loadable package after an
 		// upgrade, manual data restore or a moved install directory.
-		missing := a.filterProfilesMissingEquivalentExtension(targetIDs, candidateID, readManifestNameFromDir(a.globalExtensionDir(candidateID)))
+		missing := a.filterProfilesMissingExplicitExtensionAssignment(
+			targetIDs, candidateID, readManifestNameFromDir(a.globalExtensionDir(candidateID)), a.globalExtensionDir(candidateID),
+		)
 		if len(missing) == 0 {
 			return &ExtensionImportResult{
 				ExtensionDir:    a.globalExtensionDir(candidateID),
@@ -338,16 +335,11 @@ func (a *App) BrowserGlobalExtensionImport(downloadAddress string) (*ExtensionIm
 	if err != nil {
 		return nil, fmt.Errorf("扩展分配失败：%w", err)
 	}
-	missing := a.filterProfilesMissingEquivalentExtension(unchecked, extID, readManifestNameFromDir(extDir))
+	missing := a.filterProfilesMissingExplicitExtensionAssignment(unchecked, extID, readManifestNameFromDir(extDir), extDir)
 	// Already-complete registry entries + loadable equivalents are skips.
 	skipped := len(targetIDs) - len(missing)
 	bind := &extensionBindResult{}
 	if len(missing) > 0 {
-		for _, profileID := range missing {
-			if err := a.enableExtensionDeveloperModeForProfile(profileID); err != nil {
-				return nil, err
-			}
-		}
 		bind, err = a.bindExtensionDirToProfiles(missing, extDir)
 		if err != nil {
 			return nil, err
@@ -607,9 +599,9 @@ func formatExtensionAssignMessage(extID, version string, total, skipped, bound, 
 		return fmt.Sprintf("%s：所选 %d 个环境均已存在同一可加载扩展，已跳过（未覆盖钱包/扩展数据）", name, skipped)
 	}
 	parts := make([]string, 0, 6)
-	parts = append(parts, fmt.Sprintf("%s 分配完成", name))
+	parts = append(parts, fmt.Sprintf("%s 已记录分配", name))
 	if bound > 0 {
-		parts = append(parts, fmt.Sprintf("新绑定 %d", bound))
+		parts = append(parts, fmt.Sprintf("新增分配 %d", bound))
 	}
 	if prefsOK > 0 {
 		parts = append(parts, fmt.Sprintf("已写入 Profile %d（请关闭后重新打开环境一次以加载扩展）", prefsOK))
@@ -625,6 +617,33 @@ func formatExtensionAssignMessage(extID, version string, total, skipped, bound, 
 	}
 	parts = append(parts, "未改动已有钱包、Cookies 或扩展存储")
 	return strings.Join(parts, "；")
+}
+
+// filterProfilesMissingExplicitExtensionAssignment evaluates one user-clicked
+// distribution request. Chromium-owned extensions always win: if Chrome can
+// load an equivalent extension, there is nothing to do. If BrowserStudio has
+// already recorded this exact manager package for a profile, it is also not
+// re-recorded on every later global click. This deliberately avoids using
+// Preferences as a completion marker: Chromium owns that file and writes it
+// only while its own process is running.
+func (a *App) filterProfilesMissingExplicitExtensionAssignment(profileIDs []string, extensionID, manifestName, extDir string) []string {
+	missing := a.filterProfilesMissingEquivalentExtension(profileIDs, extensionID, manifestName)
+	if len(missing) == 0 || strings.TrimSpace(extDir) == "" {
+		return missing
+	}
+	profiles := make(map[string]BrowserProfile)
+	for _, profile := range a.browserMgr.List() {
+		profiles[profile.ProfileId] = profile
+	}
+	result := make([]string, 0, len(missing))
+	for _, profileID := range missing {
+		profile, ok := profiles[profileID]
+		if ok && hasExtensionDirInLaunchArgs(profile.LaunchArgs, extDir) {
+			continue
+		}
+		result = append(result, profileID)
+	}
+	return result
 }
 
 func (a *App) filterProfilesMissingEquivalentExtension(profileIDs []string, extensionID string, manifestName string) []string {
@@ -1375,26 +1394,14 @@ func (a *App) bindExtensionDirToProfiles(profileIds []string, extDir string) (*e
 			launchArgs: append([]string{}, profile.LaunchArgs...),
 			updatedAt:  profile.UpdatedAt,
 		}
-		// Persist the assignment for every profile. Stopped profiles can be
-		// registered immediately; running profiles apply it after restart so we
-		// never race Chromium's Preferences writer.
+		// Persist the requested assignment only. Do not materialize a package or
+		// register it in Chromium Preferences: direct external Preference writes
+		// make Chrome reset the user's own extension settings on a later launch.
 		profile.LaunchArgs = addExtensionDirToLaunchArgs(profile.LaunchArgs, extDir)
 		profile.UpdatedAt = time.Now().Format(time.RFC3339)
 		result.UpdatedProfiles = append(result.UpdatedProfiles, id)
 		if profile.Running {
 			result.DeferredRunning++
-		} else {
-			userDataDir := a.browserMgr.ResolveUserDataDir(profile)
-			if err := installUnpackedExtensionIntoProfile(userDataDir, extDir); err != nil {
-				for rollbackID, state := range previous {
-					if rollback := a.browserMgr.Profiles[rollbackID]; rollback != nil {
-						rollback.LaunchArgs = state.launchArgs
-						rollback.UpdatedAt = state.updatedAt
-					}
-				}
-				return nil, fmt.Errorf("扩展写入环境 %s 失败：%w", profile.ProfileName, err)
-			}
-			result.PrefsInstalled++
 		}
 	}
 	if len(result.UpdatedProfiles) == 0 {
@@ -1457,36 +1464,6 @@ func (a *App) removeExtensionDirFromProfilesExcept(extDir string, keepProfiles m
 		return nil, fmt.Errorf("保存全局扩展配置失败：%w", err)
 	}
 	a.clearExtensionLaunchReadyForProfilesLocked(updated)
-	toDisable := make([]string, 0, len(updated))
-	for _, id := range updated {
-		if p := a.browserMgr.Profiles[id]; p != nil && !p.Running {
-			toDisable = append(toDisable, id)
-		}
-	}
-	// Must disable after releasing Mutex (helper takes the lock).
-	extDirCopy := extDir
-	idsCopy := append([]string{}, toDisable...)
-	// Caller holds lock; schedule disable after return via defer-like pattern:
-	// we unlock in defer of this function — call disable without holding lock
-	// by unlocking early is unsafe. Collect paths while locked instead.
-	type disableJob struct {
-		userDataDir string
-	}
-	jobs := make([]disableJob, 0, len(idsCopy))
-	for _, id := range idsCopy {
-		if p := a.browserMgr.Profiles[id]; p != nil {
-			jobs = append(jobs, disableJob{userDataDir: a.browserMgr.ResolveUserDataDir(p)})
-		}
-	}
-	// Unlock happens when function returns; run disable after unlock using
-	// a deferred call that runs while... still locked. So disable inline
-	// using pre-resolved paths (no lock needed).
-	for _, job := range jobs {
-		if job.userDataDir == "" {
-			continue
-		}
-		_ = disableExtensionInProfile(job.userDataDir, extDirCopy)
-	}
 	return updated, nil
 }
 
@@ -1849,9 +1826,6 @@ func (a *App) InstallExtensionFromCRXURL(profileID string, crxURL string) (strin
 	defer a.maintenanceMu.Unlock()
 
 	extID := extractExtensionID(crxURL)
-	if err := a.enableExtensionDeveloperModeForProfile(profileID); err != nil {
-		return extID, "", err
-	}
 	if extID != "" && len(a.filterProfilesMissingEquivalentExtension([]string{profileID}, extID, "")) == 0 {
 		return extID, "", nil
 	}
@@ -2002,78 +1976,6 @@ func chromeProfilePreferencePaths(userDataDir string) []string {
 		}
 	}
 	return out
-}
-
-func (a *App) enableExtensionDeveloperModeForProfile(profileID string) error {
-	a.browserMgr.Mutex.Lock()
-	profile, exists := a.browserMgr.Profiles[profileID]
-	if !exists || profile == nil {
-		a.browserMgr.Mutex.Unlock()
-		return fmt.Errorf("实例不存在：%s", profileID)
-	}
-	running := profile.Running
-	if cmd := a.browserMgr.BrowserProcesses[profileID]; cmd != nil && cmd.Process != nil {
-		running = true
-	}
-	snapshot := *profile
-	a.browserMgr.Mutex.Unlock()
-	if running {
-		// Chrome owns Preferences while the environment is live. Writing a
-		// stale read-modify-write snapshot here could discard extension
-		// metadata that Chrome just persisted. --load-extension remains the
-		// launch authority, so skip this optional UI preference.
-		return nil
-	}
-	return enableExtensionDeveloperMode(a.browserMgr.ResolveUserDataDir(&snapshot))
-}
-
-// enableExtensionDeveloperMode runs only when the user explicitly distributes
-// an extension to an environment that does not already contain it.
-func enableExtensionDeveloperMode(userDataDir string) error {
-	if strings.TrimSpace(userDataDir) == "" {
-		return fmt.Errorf("用户数据目录为空")
-	}
-	defaultPrefs := filepath.Join(userDataDir, "Default", "Preferences")
-	if err := ensureChromePreferencesFile(defaultPrefs); err != nil {
-		return fmt.Errorf("创建扩展首选项失败：%w", err)
-	}
-	for _, prefPath := range chromeProfilePreferencePaths(userDataDir) {
-		data, err := os.ReadFile(prefPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return fmt.Errorf("读取扩展首选项失败 %s：%w", prefPath, err)
-		}
-		prefs := map[string]any{}
-		if len(strings.TrimSpace(string(data))) > 0 {
-			if err := json.Unmarshal(data, &prefs); err != nil {
-				return fmt.Errorf("扩展首选项格式无效 %s：%w", prefPath, err)
-			}
-		}
-		extensions, _ := prefs["extensions"].(map[string]any)
-		if extensions == nil {
-			extensions = map[string]any{}
-			prefs["extensions"] = extensions
-		}
-		ui, _ := extensions["ui"].(map[string]any)
-		if ui == nil {
-			ui = map[string]any{}
-			extensions["ui"] = ui
-		}
-		if ui["developer_mode"] == true {
-			continue
-		}
-		ui["developer_mode"] = true
-		out, err := json.MarshalIndent(prefs, "", "   ")
-		if err != nil {
-			return fmt.Errorf("生成扩展首选项失败 %s：%w", prefPath, err)
-		}
-		if err := fsutil.WriteFileAtomic(prefPath, out, 0644); err != nil {
-			return fmt.Errorf("保存扩展首选项失败 %s：%w", prefPath, err)
-		}
-	}
-	return nil
 }
 
 func normalizeExtensionPath(path string) string {

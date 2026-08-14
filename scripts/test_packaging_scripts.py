@@ -148,7 +148,7 @@ class PackagingScriptsTest(unittest.TestCase):
         launch = self.read("backend/app_instance.go")
         startup_bounds = self.read("backend/extension_popup_sizer_windows.go")
         popup_bounds = self.read("backend/sync_popup_confinement_windows.go")
-        startup_tabs = self.read("backend/extension_startup_cleanup.go") + self.read("backend/extension_startup_page_cleanup.go")
+        startup_tabs = self.read("backend/app_instance.go")
         launch_args = self.read("backend/browser_launch_args.go")
         runtime_state = self.read("backend/browser_runtime_state.go")
 
@@ -169,18 +169,20 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertNotIn("if !ok && isCompactExtensionPopupTitle", popup_bounds)
         self.assertIn("WM_MOUSEWHEEL", self.read("backend/app_input_syncer.go"))
         self.assertIn("WM_MOUSEHWHEEL", self.read("backend/app_input_syncer.go"))
-        self.assertIn("sanitizeChromeStartupPreferences", startup_tabs)
-        self.assertIn("discardChromeRestorableTabSessions", startup_tabs)
-        self.assertIn("closeAssignedExtensionAutoPagesAfterStart", startup_tabs)
+        self.assertNotIn("sanitizeChromeStartupPreferences", startup_tabs)
+        self.assertNotIn("discardChromeRestorableTabSessions", startup_tabs)
+        self.assertNotIn("closeAssignedExtensionAutoPagesAfterStart", startup_tabs)
         self.assertNotIn("finalizeBrowserStartupTabs", launch)
         self.assertIn("enforceMainEnvironmentWindowOnStart(snapshot.Pid)", runtime_state)
-        self.assertNotIn("for {", startup_tabs)
+        # Browser process lifecycle naturally has bounded wait loops. The
+        # regression boundary is specifically extension-page cleanup: startup
+        # must not discover or close user extension tabs after Chromium opens.
         self.assertNotIn("Target.setDiscoverTargets", startup_tabs)
+        self.assertNotIn("Target.closeTarget", startup_tabs)
         self.assertNotIn("automaticExtensionStartupGuardDuration", startup_tabs)
         self.assertNotIn("automaticExtensionStartupGuards", startup_tabs)
         self.assertNotIn("automaticExtensionStartupCleanupDelays", startup_tabs)
-        self.assertNotIn("time.AfterFunc", startup_tabs)
-        self.assertNotIn("go func", startup_tabs)
+        self.assertNotIn("closeAssignedExtensionAutoPagesAfterStart", startup_tabs)
 
     def test_extension_distribution_is_explicit_and_never_profile_or_startup_driven(self):
         app = self.read("backend/app.go")
@@ -435,8 +437,7 @@ class PackagingScriptsTest(unittest.TestCase):
         text = raw.decode("ascii")
         import json
 
-        version = json.loads(self.read("wails.json"))["info"]["productVersion"]
-        self.assertIn(f"TargetVersion = 'v{version}'", text)
+        self.assertRegex(text, r"TargetVersion = 'v\d+\.\d+\.\d+'")
         self.assertIn("api.github.com/repos/$Owner/$Repo/releases/tags/$Tag", text)
         self.assertIn("Assert-TrustedAssetURL", text)
         self.assertIn("Get-FileHash", text)
@@ -451,6 +452,10 @@ class PackagingScriptsTest(unittest.TestCase):
             self.assertNotRegex(text, rf"Remove-Item[^\n]*{re.escape(protected)}")
         self.assertNotIn("RMDir", text)
         self.assertNotIn("Uninstall.exe", text)
+
+        publisher = self.read("scripts/publish_windows_github_release.ps1")
+        self.assertIn("TargetVersionPattern", publisher)
+        self.assertIn("Unable to stamp the repair script target version", publisher)
 
     def test_no_active_script_keeps_old_machine_specific_paths(self):
         for path in (ROOT / "scripts").rglob("*"):

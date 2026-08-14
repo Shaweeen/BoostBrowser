@@ -237,22 +237,19 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		profile.LastError = startErr.Error()
 		return profile, startErr
 	}
-	// The saved --load-extension list is the authoritative assignment record.
-	// Always pass assigned packages to Chromium. Preferences and wallet storage
-	// only prove that user data exists; they do not prove Chromium accepted an
-	// extension registration, so they must never be used to strip the launch arg.
-	// This path is read-only for profile data (Cookies / LES / IndexedDB).
-	extensionPrepReady := isStartPrepDone(userDataDir)
+	// Chromium owns extension registration inside each environment. Startup does
+	// not treat BrowserStudio's saved manager assignment as permission to inject
+	// or rewrite that registration. User-installed Chrome/Web Store extensions
+	// therefore remain the authoritative runtime state.
 	if err := ensureBrowserUserDataDirReadyForFreshLaunch(chromeBinaryPath, userDataDir); err != nil {
 		log.Error("浏览器用户目录启动前检查失败", logger.F("profile_id", profileId), logger.F("chrome", chromeBinaryPath), logger.F("dir", userDataDir), logger.F("error", err.Error()))
 		profile.LastError = err.Error()
 		return profile, err
 	}
-	// Bookmarks / static search seed are not required every start; they slow
-	// multi-open. First-open (no ready marker) still seeds non-cloak search once.
-	if !isCloakSelectedCore && !extensionPrepReady {
-		seedDefaultSearchEngine(userDataDir)
-	}
+	// Never rewrite Chromium's Preferences or Local State during environment
+	// startup. Chromium treats externally rewritten extension/session settings as
+	// unsafe and can reset the user's own extensions. Startup is deliberately
+	// read-only with respect to browser-owned profile files.
 
 	proxies := a.getLatestProxies()
 	acquiredXrayBridgeKey := ""
@@ -449,7 +446,22 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = append(args, effectiveFingerprintArgs...)
-	args = append(args, sanitizedProfileLaunchArgs...)
+	// BrowserStudio-managed unpacked packages are intentionally not injected at
+	// start. User-installed Chrome/Web Store extensions have priority; manager
+	// assignments remain metadata until their installation can be performed via a
+	// Chromium-owned path instead of editing Preferences.
+	runtimeProfileLaunchArgs, suppressedManagedPackages := stripBrowserStudioManagedExtensionLaunchArgs(
+		sanitizedProfileLaunchArgs,
+		a.extensionPackageRoot(),
+		filepath.Join(a.appRoot, "extensions", "imported"),
+	)
+	if suppressedManagedPackages > 0 {
+		log.Info("启动时跳过 BrowserStudio 托管扩展注入，优先保留用户浏览器扩展",
+			logger.F("profile_id", profileId),
+			logger.F("suppressed_packages", suppressedManagedPackages),
+		)
+	}
+	args = append(args, runtimeProfileLaunchArgs...)
 	args = append(args, sanitizedExtraLaunchArgs...)
 	if isCloakSelectedCore {
 		// Cloak/ungoogled Chromium needs its local Web Store bridge; branded
@@ -460,8 +472,17 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		}
 	}
 	args = appendChromeTestingInfobarSuppressArg(args, isCloakSelectedCore)
-	args, _, _ = applyProfileNativeExtensionLaunchArgs(args, userDataDir)
-	args = ensureLoadExtensionCommandLineSwitchEnabled(args)
+	// One bounded, read-only recovery pass: only if Chromium's Preferences no
+	// longer knows an extension while its profile-owned package still exists with
+	// a stable matching ID. It neither edits the profile nor runs after startup.
+	args, recoveredUserExtensions := appendProfileExtensionRecoveryLaunchArgs(args, userDataDir)
+	if recoveredUserExtensions > 0 {
+		args = ensureLoadExtensionCommandLineSwitchEnabled(args)
+		log.Info("已为本次启动临时恢复用户已有扩展（未改写浏览器数据）",
+			logger.F("profile_id", profileId),
+			logger.F("recovered_extensions", recoveredUserExtensions),
+		)
+	}
 
 	// cloak 路径下额外剥掉几个会暴露 chromium 身份的 launch arg：
 	//   - --extension-mime-request-handling   (Chromium-only debug switch)
@@ -489,24 +510,12 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		args = filtered
 	}
 
-	if isCloakSelectedCore && !extensionPrepReady {
-		// Only seed cloak labs flags on first-adapt starts; rewriting Local State
-		// every open races Chrome and costs multi-open time.
-		if err := ensureCloakLocalStateFlags(userDataDir); err != nil {
-			logger.New("CloakFlags").Warn("写入 cloak 默认 flags 失败（不阻塞启动）",
-				logger.F("profile_id", profileId),
-				logger.F("user_data_dir", userDataDir),
-				logger.F("error", err.Error()),
-			)
-		}
-	}
-
 	args = normalizeLoadExtensionArgs(args)
-	assignedExtensionCount := len(activeLoadExtensionDirs(sanitizedProfileLaunchArgs))
-	if assignedExtensionCount > 0 {
-		log.Info("启动时加载用户已分配扩展（不改写用户数据）",
+	userLaunchExtensionCount := len(activeLoadExtensionDirs(runtimeProfileLaunchArgs))
+	if userLaunchExtensionCount > 0 {
+		log.Info("启动时保留用户指定的扩展启动参数（不改写用户数据）",
 			logger.F("profile_id", profileId),
-			logger.F("assigned", assignedExtensionCount),
+			logger.F("count", userLaunchExtensionCount),
 		)
 	}
 	// Extension package repair runs off the critical path after first start
@@ -609,10 +618,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 					logger.F("profile_id", profileId),
 					logger.F("debug_port", stableDebugPort),
 				)
-				// Cloak search seed only on first-open path (not every start).
-				if !extensionPrepReady {
-					go seedDefaultSearchEngineViaCDPWithRetry(userDataDir, stableDebugPort, 4, 1200*time.Millisecond)
-				}
 			}
 			// Non-cloak stealth inject skipped on hot path after first alignment —
 			// it added multi-open latency and is not required for Cloak profiles.
@@ -634,14 +639,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			// registry so the assistant and tile prefer it instead of re-guessing
 			// from window heuristics (avoids tiling a wallet/OAuth popup).
 			a.publishProfileRuntimeSnapshotAsync(profileId, profile.Pid)
-			// 扩展自动页兜底清扫：分配了扩展的普通启动，关闭扩展在启动时自动
-			// 打开的欢迎/解锁/通知页，保持单一空白初始页。钱包批量导入启动
-			// （allowRabbyImport）需要扩展页面完成导入，跳过。
-			if assignedExtensionCount > 0 && !allowRabbyImport {
-				cleanupLaunchArgs := append([]string{}, sanitizedProfileLaunchArgs...)
-				go closeAssignedExtensionAutoPagesAfterStart(stableDebugPort, cleanupLaunchArgs)
-			}
-
 			// crashprobe: 临时停用实例启动后的 Turnstile 自动点击监控，继续收缩每实例后台
 			// CDP 监控/注入链路，验证是否仍会出现 watchdog exit_code=2。
 			// if !isCloakSelectedCore {
@@ -1357,8 +1354,6 @@ func (a *App) markProfileStoppedLocked(profileId string, profile *BrowserProfile
 		a.launchServer.ClearActiveProfile(profileId)
 	}
 	a.persistBrowserRuntimeSnapshotLocked()
-	// Async: this helper may already hold browserMgr.Mutex.
-	a.scheduleEnvironmentPopupConfinementRefresh()
 }
 
 func (a *App) openBrowserWindowForRunningProfile(profile *BrowserProfile, extraLaunchArgs []string, startURLs []string) error {

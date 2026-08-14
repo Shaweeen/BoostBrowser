@@ -340,7 +340,7 @@ func (a *App) BrowserExtensionSyncKnownToProfiles(profileIds []string) (*Extensi
 		// do not replace a loadable extension registration merely because this
 		// package is also known by BrowserStudio.
 		extID := resolveExtensionPackageID(pkg)
-		missing := a.filterProfilesMissingEquivalentExtension(profileIds, extID, readManifestNameFromDir(pkg))
+		missing := a.filterProfilesMissingExplicitExtensionAssignment(profileIds, extID, readManifestNameFromDir(pkg), pkg)
 		missingSet := make(map[string]struct{}, len(missing))
 		for _, id := range missing {
 			missingSet[id] = struct{}{}
@@ -385,7 +385,7 @@ func formatSyncKnownMessage(pkgCount, profileCount, skippedCount int) string {
 	if skippedCount > 0 {
 		message += fmt.Sprintf("；跳过已有可加载扩展的 %d 个环境（未覆盖钱包/扩展数据）", skippedCount)
 	}
-	return message + "；首次打开环境完成适配后将停止重复验证"
+	return message + "；未改写浏览器扩展配置、钱包或 Cookies"
 }
 
 // collectKnownExtensionPackages returns unique absolute package dirs from global
