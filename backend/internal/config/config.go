@@ -355,13 +355,13 @@ func normalizeConfig(config *Config) {
 	if config.Browser.StartStableWindowMs <= 0 {
 		config.Browser.StartStableWindowMs = defaultConfig.Browser.StartStableWindowMs
 	}
-	// Policy v1 replaces the legacy destructive cleaner with a conservative,
-	// cache-only weekly cleaner. Enable it once for upgraded installations;
-	// subsequent user choices are preserved because the policy version is saved.
-	if config.Browser.CacheCleanupPolicyVersion < 1 {
-		config.Browser.CacheAutoCleanEnabled = true
+	// Policy v2 retires the old default-on fixed weekly job. Upgraded and new
+	// installations start in manual mode; users may explicitly choose a custom
+	// automatic interval in Settings. Cache-only scope remains unchanged.
+	if config.Browser.CacheCleanupPolicyVersion < 2 {
+		config.Browser.CacheAutoCleanEnabled = false
 		config.Browser.CacheAutoCleanIntervalDays = defaultConfig.Browser.CacheAutoCleanIntervalDays
-		config.Browser.CacheCleanupPolicyVersion = 1
+		config.Browser.CacheCleanupPolicyVersion = 2
 	} else if config.Browser.CacheAutoCleanIntervalDays <= 0 {
 		config.Browser.CacheAutoCleanIntervalDays = defaultConfig.Browser.CacheAutoCleanIntervalDays
 	}
@@ -428,9 +428,9 @@ func DefaultConfig() *Config {
 			DefaultProxy:               "",
 			StartReadyTimeoutMs:        3000,
 			StartStableWindowMs:        450,
-			CacheAutoCleanEnabled:      true,
+			CacheAutoCleanEnabled:      false,
 			CacheAutoCleanIntervalDays: 7,
-			CacheCleanupPolicyVersion:  1,
+			CacheCleanupPolicyVersion:  2,
 			CacheLastCleanAt:           "",
 		},
 		Logging: LoggingConfig{

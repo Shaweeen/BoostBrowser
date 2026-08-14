@@ -3,7 +3,7 @@ import { Save, RotateCcw, Upload, Download, RefreshCw, HardDriveDownload, Shield
 import { Card, Button, FormItem, Input, Select, Switch, ThemeSwitcher, toast, Modal, Progress } from '../../shared/components'
 import { fetchSettings, saveSettings, resetSettings, initializeSystemData, exportSystemConfig, importSystemConfig, prepareLegacyDataRecovery, executeLegacyDataRecovery, cancelLegacyDataRecovery } from './api'
 import type { LegacyDataRecoveryPreview } from './api'
-import { scanLegacyDataAuto, importLegacyDataFolders, dismissLegacyDataFolders, clearLegacyDataDismissed } from '../browser/api'
+import { cleanBrowserCache, getCacheCleanSettings, scanLegacyDataAuto, importLegacyDataFolders, dismissLegacyDataFolders, clearLegacyDataDismissed } from '../browser/api'
 import type { LegacyDataAutoPreview } from '../browser/api'
 import type { AppSettings } from './types'
 import { defaultSettings } from './types'
@@ -43,6 +43,7 @@ export function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings>(defaultSettings)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [cacheCleaning, setCacheCleaning] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
   const [currentVersion, setCurrentVersion] = useState('-')
   const [dataCheckStatus, setDataCheckStatus] = useState<StartupDataStatus | null>(null)
@@ -220,6 +221,7 @@ export function SettingsPage() {
     try {
       const success = await saveSettings(settings)
       if (success) {
+        setSettings(await fetchSettings())
         setHasChanges(false)
         toast.success('设置已保存')
 	} else {
@@ -235,8 +237,37 @@ export function SettingsPage() {
   const handleReset = async () => {
     if (confirm('确定要重置所有设置吗？')) {
       const data = await resetSettings()
-      setSettings(data)
-      setHasChanges(false)
+      const success = await saveSettings(data)
+      if (success) {
+        setSettings(await fetchSettings())
+        setHasChanges(false)
+        toast.success('已恢复默认设置')
+      } else {
+        toast.error('重置失败，请检查配置写入权限')
+      }
+    }
+  }
+
+  const handleCleanCacheNow = async () => {
+    if (cacheCleaning) return
+    setCacheCleaning(true)
+    try {
+      const result = await cleanBrowserCache(false)
+      const cache = await getCacheCleanSettings()
+      setSettings(prev => ({
+        ...prev,
+        cacheLastCleanAt: cache.lastCleanAt || '',
+        cacheNextCleanAt: cache.nextCleanAt || '',
+      }))
+      if (result.skippedRunning > 0) {
+        toast.info(`${result.message}；运行中的环境将在关闭后再清理`)
+      } else {
+        toast.success(result.message || '缓存清理完成')
+      }
+    } catch (error: any) {
+      toast.error(error?.message || '缓存清理失败')
+    } finally {
+      setCacheCleaning(false)
     }
   }
 
@@ -521,25 +552,43 @@ export function SettingsPage() {
         </div>
       </Card>
 
-      <Card title="缓存清理" subtitle="只清理可再生的图片、Logo、视频、代码缓存和调试日志；保留账号与钱包数据">
+      <Card title="缓存管理" subtitle="由你选择手动清理或自定义周期；只清理可再生缓存，保留账号、Cookie 与钱包数据">
         <div className="space-y-4">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <p className="text-sm font-medium text-[var(--color-text-primary)]">每7天自动清理</p>
-              <p className="text-xs text-[var(--color-text-muted)] mt-0.5">
-                固定周期 7 天；延迟到客户端稳定启动后执行，并跳过正在运行的浏览器环境。
-              </p>
-            </div>
-            <Switch
-              checked={settings.cacheAutoCleanEnabled}
-              onChange={v => handleChange('cacheAutoCleanEnabled', v)}
-            />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <FormItem label="清理方式">
+              <Select
+                value={settings.cacheAutoCleanEnabled ? 'scheduled' : 'manual'}
+                onChange={e => handleChange('cacheAutoCleanEnabled', e.target.value === 'scheduled')}
+                options={[
+                  { value: 'manual', label: '仅手动清理' },
+                  { value: 'scheduled', label: '按周期自动清理' },
+                ]}
+              />
+            </FormItem>
+            <FormItem label="清理周期（天）">
+              <Input
+                type="number"
+                min={1}
+                max={365}
+                disabled={!settings.cacheAutoCleanEnabled}
+                value={settings.cacheAutoCleanIntervalDays || 7}
+                onChange={e => handleChange('cacheAutoCleanIntervalDays', Math.max(1, Math.min(365, Math.round(Number(e.target.value) || 1))))}
+              />
+            </FormItem>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-[var(--color-text-muted)] rounded-lg border border-[var(--color-border-muted)] bg-[var(--color-bg-secondary)] p-3">
-            <div>清理周期：{settings.cacheAutoCleanIntervalDays || 7} 天</div>
+            <div>当前方式：{settings.cacheAutoCleanEnabled ? `每 ${settings.cacheAutoCleanIntervalDays || 7} 天自动清理` : '仅手动清理'}</div>
             <div>上次清理：{settings.cacheLastCleanAt ? new Date(settings.cacheLastCleanAt).toLocaleString('zh-CN') : '尚未清理'}</div>
-            <div>下次自动清理：{settings.cacheNextCleanAt ? new Date(settings.cacheNextCleanAt).toLocaleString('zh-CN') : '开启后按7天计算'}</div>
+            <div>下次自动清理：{settings.cacheAutoCleanEnabled ? (settings.cacheNextCleanAt ? new Date(settings.cacheNextCleanAt).toLocaleString('zh-CN') : '保存后按所选周期执行') : '未启用'}</div>
             <div>保留：Cookies / 登录状态 / IndexedDB / Local Storage / 钱包扩展数据</div>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <p className="text-xs text-[var(--color-text-muted)]">
+              清理只由主客户端执行；开始前会按 Chrome 进程的 UserDataDir 再检查一次，运行中的环境一律跳过。
+            </p>
+            <Button variant="secondary" size="sm" onClick={() => void handleCleanCacheNow()} loading={cacheCleaning} disabled={cacheCleaning}>
+              立即清理
+            </Button>
           </div>
         </div>
       </Card>

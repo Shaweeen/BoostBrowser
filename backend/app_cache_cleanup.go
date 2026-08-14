@@ -6,26 +6,30 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
 
 const (
-	cacheAutoCleanFixedIntervalDays = 7
-	cacheAutoCleanInitialDelay      = 2 * time.Minute
-	cacheAutoCleanPollInterval      = 6 * time.Hour
+	cacheAutoCleanDefaultIntervalDays = 7
+	cacheAutoCleanMinIntervalDays     = 1
+	cacheAutoCleanMaxIntervalDays     = 365
+	cacheAutoCleanInitialDelay        = 2 * time.Minute
+	cacheAutoCleanPollInterval        = 6 * time.Hour
 )
 
 type CacheCleanResult struct {
-	ProfilesScanned int      `json:"profilesScanned"`
-	ProfilesCleaned int      `json:"profilesCleaned"`
-	FilesRemoved    int      `json:"filesRemoved"`
-	DirsRemoved     int      `json:"dirsRemoved"`
-	BytesRemoved    int64    `json:"bytesRemoved"`
-	Errors          int      `json:"errors"`
-	SkippedRunning  int      `json:"skippedRunning"`
-	CleanedProfiles []string `json:"cleanedProfiles"`
-	Message         string   `json:"message"`
+	ProfilesScanned    int      `json:"profilesScanned"`
+	ProfilesCleaned    int      `json:"profilesCleaned"`
+	FilesRemoved       int      `json:"filesRemoved"`
+	DirsRemoved        int      `json:"dirsRemoved"`
+	BytesRemoved       int64    `json:"bytesRemoved"`
+	Errors             int      `json:"errors"`
+	SkippedRunning     int      `json:"skippedRunning"`
+	SkippedLiveProcess int      `json:"skippedLiveProcess"`
+	CleanedProfiles    []string `json:"cleanedProfiles"`
+	Message            string   `json:"message"`
 }
 
 type CacheCleanSettings struct {
@@ -45,7 +49,23 @@ func (a *App) BrowserCleanCache(_ bool) (*CacheCleanResult, error) {
 	if a == nil || a.config == nil || a.browserMgr == nil {
 		return nil, fmt.Errorf("应用未完成初始化")
 	}
+	if a.panelMode {
+		return nil, fmt.Errorf("同步工具不拥有缓存清理任务，请在主客户端执行")
+	}
 
+	// The in-memory Running/PID flags are only the first guard. Immediately
+	// before touching disk, independently inspect real Chromium command lines
+	// and match their --user-data-dir. Fail closed when Windows process
+	// discovery is unavailable so a stale runtime flag can never expose a live
+	// profile to cleanup.
+	liveRoots, err := a.discoverLiveCacheProfileRoots()
+	if err != nil {
+		return nil, fmt.Errorf("无法确认浏览器运行状态，已取消缓存清理: %w", err)
+	}
+	return a.browserCleanCacheWithLiveRoots(liveRoots)
+}
+
+func (a *App) browserCleanCacheWithLiveRoots(liveRoots map[string]struct{}) (*CacheCleanResult, error) {
 	a.browserMgr.Mutex.Lock()
 	profileIDs := make([]string, 0, len(a.browserMgr.Profiles))
 	for profileID := range a.browserMgr.Profiles {
@@ -71,6 +91,12 @@ func (a *App) BrowserCleanCache(_ bool) (*CacheCleanResult, error) {
 		}
 		profileRoot := a.cacheCleanProfileRoot(profile)
 		if profileRoot == "" {
+			a.browserMgr.Mutex.Unlock()
+			continue
+		}
+		if _, live := liveRoots[normalizeCacheProfileRoot(profileRoot)]; live {
+			result.SkippedRunning++
+			result.SkippedLiveProcess++
 			a.browserMgr.Mutex.Unlock()
 			continue
 		}
@@ -104,19 +130,28 @@ func (a *App) BrowserCleanCache(_ bool) (*CacheCleanResult, error) {
 
 func (a *App) BrowserGetCacheCleanSettings() CacheCleanSettings {
 	if a == nil || a.config == nil {
-		return CacheCleanSettings{IntervalDays: cacheAutoCleanFixedIntervalDays}
+		return CacheCleanSettings{IntervalDays: cacheAutoCleanDefaultIntervalDays}
 	}
 	return a.cacheCleanSettings()
 }
 
-func (a *App) BrowserSaveCacheCleanSettings(enabled bool) (CacheCleanSettings, error) {
+func (a *App) BrowserSaveCacheCleanSettings(enabled bool, intervalDays int) (CacheCleanSettings, error) {
 	if a == nil || a.config == nil {
 		return CacheCleanSettings{}, fmt.Errorf("应用未完成初始化")
 	}
+	if a.panelMode {
+		return CacheCleanSettings{}, fmt.Errorf("同步工具不能修改缓存清理设置")
+	}
+	if intervalDays < cacheAutoCleanMinIntervalDays || intervalDays > cacheAutoCleanMaxIntervalDays {
+		return CacheCleanSettings{}, fmt.Errorf("清理周期必须在 %d 到 %d 天之间", cacheAutoCleanMinIntervalDays, cacheAutoCleanMaxIntervalDays)
+	}
 	a.config.Browser.CacheAutoCleanEnabled = enabled
-	a.config.Browser.CacheAutoCleanIntervalDays = cacheAutoCleanFixedIntervalDays
+	a.config.Browser.CacheAutoCleanIntervalDays = intervalDays
 	if err := a.config.Save(a.resolveAppPath("config.yaml")); err != nil {
 		return CacheCleanSettings{}, err
+	}
+	if enabled && a.ctx != nil {
+		a.startCacheAutoCleanScheduler()
 	}
 	return a.cacheCleanSettings(), nil
 }
@@ -125,11 +160,14 @@ func (a *App) BrowserRunDueCacheAutoClean() (*CacheAutoCleanResult, error) {
 	if a == nil || a.config == nil {
 		return &CacheAutoCleanResult{Ran: false, Reason: "应用未完成初始化"}, nil
 	}
+	if a.panelMode {
+		return &CacheAutoCleanResult{Ran: false, Reason: "同步工具不拥有缓存清理任务"}, nil
+	}
 	if !a.config.Browser.CacheAutoCleanEnabled {
 		return &CacheAutoCleanResult{Ran: false, Reason: "未开启自动清理"}, nil
 	}
 	if !a.cacheAutoCleanDue(time.Now()) {
-		return &CacheAutoCleanResult{Ran: false, Reason: "未到7天清理周期"}, nil
+		return &CacheAutoCleanResult{Ran: false, Reason: fmt.Sprintf("未到%d天清理周期", a.cacheAutoCleanIntervalDays())}, nil
 	}
 	res, err := a.BrowserCleanCache(false)
 	if err != nil {
@@ -139,33 +177,38 @@ func (a *App) BrowserRunDueCacheAutoClean() (*CacheAutoCleanResult, error) {
 }
 
 func (a *App) startCacheAutoCleanScheduler() {
+	if a == nil || a.panelMode || a.config == nil || !a.config.Browser.CacheAutoCleanEnabled {
+		return
+	}
 	ctx := a.ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	go func() {
-		// Do not overlap Wails/profile/database startup. Subsequent checks are
-		// inexpensive and cleanup itself only touches stopped environments.
-		timer := time.NewTimer(cacheAutoCleanInitialDelay)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-		_, _ = a.BrowserRunDueCacheAutoClean()
-
-		ticker := time.NewTicker(cacheAutoCleanPollInterval)
-		defer ticker.Stop()
-		for {
+	a.cacheSchedulerOnce.Do(func() {
+		go func() {
+			// Do not overlap Wails/profile/database startup. Subsequent checks are
+			// inexpensive and cleanup itself only touches stopped environments.
+			timer := time.NewTimer(cacheAutoCleanInitialDelay)
+			defer timer.Stop()
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				_, _ = a.BrowserRunDueCacheAutoClean()
+			case <-timer.C:
 			}
-		}
-	}()
+			_, _ = a.BrowserRunDueCacheAutoClean()
+
+			ticker := time.NewTicker(cacheAutoCleanPollInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					_, _ = a.BrowserRunDueCacheAutoClean()
+				}
+			}
+		}()
+	})
 }
 
 func (a *App) cacheCleanProfileRoot(profile *browser.Profile) string {
@@ -190,11 +233,11 @@ func (a *App) cacheCleanSettings() CacheCleanSettings {
 	last := strings.TrimSpace(a.config.Browser.CacheLastCleanAt)
 	settings := CacheCleanSettings{
 		AutoCleanEnabled: a.config.Browser.CacheAutoCleanEnabled,
-		IntervalDays:     cacheAutoCleanFixedIntervalDays,
+		IntervalDays:     a.cacheAutoCleanIntervalDays(),
 		LastCleanAt:      last,
 	}
 	if parsed, err := time.Parse(time.RFC3339, last); err == nil {
-		settings.NextCleanAt = parsed.Add(cacheAutoCleanFixedIntervalDays * 24 * time.Hour).Format(time.RFC3339)
+		settings.NextCleanAt = parsed.Add(time.Duration(settings.IntervalDays) * 24 * time.Hour).Format(time.RFC3339)
 	}
 	return settings
 }
@@ -208,7 +251,29 @@ func (a *App) cacheAutoCleanDue(now time.Time) bool {
 	if err != nil {
 		return true
 	}
-	return !now.Before(parsed.Add(cacheAutoCleanFixedIntervalDays * 24 * time.Hour))
+	return !now.Before(parsed.Add(time.Duration(a.cacheAutoCleanIntervalDays()) * 24 * time.Hour))
+}
+
+func (a *App) cacheAutoCleanIntervalDays() int {
+	if a == nil || a.config == nil {
+		return cacheAutoCleanDefaultIntervalDays
+	}
+	days := a.config.Browser.CacheAutoCleanIntervalDays
+	if days < cacheAutoCleanMinIntervalDays || days > cacheAutoCleanMaxIntervalDays {
+		return cacheAutoCleanDefaultIntervalDays
+	}
+	return days
+}
+
+func normalizeCacheProfileRoot(path string) string {
+	clean := filepath.Clean(strings.TrimSpace(path))
+	if clean == "." || clean == "" {
+		return ""
+	}
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(clean)
+	}
+	return clean
 }
 
 func (a *App) markCacheCleanedNow() {
@@ -216,6 +281,6 @@ func (a *App) markCacheCleanedNow() {
 		return
 	}
 	a.config.Browser.CacheLastCleanAt = time.Now().Format(time.RFC3339)
-	a.config.Browser.CacheAutoCleanIntervalDays = cacheAutoCleanFixedIntervalDays
+	a.config.Browser.CacheAutoCleanIntervalDays = a.cacheAutoCleanIntervalDays()
 	_ = a.config.Save(a.resolveAppPath("config.yaml"))
 }

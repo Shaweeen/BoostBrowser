@@ -1112,6 +1112,7 @@ export interface CacheCleanResult {
   bytesRemoved: number
   errors: number
   skippedRunning: number
+  skippedLiveProcess: number
   cleanedProfiles: string[]
   message: string
 }
@@ -1136,6 +1137,7 @@ export async function cleanBrowserCache(includeRunning = false): Promise<CacheCl
     bytesRemoved: 0,
     errors: 0,
     skippedRunning: 0,
+    skippedLiveProcess: 0,
     cleanedProfiles: [],
     message: '当前环境不支持清理缓存接口',
   }
@@ -1146,15 +1148,15 @@ export async function getCacheCleanSettings(): Promise<CacheCleanSettings> {
   if (bindings?.BrowserGetCacheCleanSettings) {
     return await bindings.BrowserGetCacheCleanSettings()
   }
-  return { autoCleanEnabled: false, intervalDays: 30 }
+  return { autoCleanEnabled: false, intervalDays: 7 }
 }
 
-export async function saveCacheCleanSettings(enabled: boolean): Promise<CacheCleanSettings> {
+export async function saveCacheCleanSettings(enabled: boolean, intervalDays: number): Promise<CacheCleanSettings> {
   const bindings: any = await getBindings()
   if (bindings?.BrowserSaveCacheCleanSettings) {
-    return await bindings.BrowserSaveCacheCleanSettings(enabled)
+    return await bindings.BrowserSaveCacheCleanSettings(enabled, intervalDays)
   }
-  return { autoCleanEnabled: enabled, intervalDays: 30 }
+  return { autoCleanEnabled: enabled, intervalDays }
 }
 
 // ============================================================================

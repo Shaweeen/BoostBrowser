@@ -58,7 +58,7 @@ export function BrowserGetCookies(arg1:string):Promise<Array<backend.CookieInfo>
 
 export function BrowserGetCacheCleanSettings():Promise<Record<string, any>>;
 
-export function BrowserSaveCacheCleanSettings(arg1:boolean):Promise<Record<string, any>>;
+export function BrowserSaveCacheCleanSettings(arg1:boolean,arg2:number):Promise<Record<string, any>>;
 
 export function BrowserInstanceGetTabs(arg1:string):Promise<Array<browser.Tab>>;
 

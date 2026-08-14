@@ -97,7 +97,10 @@ export async function fetchSettings(): Promise<AppSettings> {
 export async function saveSettings(settings: AppSettings): Promise<boolean> {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
-    await saveCacheCleanSettings(!!settings.cacheAutoCleanEnabled)
+    await saveCacheCleanSettings(
+      !!settings.cacheAutoCleanEnabled,
+      Math.max(1, Math.min(365, Math.round(Number(settings.cacheAutoCleanIntervalDays) || 7))),
+    )
     return true
   } catch {
 	return false

@@ -58,6 +58,7 @@ type App struct {
 	maintenanceMu       sync.Mutex // 维护类操作（初始化/导入/导出）互斥锁
 	extensionRecoveryMu sync.Mutex // 扩展身份清单与按原 ID 恢复串行化
 	browserCloseMu      sync.Mutex // 环境关闭按 Profile ID/PID 串行确认写盘
+	cacheSchedulerOnce  sync.Once  // 主客户端缓存调度器唯一 owner
 	bridgeMu            sync.Mutex
 	xrayBridgeRefs      map[string]string
 	rabbyImportMu       sync.Mutex
@@ -343,10 +344,16 @@ func (a *App) startup(ctx context.Context) {
 	} else {
 		a.lifecycleLog("runtime-reconcile", "state=skipped", "reason=no-live-runtime")
 	}
-	// Cache maintenance starts well after the Wails/profile/database startup
-	// window and only touches stopped environments.
-	a.lifecycleLog("cache-auto-clean", "state=scheduled", "initialDelay=2m", "pollInterval=6h")
-	a.startCacheAutoCleanScheduler()
+	// Cache maintenance has one lifecycle owner: the main client. The separate
+	// sync panel must never schedule or execute profile filesystem cleanup.
+	if !a.panelMode && a.config.Browser.CacheAutoCleanEnabled {
+		a.lifecycleLog("cache-auto-clean", "state=scheduled", "initialDelay=2m", "pollInterval=6h")
+		a.startCacheAutoCleanScheduler()
+	} else if !a.panelMode {
+		a.lifecycleLog("cache-auto-clean", "state=skipped", "reason=manual-mode")
+	} else {
+		a.lifecycleLog("cache-auto-clean", "state=skipped", "reason=panel-process")
+	}
 	// Shared layout-hold flag for the short, explicit tile operation only.
 	setLayoutHoldRoot(a.appRoot)
 

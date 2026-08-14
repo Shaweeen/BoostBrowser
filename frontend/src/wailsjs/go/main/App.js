@@ -114,8 +114,8 @@ export function BrowserGetCacheCleanSettings() {
   return window['go']['main']['App']['BrowserGetCacheCleanSettings']();
 }
 
-export function BrowserSaveCacheCleanSettings(arg1) {
-  return window['go']['main']['App']['BrowserSaveCacheCleanSettings'](arg1);
+export function BrowserSaveCacheCleanSettings(arg1, arg2) {
+  return window['go']['main']['App']['BrowserSaveCacheCleanSettings'](arg1, arg2);
 }
 
 export function BrowserInstanceGetTabs(arg1) {

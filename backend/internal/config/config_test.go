@@ -57,7 +57,7 @@ browser: {}
 	if len(cfg.Browser.DefaultFingerprintArgs) == 0 || len(cfg.Browser.DefaultLaunchArgs) == 0 {
 		t.Fatalf("Browser 默认启动参数未补齐")
 	}
-	if !cfg.Browser.CacheAutoCleanEnabled || cfg.Browser.CacheAutoCleanIntervalDays != 7 || cfg.Browser.CacheCleanupPolicyVersion != 1 {
+	if cfg.Browser.CacheAutoCleanEnabled || cfg.Browser.CacheAutoCleanIntervalDays != 7 || cfg.Browser.CacheCleanupPolicyVersion != 2 {
 		t.Fatalf("安全缓存清理策略未迁移: got=%+v", cfg.Browser)
 	}
 	if cfg.Browser.Cores == nil || cfg.Browser.Proxies == nil || cfg.Browser.Profiles == nil {
@@ -121,8 +121,8 @@ logging:
 browser:
   user_data_root: custom_data
   cache_auto_clean_enabled: false
-  cache_auto_clean_interval_days: 7
-  cache_cleanup_policy_version: 1
+  cache_auto_clean_interval_days: 21
+  cache_cleanup_policy_version: 2
   default_fingerprint_args:
     - --fingerprint-brand=Edge
   default_launch_args:
@@ -171,6 +171,9 @@ launch_server:
 	}
 	if cfg.Browser.CacheAutoCleanEnabled {
 		t.Fatal("已迁移配置中用户显式关闭的自动清理不应被重新开启")
+	}
+	if cfg.Browser.CacheAutoCleanIntervalDays != 21 || cfg.Browser.CacheCleanupPolicyVersion != 2 {
+		t.Fatalf("用户自定义清理周期未保留: got=%+v", cfg.Browser)
 	}
 	if cfg.LaunchServer.Port != 30000 {
 		t.Fatalf("LaunchServer.Port 显式配置被覆盖: got=%d", cfg.LaunchServer.Port)
