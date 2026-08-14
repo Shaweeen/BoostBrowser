@@ -170,9 +170,8 @@ func compareChromeVersion(a, b string) int {
 //  2. CloakBrowser stealth Chromium (chrome\cloak-<ver> 目录，或任意目录里
 //     带 cloak.marker 标记文件)
 //
-// 如果两个内核都存在，cloak 内核作为默认（49 个源码级指纹补丁，比原版更适合
-// 风控/反检测场景）。已有 profile 的 core_id 不会被强制改写——只有那些指向
-// 已不存在内核的 profile 会被迁移到默认内核。
+// Chrome for Testing 148 是扩展恢复的兼容基线：存在时始终作为默认内核。
+// 已有 profile 的有效显式选择仍保留；只有空/失效选择会迁移到默认内核。
 func (a *App) ensureBundledGoogleChromeCore() {
 	if a.browserMgr == nil {
 		return
@@ -189,7 +188,8 @@ func (a *App) ensureBundledGoogleChromeCore() {
 	}
 	var registered []bundledCore
 
-	// cloak 优先：如果存在则作为默认
+	google148Default := googlePath != "" && chromeMajorVersion(googleVersion) == "148"
+
 	if cloakPath != "" {
 		// 对外只显示 "Chromium <major>"，不暴露 Cloak/补丁数等内部细节。
 		name := "Chromium"
@@ -204,7 +204,7 @@ func (a *App) ensureBundledGoogleChromeCore() {
 			Id:        "bundled-cloak-chromium-latest",
 			Name:      name,
 			Path:      cloakPath,
-			IsDefault: true,
+			IsDefault: !google148Default,
 		})
 	}
 	if googlePath != "" {
@@ -216,7 +216,7 @@ func (a *App) ensureBundledGoogleChromeCore() {
 			Id:        "bundled-google-chrome-latest",
 			Name:      name,
 			Path:      googlePath,
-			IsDefault: cloakPath == "", // cloak 不存在时 google 才是默认
+			IsDefault: google148Default || cloakPath == "",
 		})
 	}
 
@@ -354,6 +354,7 @@ func (a *App) findBundledGoogleChromeCore() (string, string) {
 	}
 	bestName := ""
 	bestVersion := ""
+	bestIs148 := false
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -383,9 +384,11 @@ func (a *App) findBundledGoogleChromeCore() (string, string) {
 		if version == name || !looksLikeChromeVersion(version) {
 			version = installedChromeVersion(filepath.Join(absDir, "chrome.exe"))
 		}
-		if bestName == "" || compareChromeVersion(version, bestVersion) > 0 {
+		is148 := chromeMajorVersion(version) == "148"
+		if bestName == "" || is148 && !bestIs148 || is148 == bestIs148 && compareChromeVersion(version, bestVersion) > 0 {
 			bestName = name
 			bestVersion = version
+			bestIs148 = is148
 		}
 	}
 	if bestName == "" {
@@ -394,12 +397,43 @@ func (a *App) findBundledGoogleChromeCore() (string, string) {
 	return filepath.Join("chrome", bestName), bestVersion
 }
 
+func chromeMajorVersion(version string) string {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return ""
+	}
+	return strings.SplitN(version, ".", 2)[0]
+}
+
 func isChromeForTestingKernelDir(dir string) bool {
 	if strings.TrimSpace(dir) == "" {
 		return false
 	}
 	info, err := os.Stat(filepath.Join(dir, "chrome-for-testing.marker"))
 	return err == nil && !info.IsDir()
+}
+
+// extensionRecoveryChrome148Core returns only a verified Chrome for Testing
+// 148 core. Recovery must not silently fall back to branded Chrome or another
+// major because the user's preserved extension data was validated on 148.
+func (a *App) extensionRecoveryChrome148Core() (browser.Core, bool) {
+	if a == nil || a.browserMgr == nil {
+		return browser.Core{}, false
+	}
+	for _, core := range a.browserMgr.ListCores() {
+		if !strings.EqualFold(strings.TrimSpace(core.CoreId), "bundled-google-chrome-latest") {
+			continue
+		}
+		absDir := a.browserMgr.ResolveRelativePath(core.CorePath)
+		if !isChromeForTestingKernelDir(absDir) {
+			continue
+		}
+		version := a.browserMgr.GetChromeVersion(core.CorePath)
+		if chromeMajorVersion(version) == "148" || strings.Contains(strings.ToLower(filepath.Base(filepath.Clean(core.CorePath))), "148") {
+			return core, true
+		}
+	}
+	return browser.Core{}, false
 }
 
 func (a *App) autoDetectCores() {

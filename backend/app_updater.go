@@ -580,6 +580,11 @@ func (a *App) ApplyUpdate(newExePath string) error {
 
 	// 清理可能残留的成功标记
 	_ = os.Remove(a.resolveAppPath(filepath.Join("data", successMarker)))
+	// Capture the extension identity record immediately before replacement.
+	// This stores IDs only and never reads wallet/Cookie/extension values.
+	if err := a.captureProfileExtensionInventory(); err != nil {
+		return fmt.Errorf("更新前保存扩展身份清单失败，已取消更新以保护用户扩展: %w", err)
+	}
 	a.prepareApplyUpdateQuit()
 
 	pid := os.Getpid()

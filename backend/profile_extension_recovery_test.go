@@ -40,7 +40,7 @@ func TestProfileExtensionRecoveryUsesOnlyUnregisteredStablePackages(t *testing.T
 	}
 }
 
-func TestProfileExtensionRecoveryUsesChromeStorePackageWithoutManifestKey(t *testing.T) {
+func TestProfileExtensionRecoveryRejectsChromeStorePackageWithoutManifestKey(t *testing.T) {
 	userData := t.TempDir()
 	id := "nkbihfbeogaeaoehlefnkodbefgpgknn"
 	dir := filepath.Join(userData, "Default", "Extensions", id, "12.3.4")
@@ -56,8 +56,8 @@ func TestProfileExtensionRecoveryUsesChromeStorePackageWithoutManifestKey(t *tes
 		t.Fatal(err)
 	}
 	got := recoverableProfileExtensionDirs(userData)
-	if len(got) != 1 || got[0] != dir {
-		t.Fatalf("Chrome Store package without manifest key must recover, got %v", got)
+	if len(got) != 0 {
+		t.Fatalf("keyless package would derive a different ID from its path, got %v", got)
 	}
 	after, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
 	if err != nil || string(before) != string(after) {

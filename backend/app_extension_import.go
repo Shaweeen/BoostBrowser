@@ -552,6 +552,42 @@ func (a *App) downloadAndInstallExtension(downloadAddress string) (string, strin
 	return extID, extDir, previousVersion, extensionVersion, nil
 }
 
+// downloadAndInstallVerifiedWebStoreExtension is reserved for automatic
+// recovery. Unlike ordinary explicit import, it never trusts a keyless cached
+// directory: it downloads the signed CRX, verifies the public-key-derived ID,
+// then atomically installs that exact payload into the persistent package
+// store. This prevents path-derived duplicate wallet identities.
+func (a *App) downloadAndInstallVerifiedWebStoreExtension(extensionID string) (string, error) {
+	extensionID = strings.ToLower(strings.TrimSpace(extensionID))
+	if !isWebStoreExtensionID(extensionID) || isChromiumWebStoreHelperExtension(extensionID, "") {
+		return "", fmt.Errorf("扩展 ID 无效或不允许自动恢复: %s", extensionID)
+	}
+	downloadURL := resolveExtensionDownloadURL(extensionID, extensionID)
+	if err := validateExtensionDownloadURL(downloadURL); err != nil {
+		return "", err
+	}
+	payload, err := a.downloadExtensionPayload(downloadURL)
+	if err != nil {
+		return "", err
+	}
+	zipPayload, publicKey, err := extractZipAndPublicKeyFromCRX(payload)
+	if err != nil {
+		return "", err
+	}
+	derivedID := extensionIDFromPublicKey(publicKey)
+	if !strings.EqualFold(derivedID, extensionID) {
+		return "", fmt.Errorf("扩展 CRX 公钥不匹配: expected=%s derived=%s", extensionID, derivedID)
+	}
+	extDir, _, _, err := installUnpackedExtensionAt(a.extensionPackageRoot(), extensionID, zipPayload, publicKey)
+	if err != nil {
+		return "", err
+	}
+	if !extensionManifestHasStableKey(extDir, extensionID) {
+		return "", fmt.Errorf("扩展恢复包未保留稳定 ID: %s", extensionID)
+	}
+	return extDir, nil
+}
+
 func (a *App) registeredExtensionIDForAddress(downloadAddress string) string {
 	key := extensionSourceKey(downloadAddress)
 	if key == "" {

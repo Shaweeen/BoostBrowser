@@ -56,6 +56,7 @@ type App struct {
 	forceQuit           bool       // 强制退出标志，用于跳过 OnBeforeClose 的拦截
 	quitMode            quitMode   // 退出模式：全量退出 / 仅退出应用
 	maintenanceMu       sync.Mutex // 维护类操作（初始化/导入/导出）互斥锁
+	extensionRecoveryMu sync.Mutex // 扩展身份清单与按原 ID 恢复串行化
 	browserCloseMu      sync.Mutex // 环境关闭按 Profile ID/PID 串行确认写盘
 	bridgeMu            sync.Mutex
 	xrayBridgeRefs      map[string]string
@@ -264,10 +265,16 @@ func (a *App) startup(ctx context.Context) {
 		}
 	}
 	if !a.panelMode {
-		// 默认使用随 BrowserStudio 打包/下载到 chrome/ 目录内的独立 Google Chrome 内核；不再引用系统安装的 Chrome。
+		// 启动先扫描 chrome/，优先把扩展兼容的 Chrome for Testing 148
+		// 注册为默认内核；不引用系统安装的 Chrome。
 		a.ensureBundledGoogleChromeCore()
 		// 同步内存态，确保后续默认内核解析使用刚注册的内置 Chrome。
 		_ = a.browserMgr.ListCores()
+		// 只记录扩展 ID，不读取钱包/Cookie/扩展存储内容。该清单位于 data/
+		// 并随升级保留，用于注册丢失时按完全相同 ID 恢复。
+		if err := a.captureProfileExtensionInventory(); err != nil {
+			logger.New("Extension").Warn("启动时记录扩展身份失败", logger.F("error", err.Error()))
+		}
 		// 路径有效性扫描只写诊断日志，不参与内核选择。延后执行可避免大量
 		// 浏览器内核目录在主窗口首次加载的关键路径上同步触盘。
 		go func() {

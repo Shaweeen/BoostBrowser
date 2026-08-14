@@ -13,8 +13,9 @@ import (
 // worker, or Preferences repair: a profile package is used for this launch only
 // when Chromium has lost its registration. A manifest public key, when present,
 // must prove the exact same extension ID as the profile folder. Chrome Web
-// Store profile packages normally omit that key, so their Chrome-created
-// <extension-id>/<version> folder is treated as the identity source.
+// Store profile packages normally omit that key. Those packages must not be
+// loaded from a guessed path-derived identity; the managed recovery path
+// redownloads the signed CRX and verifies its public key first.
 //
 // This is the safe recovery path for old environments affected by Chromium's
 // "settings changed outside Chrome" reset. Cookies, Local Extension Settings,
@@ -80,13 +81,10 @@ func recoverableProfileExtensionDirsForLaunch(userDataDir string, launchArgs []s
 			if validateUnpackedExtensionManifest(candidate) != nil {
 				continue
 			}
-			// A key proves identity mathematically. Most Chrome Web Store packages
-			// do not retain the key in manifest.json after installation; in that
-			// normal case the browser-created ID directory is the only stable
-			// identity record. Never accept a package with a present but mismatched
-			// key, because that would create a second extension and sever wallet
-			// storage from its original extension ID.
-			if key := readManifestPublicKey(candidate); len(key) > 0 && !strings.EqualFold(extensionIDFromPublicKey(key), id) {
+			// Loading an unpacked package without a verified key derives its ID from
+			// the filesystem path. That creates a different extension and cannot
+			// reconnect the original wallet/extension storage.
+			if !extensionManifestHasStableKey(candidate, id) {
 				continue
 			}
 			result = append(result, candidate)
@@ -165,20 +163,22 @@ func safeChromeProfileDirectoryName(name string) bool {
 // second copy through the command line.
 func chromePreferenceExtensionStatesInProfile(profileDir string) map[string]struct{} {
 	states := make(map[string]struct{})
-	data, err := os.ReadFile(filepath.Join(profileDir, "Preferences"))
-	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
-		return states
-	}
-	var prefs map[string]any
-	if json.Unmarshal(data, &prefs) != nil {
-		return states
-	}
-	extensions, _ := prefs["extensions"].(map[string]any)
-	settings, _ := extensions["settings"].(map[string]any)
-	for rawID := range settings {
-		id := strings.ToLower(strings.TrimSpace(rawID))
-		if isWebStoreExtensionID(id) {
-			states[id] = struct{}{}
+	for _, filename := range []string{"Preferences", "Secure Preferences"} {
+		data, err := os.ReadFile(filepath.Join(profileDir, filename))
+		if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+			continue
+		}
+		var prefs map[string]any
+		if json.Unmarshal(data, &prefs) != nil {
+			continue
+		}
+		extensions, _ := prefs["extensions"].(map[string]any)
+		settings, _ := extensions["settings"].(map[string]any)
+		for rawID := range settings {
+			id := strings.ToLower(strings.TrimSpace(rawID))
+			if isWebStoreExtensionID(id) {
+				states[id] = struct{}{}
+			}
 		}
 	}
 	return states

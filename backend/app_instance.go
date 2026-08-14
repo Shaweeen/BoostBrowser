@@ -138,6 +138,28 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		log.Error("环境数据目录所有权冲突", logger.F("profile_id", profileId), logger.F("reason", startErr.Error()))
 		return nil, startErr
 	}
+	// Prepare exact-ID recovery before taking the browser manager lock. CRX
+	// download/verification can use the network and must not block unrelated
+	// profile state owners. Concurrent starts serialize in extensionRecoveryMu.
+	var preparedRecoveryDirs []string
+	var orphanedExtensionIDs []string
+	for _, snapshot := range a.browserMgr.List() {
+		if snapshot.ProfileId != profileId || snapshot.Running {
+			continue
+		}
+		userDataDir := a.browserMgr.ResolveUserDataDir(&snapshot)
+		var recoveryErr error
+		preparedRecoveryDirs, orphanedExtensionIDs, recoveryErr = a.prepareProfileExtensionRecovery(
+			profileId, userDataDir, snapshot.LaunchArgs,
+		)
+		if recoveryErr != nil {
+			log.Warn("扩展按原 ID 恢复未全部准备完成（环境数据未改动）",
+				logger.F("profile_id", profileId),
+				logger.F("error", recoveryErr.Error()),
+			)
+		}
+		break
+	}
 	a.browserMgr.Mutex.Lock()
 	managerLocked := true
 	unlockManager := func() {
@@ -202,6 +224,17 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 
 	profileBeforeDefaults := copyBrowserProfileSnapshot(profile)
 	profileChanged := a.browserMgr.ApplyDefaults(profile)
+	if len(orphanedExtensionIDs) > 0 {
+		if recoveryCore, ok := a.extensionRecoveryChrome148Core(); ok && !strings.EqualFold(profile.CoreId, recoveryCore.CoreId) {
+			profile.CoreId = recoveryCore.CoreId
+			profileChanged = true
+			log.Info("检测到扩展注册丢失，环境已切换到 Chrome for Testing 148 恢复内核",
+				logger.F("profile_id", profileId),
+				logger.F("extensions", strings.Join(orphanedExtensionIDs, ",")),
+				logger.F("core_id", recoveryCore.CoreId),
+			)
+		}
+	}
 	if profileChanged {
 		if err := a.browserMgr.SaveProfiles(); err != nil {
 			*profile = *profileBeforeDefaults
@@ -453,14 +486,15 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	// Preferences, Local State, Cookies, or extension storage is rewritten.
 	args = append(args, sanitizedProfileLaunchArgs...)
 	args = append(args, sanitizedExtraLaunchArgs...)
+	args = appendPreparedExtensionRecoveryArgs(args, preparedRecoveryDirs)
 	// Do not inject BrowserStudio's Web Store helper at environment startup.
 	// Existing user extensions and their original extension IDs take priority;
 	// the helper is not required to run those extensions and must not become an
 	// unexpected extra item in chrome://extensions.
 	args = appendChromeTestingInfobarSuppressArg(args, isCloakSelectedCore)
-	// One bounded, read-only recovery pass: only if Chromium's Preferences no
-	// longer knows an extension while its profile-owned package still exists with
-	// a stable matching ID. It neither edits the profile nor runs after startup.
+	// One bounded fallback for an already present profile package. Keyless
+	// profile packages are rejected; signed managed packages above are the
+	// authoritative same-ID recovery path.
 	recoveryProfileDir := chromeLaunchProfileDirectory(userDataDir, args)
 	args, recoveredUserExtensions := appendProfileExtensionRecoveryLaunchArgs(args, userDataDir)
 	args = normalizeLoadExtensionArgs(args)
