@@ -78,7 +78,6 @@ type App struct {
 	// profile-table reload (the panel process is a separate process whose
 	// in-memory profile map only loads once).
 	syncProfileReloadAt time.Time
-
 }
 
 // NewApp 创建新的应用实例
@@ -685,6 +684,9 @@ type BrowserCoreExtendedInfo = browser.CoreExtendedInfo
 // 这里不再做全系统进程扫描，否则每次列表加载/窗口聚焦/生命周期事件都会
 // 触发一次 PowerShell CIM + 窗口枚举，环境越多界面越卡。
 func (a *App) BrowserProfileList() []BrowserProfile {
+	if a == nil || a.browserMgr == nil {
+		return []BrowserProfile{}
+	}
 	return a.browserMgr.List()
 }
 
@@ -949,6 +951,9 @@ func (a *App) SaveBrowserSettings(settings BrowserSettings) error {
 // ============================================================================
 
 func (a *App) BrowserCoreList() []BrowserCore {
+	if a == nil || a.browserMgr == nil {
+		return []BrowserCore{}
+	}
 	return a.browserMgr.ListCores()
 }
 
@@ -1009,6 +1014,9 @@ type ProxyValidationResult struct {
 }
 
 func (a *App) BrowserProxyList() []BrowserProxy {
+	if a == nil || a.browserMgr == nil || a.config == nil {
+		return []BrowserProxy{}
+	}
 	if a.browserMgr.ProxyDAO != nil {
 		if list, err := a.browserMgr.ProxyDAO.List(); err == nil {
 			return list

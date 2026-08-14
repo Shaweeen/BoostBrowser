@@ -76,6 +76,18 @@ class PackagingScriptsTest(unittest.TestCase):
         for protected in ["config.yaml", "data", "extensions", "chrome"]:
             self.assertNotRegex(uninstall_section, rf'(Delete|RMDir /r)[^\n]*{re.escape(protected)}')
 
+    def test_installer_reuses_a_unique_registered_data_root_without_drive_scanning(self):
+        installer = self.read("scripts/build_installer.ps1")
+        resolver = installer.split("Function ResolveExistingDataRoot", 1)[1].split("FunctionEnd", 1)[0]
+        self.assertIn("Call ResolveExistingDataRoot", installer)
+        self.assertIn("InstallDirRegKey HKCU", installer)
+        self.assertIn("Uninstall\\BrowserStudio", resolver)
+        self.assertIn("Uninstall\\BoostBrowser", resolver)
+        self.assertIn('data\\app.db', resolver)
+        self.assertIn('data\\*\\Default\\*.*', resolver)
+        self.assertIn('IntCmp `$R1 1 use_unique_legacy_root', resolver)
+        self.assertNotRegex(resolver, r'[A-Z]:\\')
+
     def test_installer_only_stops_browserstudio_owned_processes(self):
         installer = self.read("scripts/build_installer.ps1")
         cleanup = self.read("scripts/close_browserstudio_processes.ps1")
@@ -452,6 +464,7 @@ class PackagingScriptsTest(unittest.TestCase):
             self.assertNotRegex(text, rf"Remove-Item[^\n]*{re.escape(protected)}")
         self.assertNotIn("RMDir", text)
         self.assertNotIn("Uninstall.exe", text)
+        self.assertIn("Uninstall\\BrowserStudioManager", text)
 
         publisher = self.read("scripts/publish_windows_github_release.ps1")
         self.assertIn("TargetVersionPattern", publisher)

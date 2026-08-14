@@ -34,6 +34,7 @@ function Resolve-InstallRoot([string]$RequestedRoot) {
     if (-not [string]::IsNullOrWhiteSpace($RequestedRoot)) { $null = $candidates.Add($RequestedRoot) }
 
     foreach ($key in @(
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\BrowserStudioManager',
         'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\BrowserStudio',
         'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\BoostBrowser'
     )) {

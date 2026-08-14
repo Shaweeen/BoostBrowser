@@ -289,7 +289,48 @@ Page custom ActivationPage ActivationPageLeave
 Var ActivationDialog
 Var ActivationInput
 
+; Keep mutable state attached to the installation that created it. The current
+; product key is already handled by InstallDirRegKey. When that selected root
+; is empty (for example, a Manager install following a legacy BrowserStudio
+; install), inspect only earlier client-owned uninstall records. Never scan a
+; drive or guess a machine-specific path. More than one valid legacy root is
+; deliberately left for the user to choose on the directory page.
+Function ResolveExistingDataRoot
+  IfFileExists "`$INSTDIR\data\app.db" keep_selected_root
+  IfFileExists "`$INSTDIR\data\*\Default\*.*" keep_selected_root
+
+  StrCpy `$R0 ""
+  StrCpy `$R1 0
+
+  ReadRegStr `$R2 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\BrowserStudio" "InstallLocation"
+  StrCmp `$R2 "" check_legacy_boostbrowser
+  StrCmp `$R2 `$INSTDIR check_legacy_boostbrowser
+  IfFileExists "`$R2\data\app.db" legacy_browserstudio_valid
+  IfFileExists "`$R2\data\*\Default\*.*" legacy_browserstudio_valid check_legacy_boostbrowser
+legacy_browserstudio_valid:
+  StrCpy `$R0 `$R2
+  IntOp `$R1 `$R1 + 1
+
+check_legacy_boostbrowser:
+  ReadRegStr `$R2 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoostBrowser" "InstallLocation"
+  StrCmp `$R2 "" choose_unique_legacy_root
+  StrCmp `$R2 `$INSTDIR choose_unique_legacy_root
+  IfFileExists "`$R2\data\app.db" legacy_boostbrowser_valid
+  IfFileExists "`$R2\data\*\Default\*.*" legacy_boostbrowser_valid choose_unique_legacy_root
+legacy_boostbrowser_valid:
+  StrCpy `$R0 `$R2
+  IntOp `$R1 `$R1 + 1
+
+choose_unique_legacy_root:
+  IntCmp `$R1 1 use_unique_legacy_root keep_selected_root keep_selected_root
+use_unique_legacy_root:
+  StrCpy `$INSTDIR `$R0
+  DetailPrint "Reusing BrowserStudio data root registered by an earlier client: `$INSTDIR"
+keep_selected_root:
+FunctionEnd
+
 Function .onInit
+  Call ResolveExistingDataRoot
   InitPluginsDir
   SetOutPath `$PLUGINSDIR
   File /oname=activation-check.exe "$ActivationCheckExe"
