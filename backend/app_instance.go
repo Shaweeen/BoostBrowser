@@ -461,6 +461,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	// One bounded, read-only recovery pass: only if Chromium's Preferences no
 	// longer knows an extension while its profile-owned package still exists with
 	// a stable matching ID. It neither edits the profile nor runs after startup.
+	recoveryProfileDir := chromeLaunchProfileDirectory(userDataDir, args)
 	args, recoveredUserExtensions := appendProfileExtensionRecoveryLaunchArgs(args, userDataDir)
 	args = normalizeLoadExtensionArgs(args)
 	// Chrome 137+ disables --load-extension by default. Apply the compatibility
@@ -470,6 +471,7 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	if recoveredUserExtensions > 0 {
 		log.Info("已为本次启动临时恢复用户已有扩展（未改写浏览器数据）",
 			logger.F("profile_id", profileId),
+			logger.F("chrome_profile_directory", recoveryProfileDir),
 			logger.F("recovered_extensions", recoveredUserExtensions),
 		)
 	}

@@ -20,20 +20,35 @@ import (
 // "settings changed outside Chrome" reset. Cookies, Local Extension Settings,
 // IndexedDB, wallet data and every Chromium-owned JSON file are left untouched.
 func appendProfileExtensionRecoveryLaunchArgs(args []string, userDataDir string) ([]string, int) {
-	dirs := recoverableProfileExtensionDirs(userDataDir)
+	dirs := recoverableProfileExtensionDirsForLaunch(userDataDir, args)
 	if len(dirs) == 0 {
 		return args, 0
 	}
+	// A legacy launch configuration can still contain an old
+	// --disable-extensions(-except) flag.  It must not silently defeat this
+	// one-time recovery when the active Chromium profile has extension package
+	// data but no registration.  This changes launch arguments only; it never
+	// changes Preferences or the user's extension state on disk.
+	args = removeExtensionBlockingLaunchArgs(args)
 	return normalizeLoadExtensionArgs(append(args, "--load-extension="+strings.Join(dirs, ","))), len(dirs)
 }
 
 func recoverableProfileExtensionDirs(userDataDir string) []string {
+	return recoverableProfileExtensionDirsForLaunch(userDataDir, nil)
+}
+
+// recoverableProfileExtensionDirsForLaunch inspects exactly the Chromium
+// profile selected by this launch.  Reading every profile under user-data-dir
+// here is incorrect: an extension registered in "Profile 1" must not suppress
+// recovery of the same extension package in the active "Default" profile.
+func recoverableProfileExtensionDirsForLaunch(userDataDir string, launchArgs []string) []string {
 	userDataDir = strings.TrimSpace(userDataDir)
 	if userDataDir == "" {
 		return nil
 	}
-	registered := chromePreferenceExtensionStates(userDataDir)
-	root := filepath.Join(userDataDir, "Default", "Extensions")
+	profileDir := chromeLaunchProfileDirectory(userDataDir, launchArgs)
+	registered := chromePreferenceExtensionStatesInProfile(filepath.Join(userDataDir, profileDir))
+	root := filepath.Join(userDataDir, profileDir, "Extensions")
 	ids, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -82,28 +97,88 @@ func recoverableProfileExtensionDirs(userDataDir string) []string {
 	return result
 }
 
+// chromeLaunchProfileDirectory matches Chromium's profile-selection order for
+// this read-only recovery check: an explicit --profile-directory wins; when it
+// is absent, Chromium reopens the profile recorded in Local State. Falling back
+// to Default is only for fresh/legacy user-data folders without that record.
+// This prevents a Default-only scan from missing the user's actual Profile 1,
+// Profile 2, etc. extension packages.
+func chromeLaunchProfileDirectory(userDataDir string, args []string) string {
+	const prefix = "--profile-directory="
+	for i, raw := range args {
+		arg := strings.TrimSpace(raw)
+		lower := strings.ToLower(arg)
+		value := ""
+		switch {
+		case strings.HasPrefix(lower, prefix):
+			value = strings.TrimSpace(arg[len(prefix):])
+		case strings.EqualFold(arg, "--profile-directory") && i+1 < len(args):
+			value = strings.TrimSpace(args[i+1])
+		}
+		value = strings.TrimSpace(strings.Trim(value, `"`))
+		if safeChromeProfileDirectoryName(value) {
+			return value
+		}
+	}
+	if profileDir := chromeLastUsedProfileDirectory(userDataDir); profileDir != "" {
+		return profileDir
+	}
+	return "Default"
+}
+
+func chromeLastUsedProfileDirectory(userDataDir string) string {
+	data, err := os.ReadFile(filepath.Join(userDataDir, "Local State"))
+	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+		return ""
+	}
+	var localState struct {
+		Profile struct {
+			LastUsed           string   `json:"last_used"`
+			LastActiveProfiles []string `json:"last_active_profiles"`
+		} `json:"profile"`
+	}
+	if json.Unmarshal(data, &localState) != nil {
+		return ""
+	}
+	if safeChromeProfileDirectoryName(localState.Profile.LastUsed) {
+		return strings.TrimSpace(strings.Trim(localState.Profile.LastUsed, `"`))
+	}
+	for _, candidate := range localState.Profile.LastActiveProfiles {
+		if safeChromeProfileDirectoryName(candidate) {
+			return strings.TrimSpace(strings.Trim(candidate, `"`))
+		}
+	}
+	return ""
+}
+
+func safeChromeProfileDirectoryName(name string) bool {
+	name = strings.TrimSpace(strings.Trim(name, `"`))
+	if name == "" || name == "." || name == ".." || len(name) > 128 {
+		return false
+	}
+	return !strings.ContainsAny(name, `\\/`)
+}
+
 // chromePreferenceExtensionStates returns only extension IDs that Chromium has
 // already recorded. State values are deliberately not interpreted here: both an
 // enabled and a user-disabled record must prevent BrowserStudio from loading a
 // second copy through the command line.
-func chromePreferenceExtensionStates(userDataDir string) map[string]struct{} {
+func chromePreferenceExtensionStatesInProfile(profileDir string) map[string]struct{} {
 	states := make(map[string]struct{})
-	for _, prefPath := range chromeProfilePreferencePaths(userDataDir) {
-		data, err := os.ReadFile(prefPath)
-		if err != nil || len(strings.TrimSpace(string(data))) == 0 {
-			continue
-		}
-		var prefs map[string]any
-		if json.Unmarshal(data, &prefs) != nil {
-			continue
-		}
-		extensions, _ := prefs["extensions"].(map[string]any)
-		settings, _ := extensions["settings"].(map[string]any)
-		for rawID := range settings {
-			id := strings.ToLower(strings.TrimSpace(rawID))
-			if isWebStoreExtensionID(id) {
-				states[id] = struct{}{}
-			}
+	data, err := os.ReadFile(filepath.Join(profileDir, "Preferences"))
+	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+		return states
+	}
+	var prefs map[string]any
+	if json.Unmarshal(data, &prefs) != nil {
+		return states
+	}
+	extensions, _ := prefs["extensions"].(map[string]any)
+	settings, _ := extensions["settings"].(map[string]any)
+	for rawID := range settings {
+		id := strings.ToLower(strings.TrimSpace(rawID))
+		if isWebStoreExtensionID(id) {
+			states[id] = struct{}{}
 		}
 	}
 	return states

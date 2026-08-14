@@ -93,3 +93,29 @@ func TestLegacyExtensionMigrationRecoversProgramCodeFromProfileWithoutReadingWal
 		t.Fatalf("migration must not read or change wallet state: data=%q err=%v", gotWalletState, err)
 	}
 }
+
+func TestLegacyExtensionMigrationFindsPackageInNonDefaultChromeProfile(t *testing.T) {
+	root := t.TempDir()
+	app := NewApp(root)
+	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
+	extensionID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
+	profile, err := app.browserMgr.Create(BrowserProfileInput{
+		ProfileName: "profile-one-package",
+		LaunchArgs:  []string{"--load-extension=" + app.legacyGlobalExtensionDir(extensionID)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageDir := filepath.Join(app.browserMgr.ResolveUserDataDir(profile), "Profile 1", "Extensions", extensionID, "2.0")
+	if err := os.MkdirAll(packageDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packageDir, "manifest.json"), []byte(`{"name":"MetaMask","version":"2.0","manifest_version":3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	app.migrateLegacyExtensionPackageStore()
+	if err := validateUnpackedExtensionManifest(app.globalExtensionDir(extensionID)); err != nil {
+		t.Fatalf("Profile 1 package was not preserved: %v", err)
+	}
+}

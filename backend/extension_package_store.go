@@ -99,23 +99,52 @@ func (a *App) managedExtensionPackageIDs() []string {
 
 func (a *App) findProfileExtensionPackage(extensionID string) string {
 	for _, profile := range a.browserMgr.List() {
-		base := filepath.Join(a.browserMgr.ResolveUserDataDir(&profile), "Default", "Extensions", extensionID)
-		entries, err := os.ReadDir(base)
-		if err != nil {
-			continue
-		}
-		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() > entries[j].Name() })
-		for _, entry := range entries {
-			if !entry.IsDir() {
+		userDataDir := a.browserMgr.ResolveUserDataDir(&profile)
+		for _, profileDir := range chromeUserDataProfileDirectories(userDataDir) {
+			base := filepath.Join(userDataDir, profileDir, "Extensions", extensionID)
+			entries, err := os.ReadDir(base)
+			if err != nil {
 				continue
 			}
-			candidate := filepath.Join(base, entry.Name())
-			if validateUnpackedExtensionManifest(candidate) == nil {
-				return candidate
+			sort.Slice(entries, func(i, j int) bool { return entries[i].Name() > entries[j].Name() })
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				candidate := filepath.Join(base, entry.Name())
+				if validateUnpackedExtensionManifest(candidate) == nil {
+					return candidate
+				}
 			}
 		}
 	}
 	return ""
+}
+
+// chromeUserDataProfileDirectories returns only the top-level Chromium profile
+// directories that can own Extensions data. It is used by a one-time package
+// preservation migration, never to rewrite profile registration or wallet
+// files. Older BrowserStudio environments may have used Profile 1 rather than
+// Default, so Default alone is insufficient for upgrade compatibility.
+func chromeUserDataProfileDirectories(userDataDir string) []string {
+	result := []string{"Default"}
+	entries, err := os.ReadDir(userDataDir)
+	if err != nil {
+		return result
+	}
+	extra := make([]string, 0)
+	for _, entry := range entries {
+		if !entry.IsDir() || !safeChromeProfileDirectoryName(entry.Name()) {
+			continue
+		}
+		name := entry.Name()
+		if name == "Default" || (!strings.HasPrefix(name, "Profile ") && name != "Guest Profile") {
+			continue
+		}
+		extra = append(extra, name)
+	}
+	sort.Strings(extra)
+	return append(result, extra...)
 }
 
 func copyMissingExtensionPackage(source, destination string) error {

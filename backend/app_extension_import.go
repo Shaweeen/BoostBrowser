@@ -1911,8 +1911,9 @@ func normalizeLoadExtensionArgs(args []string) []string {
 	seen := map[string]bool{}
 	for _, arg := range args {
 		trimmed := strings.TrimSpace(arg)
-		if strings.HasPrefix(trimmed, "--load-extension=") {
-			value := strings.TrimSpace(strings.TrimPrefix(trimmed, "--load-extension="))
+		const prefix = "--load-extension="
+		if strings.HasPrefix(strings.ToLower(trimmed), prefix) {
+			value := strings.TrimSpace(trimmed[len(prefix):])
 			for _, part := range strings.Split(value, ",") {
 				part = strings.TrimSpace(part)
 				if part == "" || seen[part] {

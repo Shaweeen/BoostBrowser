@@ -125,6 +125,21 @@ func TestRemoveExtensionDirFromLaunchArgs(t *testing.T) {
 	}
 }
 
+func TestNormalizeLoadExtensionArgsKeepsLegacyMixedCaseSwitch(t *testing.T) {
+	args := normalizeLoadExtensionArgs([]string{
+		"--LOAD-EXTENSION=C:\\extensions\\wallet",
+		"--load-extension=C:\\extensions\\wallet,C:\\extensions\\tool",
+		"--disable-sync",
+	})
+	joined := strings.Join(args, " ")
+	if strings.Count(strings.ToLower(joined), "--load-extension=") != 1 {
+		t.Fatalf("mixed-case legacy load switches must collapse into one: %v", args)
+	}
+	if !strings.Contains(joined, `C:\extensions\wallet`) || !strings.Contains(joined, `C:\extensions\tool`) {
+		t.Fatalf("legacy extension paths were lost: %v", args)
+	}
+}
+
 func TestGlobalExtensionRegistryUpsertUsesExtensionIDAsIdentity(t *testing.T) {
 	extID := "nkbihfbeogaeaoehlefnkodbefgpgknn"
 	entries := []globalExtensionRegistryEntry{{
