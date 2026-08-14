@@ -674,6 +674,21 @@ func TestBrowserZoomVirtualKeys(t *testing.T) {
 	}
 }
 
+func TestAbsoluteZoomStepDirectionAlignsToMasterScale(t *testing.T) {
+	if got := absoluteZoomStepDirection(1.25, 1.0); got != 1 {
+		t.Fatalf("smaller follower must zoom in, got %d", got)
+	}
+	if got := absoluteZoomStepDirection(1.0, 1.25); got != -1 {
+		t.Fatalf("larger follower must zoom out, got %d", got)
+	}
+	if got := absoluteZoomStepDirection(1.25, 1.251); got != 0 {
+		t.Fatalf("matching absolute scale must not receive another relative step, got %d", got)
+	}
+	if got := absoluteZoomStepDirection(0, 1); got != 0 {
+		t.Fatalf("invalid measurements must not guess a direction, got %d", got)
+	}
+}
+
 func TestCDPRuntimeValueSupportsProtocolAndLegacyShapes(t *testing.T) {
 	value, ok := cdpRuntimeValue(map[string]any{"result": map[string]any{"type": "string", "value": "chrome://extensions"}})
 	if !ok || value != "chrome://extensions" {

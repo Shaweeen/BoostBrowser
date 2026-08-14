@@ -73,6 +73,7 @@ type InputSyncer struct {
 	cdpKeyDrops           int32
 	pageInputQueue        chan pageInputEvent
 	pageInputDrops        int32
+	zoomSyncRevision      uint64 // debounce Ctrl+wheel into absolute zoom alignment
 
 	// URL 同步
 	urlStopCh                chan struct{}
@@ -414,6 +415,19 @@ func (s *InputSyncer) cdpCSSViewportSize(port int, target cdpTarget) (w, h float
 			}
 		}
 	}
+	w, h, ok = cdpCSSViewportSizeFresh(target)
+	if !ok {
+		return 0, 0, false
+	}
+	if port > 0 && s != nil {
+		s.cssViewportCache.Store(port, cssViewportCacheEntry{
+			w: w, h: h, expiresAt: time.Now().Add(cssViewportCacheTTL),
+		})
+	}
+	return w, h, true
+}
+
+func cdpCSSViewportSizeFresh(target cdpTarget) (w, h float64, ok bool) {
 	result, err := cdpCallTarget(target, "Runtime.evaluate", map[string]any{
 		"expression":    `(() => ({w: window.innerWidth||0, h: window.innerHeight||0}))()`,
 		"returnByValue": true,
@@ -433,11 +447,6 @@ func (s *InputSyncer) cdpCSSViewportSize(port int, target cdpTarget) (w, h float
 	h = cdpNumberAsFloat(info["h"])
 	if w <= 1 || h <= 1 {
 		return 0, 0, false
-	}
-	if port > 0 && s != nil {
-		s.cssViewportCache.Store(port, cssViewportCacheEntry{
-			w: w, h: h, expiresAt: time.Now().Add(cssViewportCacheTTL),
-		})
 	}
 	return w, h, true
 }
@@ -752,6 +761,7 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	atomic.StoreInt32(&s.keyCount, 0)
 	atomic.StoreInt32(&s.cdpKeyDrops, 0)
 	atomic.StoreInt32(&s.pageInputDrops, 0)
+	atomic.StoreUint64(&s.zoomSyncRevision, 0)
 	atomic.StoreInt32(&s.activePageMouseButton, 0)
 	if x, y, ok := currentCursorPosition(); ok && pointInsideMasterInputRegion(masterHwnd, x, y) {
 		atomic.StoreInt32(&s.pointerInsideMaster, 1)
@@ -3025,6 +3035,13 @@ func (s *InputSyncer) dispatchPageMouseMoveViaCDPNow(screenX, screenY int, butto
 }
 
 func (s *InputSyncer) dispatchPageWheelViaCDP(msg uint32, screenX, screenY int, delta int16, keyState uint16) {
+	if msg == WM_MOUSEWHEEL && keyState&MK_CONTROL != 0 {
+		revision := atomic.AddUint64(&s.zoomSyncRevision, 1)
+		s.enqueuePageInput(pageInputCritical, func() {
+			s.dispatchAbsolutePageZoomAfterSettle(revision, screenX, screenY, delta, keyState)
+		})
+		return
+	}
 	s.enqueuePageInput(pageInputCritical, func() {
 		s.dispatchPageWheelViaCDPNow(msg, screenX, screenY, delta, keyState)
 	})
@@ -3160,6 +3177,155 @@ func pageWheelDeltas(msg uint32, delta int16, keyState uint16) (deltaX, deltaY f
 	}
 	// Win32 positive means wheel-up; CDP positive deltaY scrolls down.
 	return 0, -float64(delta)
+}
+
+const (
+	absoluteZoomSettleDelay = 180 * time.Millisecond
+	absoluteZoomStepDelay   = 60 * time.Millisecond
+	absoluteZoomMaxSteps    = 16
+	absoluteZoomTolerance   = 0.018
+)
+
+// absoluteZoomStepDirection returns +1 for zoom-in, -1 for zoom-out and zero
+// once the follower is at the master's absolute scale.
+func absoluteZoomStepDirection(masterScale, followerScale float64) int {
+	if masterScale <= 0 || followerScale <= 0 {
+		return 0
+	}
+	relativeError := (masterScale - followerScale) / masterScale
+	if math.Abs(relativeError) <= absoluteZoomTolerance {
+		return 0
+	}
+	if relativeError > 0 {
+		return 1
+	}
+	return -1
+}
+
+func (s *InputSyncer) dispatchAbsolutePageZoomAfterSettle(revision uint64, screenX, screenY int, originalDelta int16, keyState uint16) {
+	if revision != atomic.LoadUint64(&s.zoomSyncRevision) {
+		return
+	}
+	timer := time.NewTimer(absoluteZoomSettleDelay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-s.stopCh:
+		return
+	}
+	if revision != atomic.LoadUint64(&s.zoomSyncRevision) || !s.canDispatch() {
+		return
+	}
+	s.syncFollowersToMasterAbsoluteZoom(revision, screenX, screenY, originalDelta, keyState)
+}
+
+func (s *InputSyncer) syncFollowersToMasterAbsoluteZoom(revision uint64, screenX, screenY int, originalDelta int16, keyState uint16) {
+	masterSurface, masterRender, insidePage := chromePageSurfaceAtPoint(s.masterHwnd, screenX, screenY)
+	if !insidePage {
+		return
+	}
+	ml, mt, mr, mb := getWindowRect(masterRender)
+	masterWidth := float64(mr - ml)
+	if masterWidth <= 1 {
+		return
+	}
+	s.mu.Lock()
+	masterPort := s.masterDebug
+	ports := append([]int(nil), s.followerDebug...)
+	hwnds := append([]windows.HWND(nil), s.followerHwnds...)
+	s.mu.Unlock()
+	masterTarget, ok := s.focusedMasterCDPTargetMode(masterPort, masterSurface != 0 && masterSurface != s.masterHwnd)
+	if !ok {
+		for _, hwnd := range hwnds {
+			s.dispatchPageWheelFallback(hwnd, WM_MOUSEWHEEL, screenX, screenY, originalDelta, keyState)
+		}
+		return
+	}
+	masterCSSWidth, _, ok := cdpCSSViewportSizeFresh(masterTarget)
+	if !ok || masterCSSWidth <= 1 {
+		for _, hwnd := range hwnds {
+			s.dispatchPageWheelFallback(hwnd, WM_MOUSEWHEEL, screenX, screenY, originalDelta, keyState)
+		}
+		return
+	}
+	masterScale := masterWidth / masterCSSWidth
+	waitPopup := waitForFollowerCDPMatch(masterTarget)
+	var wg sync.WaitGroup
+	for i, hwnd := range hwnds {
+		port := 0
+		if i < len(ports) {
+			port = ports[i]
+		}
+		wg.Add(1)
+		go func(port int, hwnd windows.HWND) {
+			defer wg.Done()
+			stepsApplied := 0
+			fallback := func() {
+				if stepsApplied == 0 {
+					s.dispatchPageWheelFallback(hwnd, WM_MOUSEWHEEL, screenX, screenY, originalDelta, keyState)
+				}
+			}
+			if revision != atomic.LoadUint64(&s.zoomSyncRevision) {
+				return
+			}
+			if port <= 0 {
+				fallback()
+				return
+			}
+			_, render, renderOK := followerRenderForMasterSurface(masterSurface, s.masterHwnd, hwnd)
+			if !renderOK {
+				fallback()
+				return
+			}
+			fl, _, fr, _ := getWindowRect(render)
+			followerWidth := float64(fr - fl)
+			if followerWidth <= 1 {
+				fallback()
+				return
+			}
+			s.withCDPPortLock(port, func() {
+				followerTarget, matchOK := s.cachedMatchingFollowerCDPTarget(masterTarget, port, waitPopup)
+				if !matchOK {
+					fallback()
+					return
+				}
+				x, y, mapOK := s.mapPageClickToFollowerCDP(screenX, screenY, int(ml), int(mt), int(mr), int(mb), render, port, followerTarget)
+				if !mapOK {
+					fallback()
+					return
+				}
+				for step := 0; step < absoluteZoomMaxSteps; step++ {
+					if revision != atomic.LoadUint64(&s.zoomSyncRevision) || !s.canDispatch() {
+						return
+					}
+					cssWidth, _, sizeOK := cdpCSSViewportSizeFresh(followerTarget)
+					if !sizeOK || cssWidth <= 1 {
+						fallback()
+						return
+					}
+					direction := absoluteZoomStepDirection(masterScale, followerWidth/cssWidth)
+					if direction == 0 {
+						s.cssViewportCache.Delete(port)
+						return
+					}
+					deltaY := float64(120)
+					if direction > 0 {
+						deltaY = -120
+					}
+					if _, err := cdpCallTarget(followerTarget, "Input.dispatchMouseEvent", map[string]any{
+						"type": "mouseWheel", "x": x, "y": y,
+						"deltaX": 0, "deltaY": deltaY, "modifiers": 2,
+					}); err != nil {
+						fallback()
+						return
+					}
+					stepsApplied++
+					time.Sleep(absoluteZoomStepDelay)
+				}
+			})
+		}(port, hwnd)
+	}
+	wg.Wait()
 }
 
 func (s *InputSyncer) dispatchPageWheelFallback(hwnd windows.HWND, msg uint32, screenX, screenY int, delta int16, keyState uint16) {

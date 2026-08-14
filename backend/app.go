@@ -248,6 +248,14 @@ func (a *App) startup(ctx context.Context) {
 	// 一次性迁移：若 SQLite 表为空则从旧文件导入
 	a.migrateToSQLite()
 	a.browserMgr.InitData()
+	if !a.panelMode {
+		if count, reconcileErr := a.reconcileProfileUUIDData(); reconcileErr != nil {
+			log.Error("环境 UUID 与 data 目录校验失败", logger.F("error", reconcileErr.Error()))
+			a.lifecycleLog("profile-uuid-data-reconcile", "state=failed", "error="+reconcileErr.Error())
+		} else {
+			a.lifecycleLog("profile-uuid-data-reconcile", "state=complete", fmt.Sprintf("reconciled=%d", count))
+		}
+	}
 	// Extension packages used to live beside the executable. Migrate those
 	// program files before any environment can be opened, preserving every
 	// profile, wallet vault, Cookie and legacy package in place.

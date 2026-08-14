@@ -313,10 +313,10 @@ func (m *Manager) Create(input ProfileInput) (*Profile, error) {
 
 	now := time.Now().Format(time.RFC3339)
 	profileId := uuid.NewString()
-	userDataDir := strings.TrimSpace(input.UserDataDir)
-	if userDataDir == "" {
-		userDataDir = profileId
-	}
+	// A newly created environment has one permanent storage identity:
+	// ProfileId UUID == data/<UUID>. Import/recovery paths use their explicit
+	// transactional APIs and must not overload ordinary environment creation.
+	userDataDir := profileId
 	proxyConfig := strings.TrimSpace(input.ProxyConfig)
 	proxyId := strings.TrimSpace(input.ProxyId)
 	selectedProxy := Proxy{}

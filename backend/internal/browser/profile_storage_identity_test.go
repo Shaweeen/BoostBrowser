@@ -3,26 +3,32 @@ package browser
 import (
 	"boost-browser/backend/internal/config"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
-func TestCreateRejectsUserDataDirectoryOwnedByAnotherEnvironment(t *testing.T) {
+func TestCreateAlwaysUsesGeneratedUUIDAsDataDirectory(t *testing.T) {
 	root := t.TempDir()
 	cfg := config.DefaultConfig()
 	cfg.Browser.UserDataRoot = filepath.Join(root, "profiles")
 	manager := NewManager(cfg, root)
 
-	first, err := manager.Create(ProfileInput{ProfileName: "环境-1", UserDataDir: "wallet-owner"})
+	first, err := manager.Create(ProfileInput{ProfileName: "环境-1", UserDataDir: "caller-must-not-remap"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Create(ProfileInput{ProfileName: "环境-2", UserDataDir: filepath.Join(root, "profiles", "wallet-owner")}); err == nil {
-		t.Fatal("absolute and relative references to the same user-data directory must conflict")
+	if first.UserDataDir != first.ProfileId {
+		t.Fatalf("new environment UUID and data directory diverged: id=%q dir=%q", first.ProfileId, first.UserDataDir)
 	}
-	if got := manager.Profiles[first.ProfileId].UserDataDir; got != "wallet-owner" {
-		t.Fatalf("first environment storage identity changed: %q", got)
+	if _, err := uuid.Parse(first.ProfileId); err != nil {
+		t.Fatalf("new environment ID is not UUID: %q", first.ProfileId)
+	}
+	if info, err := os.Stat(filepath.Join(root, "profiles", first.ProfileId)); err != nil || !info.IsDir() {
+		t.Fatalf("UUID data directory was not created: info=%v err=%v", info, err)
 	}
 }
 
@@ -32,7 +38,7 @@ func TestUpdatePreservesEnvironmentStorageIdentity(t *testing.T) {
 	cfg.Browser.UserDataRoot = filepath.Join(root, "profiles")
 	manager := NewManager(cfg, root)
 
-	profile, err := manager.Create(ProfileInput{ProfileName: "环境-1", UserDataDir: "wallet-owner"})
+	profile, err := manager.Create(ProfileInput{ProfileName: "环境-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +50,7 @@ func TestUpdatePreservesEnvironmentStorageIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.UserDataDir != "wallet-owner" {
+	if updated.UserDataDir != profile.ProfileId {
 		t.Fatalf("empty update remapped wallet storage: %q", updated.UserDataDir)
 	}
 	if _, err := manager.Update(profile.ProfileId, ProfileInput{
@@ -53,7 +59,7 @@ func TestUpdatePreservesEnvironmentStorageIdentity(t *testing.T) {
 	}); err == nil || !strings.Contains(err.Error(), "永久数据身份") {
 		t.Fatalf("storage remap should be rejected, got %v", err)
 	}
-	if got := manager.Profiles[profile.ProfileId].UserDataDir; got != "wallet-owner" {
+	if got := manager.Profiles[profile.ProfileId].UserDataDir; got != profile.ProfileId {
 		t.Fatalf("rejected update mutated in-memory storage identity: %q", got)
 	}
 }

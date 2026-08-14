@@ -580,6 +580,12 @@ func (a *App) ApplyUpdate(newExePath string) error {
 
 	// 清理可能残留的成功标记
 	_ = os.Remove(a.resolveAppPath(filepath.Join("data", successMarker)))
+	// Reuse the normal UUID data identity chain before replacing the EXE. This
+	// only attaches/aligns an existing data/<UUID> directory; it never moves or
+	// rewrites Cookies, extension storage, sessions or application state.
+	if _, err := a.reconcileProfileUUIDData(); err != nil {
+		return fmt.Errorf("更新前环境 UUID 数据完整性校验失败，已取消更新: %w", err)
+	}
 	// Capture the extension identity record immediately before replacement.
 	// This stores IDs only and never reads wallet/Cookie/extension values.
 	if err := a.captureProfileExtensionInventory(); err != nil {
