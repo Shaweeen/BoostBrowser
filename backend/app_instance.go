@@ -642,7 +642,12 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			// 即可正常访问与安装扩展，不再出现「改用 Chrome？」提示。不引入任何
 			// helper 扩展或本地安装协议。cloak 内核已在 C++ 层处理品牌呈现，跳过。
 			if !isCloakSelectedCore {
+				// 初始标签页注入 + 浏览器级 auto-attach 全标签页监听：无论用户
+				// 在新标签页/新窗口/弹窗中打开 chromewebstore.google.com，
+				// 都携带真实内核版本的 Google Chrome UA-CH 品牌，不再出现
+				// 「改用 Chrome？」横幅。监听随浏览器进程退出自动结束。
 				a.applyWebStoreCompatibilityToInitialTab(stableDebugPort, profileId)
+				go startWebStoreCompatWatch(stableDebugPort, profileId)
 			}
 			// Non-cloak stealth inject skipped on hot path after first alignment —
 			// it added multi-open latency and is not required for Cloak profiles.
@@ -1780,7 +1785,6 @@ const webStoreCompatScript = `(() => {
 // target 会话生效）。不创建后台常驻 CDP 连接、不启动任何本地协议服务、
 // 不改写用户数据。cloak 内核在 C++ 层已处理品牌呈现，调用方应跳过。
 func (a *App) applyWebStoreCompatibilityToInitialTab(debugPort int, profileId string) {
-	log := logger.New("Browser")
 	if debugPort <= 0 {
 		return
 	}
@@ -1813,46 +1817,7 @@ func (a *App) applyWebStoreCompatibilityToInitialTab(debugPort int, profileId st
 	if targetID == "" {
 		return
 	}
-	pageWs := fmt.Sprintf("ws://127.0.0.1:%d/devtools/page/%s", debugPort, targetID)
-	conn, _, err := websocket.DefaultDialer.Dial(pageWs, nil)
-	if err != nil {
-		log.Warn("Web Store 兼容注入：连接初始标签页失败",
-			logger.F("profile_id", profileId),
-			logger.F("error", err.Error()),
-		)
-		return
-	}
-	defer conn.Close()
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-
-	fixedUA, metadata, uaErr := getUserAgentOverride(debugPort)
-	if uaErr == nil && fixedUA != "" && metadata != nil {
-		uaMsg := cdpMessage{
-			Id:     1,
-			Method: "Emulation.setUserAgentOverride",
-			Params: map[string]any{
-				"userAgent":         fixedUA,
-				"platform":          "Win32",
-				"userAgentMetadata": metadata,
-			},
-		}
-		_ = conn.WriteJSON(uaMsg)
-		var uaResp cdpResponse
-		_ = conn.ReadJSON(&uaResp)
-	}
-
-	scriptMsg := cdpMessage{
-		Id:     2,
-		Method: "Page.addScriptToEvaluateOnNewDocument",
-		Params: map[string]any{"source": webStoreCompatScript},
-	}
-	_ = conn.WriteJSON(scriptMsg)
-	var scriptResp cdpResponse
-	_ = conn.ReadJSON(&scriptResp)
-
-	log.Info("已为初始标签页注入 Web Store 兼容（UA-CH 真实版本 + webstorePrivate，无 helper 协议）",
-		logger.F("profile_id", profileId),
-		logger.F("debug_port", debugPort),
-	)
+	// 注入逻辑与全标签页监听共用同一实现（见 webstore_compat_watch.go 的
+	// applyWebStoreCompatToPageTarget）。
+	applyWebStoreCompatToPageTarget(debugPort, targetID, profileId)
 }
