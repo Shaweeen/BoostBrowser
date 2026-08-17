@@ -36,12 +36,13 @@ type detectedLocalGateway struct {
 }
 
 type standardRelay struct {
-	key      string
-	proxyURL string
-	listen   net.Listener
-	server   *http.Server
-	localURL string
-	refCount int
+	key               string
+	proxyURL          string
+	listen            net.Listener
+	server            *http.Server
+	localURL          string
+	refCount          int
+	upstreamTransport *http.Transport
 }
 
 func NewStandardRelayManager() *StandardRelayManager {
@@ -320,6 +321,11 @@ func startStandardRelay(src string, gateway string) (*standardRelay, error) {
 		listen:   ln,
 		localURL: "http://" + ln.Addr().String(),
 	}
+	// 共享上游 http.Transport：连接复用（keep-alive）+ HTTP/2。之前每个
+	// HTTP 请求都新建一个 Transport，等于每请求都重新 TCP 握手 + 上游代理
+	// 握手 + DNS，多资源页面（X / Discord）加载极慢且更容易在个别连接上失败
+	// （“部分加载完成、部分未加载完成”）。共享后同 host 请求复用同一连接。
+	r.upstreamTransport = newRelayUpstreamTransport(px)
 	server := &http.Server{
 		Handler:           http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { r.handle(px, w, req) }),
 		ReadHeaderTimeout: 20 * time.Second,
@@ -335,6 +341,9 @@ func startStandardRelay(src string, gateway string) (*standardRelay, error) {
 func (r *standardRelay) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	if r.upstreamTransport != nil {
+		r.upstreamTransport.CloseIdleConnections()
+	}
 	if r.server != nil {
 		return r.server.Shutdown(ctx)
 	}
@@ -342,6 +351,27 @@ func (r *standardRelay) Close() error {
 		return r.listen.Close()
 	}
 	return nil
+}
+
+// newRelayUpstreamTransport 构建复用连接的共享上游 transport。
+func newRelayUpstreamTransport(px C.Proxy) *http.Transport {
+	return &http.Transport{
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			meta, err := addressToMeta(address)
+			if err != nil {
+				return nil, err
+			}
+			return px.DialContext(ctx, &meta)
+		},
+		// Keep-alives cut latency for multi-request pages through the same exit.
+		DisableKeepAlives:     false,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          64,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 45 * time.Second,
+		TLSHandshakeTimeout:   30 * time.Second,
+	}
 }
 
 func (r *standardRelay) handle(px C.Proxy, w http.ResponseWriter, req *http.Request) {
@@ -362,14 +392,18 @@ func (r *standardRelay) handleConnect(px C.Proxy, w http.ResponseWriter, req *ht
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Residential/mobile exits are slower to dial; 45s matches common sticky
-	// session warm-up without hanging the browser indefinitely.
-	ctx, cancel := context.WithTimeout(req.Context(), 45*time.Second)
+	// Chrome 的代理隧道耐心约 30s；relay 若等更久，浏览器早已放弃并重试。
+	// 25s 让注定失败的连接快速失败，Chrome 立即在新隧道上重试，避免页面
+	// 长时间挂起（X 登录 “Something went wrong”、Discord 登录卡在加载）。
+	ctx, cancel := context.WithTimeout(req.Context(), 25*time.Second)
 	defer cancel()
 	upstream, err := px.DialContext(ctx, &meta)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
+	}
+	if c, ok := upstream.(interface{ SetNoDelay(bool) error }); ok {
+		_ = c.SetNoDelay(true)
 	}
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -382,6 +416,10 @@ func (r *standardRelay) handleConnect(px C.Proxy, w http.ResponseWriter, req *ht
 		upstream.Close()
 		return
 	}
+	// 关闭 Nagle：Discord/X 等交互式 API 的每次往返不再额外等待 40ms 合并。
+	if tcp, ok := clientConn.(interface{ SetNoDelay(bool) error }); ok {
+		_ = tcp.SetNoDelay(true)
+	}
 	_, _ = bufrw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
 	_ = bufrw.Flush()
 	go relayCopy(upstream, clientConn)
@@ -389,21 +427,10 @@ func (r *standardRelay) handleConnect(px C.Proxy, w http.ResponseWriter, req *ht
 }
 
 func (r *standardRelay) handleHTTP(px C.Proxy, w http.ResponseWriter, req *http.Request) {
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			meta, err := addressToMeta(address)
-			if err != nil {
-				return nil, err
-			}
-			return px.DialContext(ctx, &meta)
-		},
-		// Keep-alives cut latency for multi-request pages through the same exit.
-		DisableKeepAlives:     false,
-		MaxIdleConns:          32,
-		MaxIdleConnsPerHost:   8,
-		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 45 * time.Second,
-		TLSHandshakeTimeout:   30 * time.Second,
+	transport := r.upstreamTransport
+	if transport == nil {
+		// 防御：正常情况下 startStandardRelay 已创建共享 transport。
+		transport = newRelayUpstreamTransport(px)
 	}
 	outReq := req.Clone(req.Context())
 	outReq.RequestURI = ""
