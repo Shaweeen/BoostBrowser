@@ -350,21 +350,35 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		effectiveProxy = socksURL
 		log.Info("xray 桥接成功", logger.F("socks_url", socksURL))
 	} else if !profile.ProxyPaused && proxy.IsStandardProxyURL(resolvedProxyConfig) && a.standardRelayMgr != nil {
-		localProxy, relayKey, relayErr := a.standardRelayMgr.Acquire(profileId, resolvedProxyConfig, proxy.StandardProxyRouteOptions{
-			Mode:            a.config.Browser.ProxyNetworkMode,
-			LocalGatewayURL: a.config.Browser.LocalVPNProxy,
-		})
-		if relayErr != nil {
-			startErr := fmt.Errorf("实例启动失败：标准代理本地转发启动失败。原因：%v。请检查代理协议、账号密码和节点可用性。", relayErr)
-			log.Error("标准代理本地转发失败", logger.F("profile_id", profileId), logger.F("proxy_id", profile.ProxyId), logger.F("error", relayErr.Error()), logger.F("reason", startErr.Error()))
-			profile.LastError = startErr.Error()
-			return profile, startErr
-		}
-		if relayKey != "" {
-			acquiredStandardRelay = true
-			effectiveProxy = localProxy
-			a.persistDetectedStandardProxy(profile.ProxyId, resolvedProxyConfig, relayKey)
-			log.Info("标准代理已切换为本地转发", logger.F("profile_id", profileId), logger.F("local_proxy", localProxy))
+		networkMode := proxy.NormalizeProxyNetworkMode(a.config.Browser.ProxyNetworkMode)
+		if networkMode == proxy.ProxyNetworkModeTUN {
+			// TUN 接管模式：环境流量全部交给本地 VPN(TUN) 在系统层路由，
+			// 不再给浏览器配置 --proxy-server，也不启动本地 relay —— 完全
+			// 脱离 Chrome 代理模块，避免双层代理与网络回路。代理池节点需
+			// 导入本地 Clash 并在其中选择；或改用 local_gateway 模式让
+			// 环境按原路径走代理池节点。
+			effectiveProxy = ""
+			log.Info("TUN 接管模式：跳过 Chrome 代理与本地 relay，流量由本地 VPN TUN 接管",
+				logger.F("profile_id", profileId),
+				logger.F("proxy_id", profile.ProxyId),
+			)
+		} else {
+			localProxy, relayKey, relayErr := a.standardRelayMgr.Acquire(profileId, resolvedProxyConfig, proxy.StandardProxyRouteOptions{
+				Mode:            a.config.Browser.ProxyNetworkMode,
+				LocalGatewayURL: a.config.Browser.LocalVPNProxy,
+			})
+			if relayErr != nil {
+				startErr := fmt.Errorf("实例启动失败：标准代理本地转发启动失败。原因：%v。请检查代理协议、账号密码和节点可用性。", relayErr)
+				log.Error("标准代理本地转发失败", logger.F("profile_id", profileId), logger.F("proxy_id", profile.ProxyId), logger.F("error", relayErr.Error()), logger.F("reason", startErr.Error()))
+				profile.LastError = startErr.Error()
+				return profile, startErr
+			}
+			if relayKey != "" {
+				acquiredStandardRelay = true
+				effectiveProxy = localProxy
+				a.persistDetectedStandardProxy(profile.ProxyId, resolvedProxyConfig, relayKey)
+				log.Info("标准代理已切换为本地转发", logger.F("profile_id", profileId), logger.F("local_proxy", localProxy))
+			}
 		}
 	}
 

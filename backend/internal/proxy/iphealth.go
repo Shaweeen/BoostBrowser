@@ -15,12 +15,23 @@ const defaultIPPureInfoURL = "https://my.ippure.com/v1/info"
 
 // FetchIPPureInfo 通过指定代理链路查询 IPPure 的出口 IP 健康信息。
 // 返回值为第三方接口原始 JSON（map 形式），不做本地评分计算。
+// route 可选：与代理池测速/环境 relay 一致，local_gateway 经本地 VPN
+// 网关拨号，auto 直连失败回退网关——否则用户开 TUN 时直连会被截获，
+// 健康检测和池页测速一样误报“超时/不可用”。
 func FetchIPPureInfo(
 	proxyId string,
 	proxies []config.BrowserProxy,
 	xrayMgr *XrayManager,
 	singboxMgr *SingBoxManager,
+	route ...SpeedTestRouteOptions,
 ) (map[string]interface{}, error) {
+	routeOpts := SpeedTestRouteOptions{}
+	if len(route) > 0 {
+		routeOpts = route[0]
+	}
+	routeOpts.Mode = NormalizeProxyNetworkMode(routeOpts.Mode)
+	routeOpts.LocalGatewayURL = strings.TrimSpace(routeOpts.LocalGatewayURL)
+
 	src := ""
 	for _, item := range proxies {
 		if strings.EqualFold(item.ProxyId, proxyId) {
@@ -32,16 +43,27 @@ func FetchIPPureInfo(
 		return nil, fmt.Errorf("未找到代理配置")
 	}
 
-	data, err := fetchIPPureInfoWithSource(src, proxyId, proxies, xrayMgr, singboxMgr, 20*time.Second)
+	data, err := fetchIPPureInfoWithSource(src, proxyId, proxies, xrayMgr, singboxMgr, 20*time.Second, routeOpts)
 	if err == nil {
 		return data, nil
+	}
+	lastErr := err
+
+	// auto 模式：直连失败后经本地 VPN 网关重试（与池页测速一致，覆盖 TUN 接管场景）
+	if routeOpts.Mode == ProxyNetworkModeAuto {
+		gwOpts := routeOpts
+		gwOpts.Mode = ProxyNetworkModeLocalGateway
+		if data, gwErr := fetchIPPureInfoWithSource(src, proxyId, proxies, xrayMgr, singboxMgr, 20*time.Second, gwOpts); gwErr == nil {
+			return data, nil
+		} else {
+			lastErr = gwErr
+		}
 	}
 
 	// 常见导入问题：HTTP 代理被写成 socks5://，SOCKS 握手会报 unexpected protocol version 72(H)。
 	// IP健康检测也跟普通测速一样自动尝试同一 host:port 的其它标准协议。
-	lastErr := err
 	for _, altSrc := range alternateStandardProxyConfigs(src) {
-		data, altErr := fetchIPPureInfoWithSource(altSrc, proxyId, proxies, xrayMgr, singboxMgr, 20*time.Second)
+		data, altErr := fetchIPPureInfoWithSource(altSrc, proxyId, proxies, xrayMgr, singboxMgr, 20*time.Second, routeOpts)
 		if altErr == nil {
 			return data, nil
 		}
@@ -57,8 +79,9 @@ func fetchIPPureInfoWithSource(
 	xrayMgr *XrayManager,
 	singboxMgr *SingBoxManager,
 	timeout time.Duration,
+	routeOpts SpeedTestRouteOptions,
 ) (map[string]interface{}, error) {
-	client, err := buildIPPureHTTPClient(src, proxyId, proxies, xrayMgr, singboxMgr, timeout)
+	client, err := buildIPPureHTTPClient(src, proxyId, proxies, xrayMgr, singboxMgr, timeout, routeOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -95,8 +118,9 @@ func buildIPPureHTTPClient(
 	xrayMgr *XrayManager,
 	singboxMgr *SingBoxManager,
 	timeout time.Duration,
+	routeOpts SpeedTestRouteOptions,
 ) (*http.Client, error) {
-	return buildProxyHTTPClient(src, proxyId, proxies, xrayMgr, singboxMgr, timeout)
+	return buildProxyHTTPClient(src, proxyId, proxies, xrayMgr, singboxMgr, timeout, routeOpts)
 }
 
 func bodySnippet(body []byte, max int) string {

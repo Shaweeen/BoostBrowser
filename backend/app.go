@@ -1081,6 +1081,20 @@ type ProxyIPHealthResult struct {
 	UpdatedAt      string                 `json:"updatedAt"`
 }
 
+// speedTestRouteOptions 返回当前设置的代理网络模式路由选项，让池页测速/
+// IP 健康检测与环境的 relay 走同一条拨号路径（local_gateway 经本地 VPN
+// 网关，auto 直连失败回退网关）。否则用户开 TUN 时直连被截获，池页会
+// 误报“超时/不可用”而环境实际是通的。
+func (a *App) speedTestRouteOptions() proxy.SpeedTestRouteOptions {
+	mode := proxy.ProxyNetworkModeAuto
+	gateway := ""
+	if a != nil && a.config != nil {
+		mode = a.config.Browser.ProxyNetworkMode
+		gateway = a.config.Browser.LocalVPNProxy
+	}
+	return proxy.SpeedTestRouteOptions{Mode: mode, LocalGatewayURL: gateway}
+}
+
 // TestProxyConnectivity 测试代理连通性
 func (a *App) TestProxyConnectivity(proxyId string, proxyConfig string) ProxyTestResult {
 	proxies := a.getLatestProxies()
@@ -1092,7 +1106,7 @@ func (a *App) TestProxyConnectivity(proxyId string, proxyConfig string) ProxyTes
 // 参考 Clash URLTest 策略：多 URL fallback + 复用桥接 + TCP ping 降级
 func (a *App) TestProxyRealConnectivity(proxyId string) ProxyTestResult {
 	proxies := a.getLatestProxies()
-	r := proxy.SpeedTest(proxyId, proxies, a.xrayMgr, a.singboxMgr, nil)
+	r := proxy.SpeedTest(proxyId, proxies, a.xrayMgr, a.singboxMgr, nil, a.speedTestRouteOptions())
 	return proxyTestResultFromInternal(r)
 }
 
@@ -1103,7 +1117,7 @@ func (a *App) TestProxyRealConnectivity(proxyId string) ProxyTestResult {
 func (a *App) TestProxyConfigRealConnectivity(proxyConfig string) ProxyTestResult {
 	const previewID = "__proxy_edit_preview__"
 	candidate := config.BrowserProxy{ProxyId: previewID, ProxyName: previewID, ProxyConfig: strings.TrimSpace(proxyConfig)}
-	r := proxy.SpeedTest(previewID, []config.BrowserProxy{candidate}, a.xrayMgr, a.singboxMgr, nil)
+	r := proxy.SpeedTest(previewID, []config.BrowserProxy{candidate}, a.xrayMgr, a.singboxMgr, nil, a.speedTestRouteOptions())
 	return proxyTestResultFromInternal(r)
 }
 
@@ -1292,7 +1306,7 @@ func (a *App) SuggestTimezoneFromProxy(proxyId string) string {
 // BrowserProxyTestSpeed 手动触发单个代理测速并持久化结果
 func (a *App) BrowserProxyTestSpeed(proxyId string) ProxyTestResult {
 	proxies := a.getLatestProxies()
-	r := proxy.SpeedTest(proxyId, proxies, a.xrayMgr, a.singboxMgr, nil)
+	r := proxy.SpeedTest(proxyId, proxies, a.xrayMgr, a.singboxMgr, nil, a.speedTestRouteOptions())
 	for _, item := range proxies {
 		if strings.EqualFold(item.ProxyId, proxyId) {
 			a.persistDetectedStandardProxy(proxyId, item.ProxyConfig, r.ResolvedConfig)
@@ -1342,7 +1356,7 @@ func (a *App) BrowserProxyBatchTestSpeed(proxyIds []string, concurrency int) []P
 				}
 			}()
 			for job := range jobs {
-				r := proxy.SpeedTest(job.ProxyId, proxies, a.xrayMgr, a.singboxMgr, nil)
+				r := proxy.SpeedTest(job.ProxyId, proxies, a.xrayMgr, a.singboxMgr, nil, a.speedTestRouteOptions())
 				for _, item := range proxies {
 					if strings.EqualFold(item.ProxyId, job.ProxyId) {
 						a.persistDetectedStandardProxy(job.ProxyId, item.ProxyConfig, r.ResolvedConfig)
@@ -1376,7 +1390,7 @@ func (a *App) BrowserProxyBatchTestSpeed(proxyIds []string, concurrency int) []P
 // BrowserProxyCheckIPHealth 检测单个代理的出口 IP 健康信息（通过 IPPure 接口）
 func (a *App) BrowserProxyCheckIPHealth(proxyId string) ProxyIPHealthResult {
 	proxies := a.getLatestProxies()
-	data, err := proxy.FetchIPPureInfo(proxyId, proxies, a.xrayMgr, a.singboxMgr)
+	data, err := proxy.FetchIPPureInfo(proxyId, proxies, a.xrayMgr, a.singboxMgr, a.speedTestRouteOptions())
 	result := buildProxyIPHealthResult(proxyId, data, err)
 	a.persistProxyIPHealthResult(result)
 	if a.ctx != nil {
@@ -1421,7 +1435,7 @@ func (a *App) BrowserProxyBatchCheckIPHealth(proxyIds []string, concurrency int)
 				}
 			}()
 			for job := range jobs {
-				data, err := proxy.FetchIPPureInfo(job.ProxyId, proxies, a.xrayMgr, a.singboxMgr)
+				data, err := proxy.FetchIPPureInfo(job.ProxyId, proxies, a.xrayMgr, a.singboxMgr, a.speedTestRouteOptions())
 				result := buildProxyIPHealthResult(job.ProxyId, data, err)
 				a.persistProxyIPHealthResult(result)
 				results[job.Idx] = result

@@ -39,6 +39,15 @@ type SpeedTestConfig struct {
 	URLs       []string
 }
 
+// SpeedTestRouteOptions 测速/健康检测的路由选项,与设置里的代理网络模式对齐:
+//   - local_gateway: 经本地 VPN 网关(Clash 7897 等)拨号到节点
+//   - auto:          直连优先,失败回退本地网关(与 relay acquireOnce 一致)
+//   - tun / direct:  直连拨号(TUN 已在系统层接管流量)
+type SpeedTestRouteOptions struct {
+	Mode            string
+	LocalGatewayURL string
+}
+
 var DefaultSpeedTestConfig = SpeedTestConfig{
 	// 手动验证必须有可预期的响应时间。协议候选并发探测，并共享每个
 	// 候选的短总预算；不再出现 HTTP/HTTPS/SOCKS5 逐个等待几十秒。
@@ -51,12 +60,14 @@ var DefaultSpeedTestConfig = SpeedTestConfig{
 // SpeedTest 使用 mihomo 代理适配器进行测速。
 // 采用 unified-delay 策略：先建立连接（预热），再单独计时 HTTP 往返，
 // 与 Clash 客户端 unified-delay: true 的延迟结果一致。
+// route 可选:传入 SpeedTestRouteOptions 后拨号路径与代理网络模式一致。
 func SpeedTest(
 	proxyId string,
 	proxies []config.BrowserProxy,
 	xrayMgr *XrayManager,
 	singboxMgr *SingBoxManager,
 	cfg *SpeedTestConfig,
+	route ...SpeedTestRouteOptions,
 ) TestResult {
 	log := logger.New("SpeedTest")
 
@@ -112,8 +123,18 @@ func SpeedTest(
 
 	// 标准 HTTP/HTTPS/SOCKS5 允许供应商未标注或标错协议。候选协议并发
 	// 检查，首个真实 HTTP 响应即返回，最坏耗时受单一总预算约束。
+	// 拨号路径与网络模式一致：local_gateway 经本地 VPN 网关（Clash 7897）
+	// 拨号，auto 直连失败回退网关，tun/direct 直连（TUN 在系统层接管）。
+	// 之前这里永远直连：本地 Clash 开 TUN 时直连会被 TUN 截获、经 Clash
+	// 节点转发，节点出口 IP 通常连不上代理服务器 → 池页全部“超时/不可用”，
+	// 而环境（local_gateway 模式）实际走网关是通的。现在池页与环境的
+	// 网络路径保持一致，不再误报。
 	if LooksLikeStandardProxyConfig(src) {
-		if detected, detectedResult, ok := detectWorkingStandardProxy(src, testURLs, cfg.Timeout); ok {
+		routeOpts := SpeedTestRouteOptions{}
+		if len(route) > 0 {
+			routeOpts = route[0]
+		}
+		if detected, detectedResult, ok := detectStandardProxyForRoute(src, testURLs, cfg.Timeout, routeOpts); ok {
 			detectedResult.ProxyId = proxyId
 			detectedResult.ResolvedConfig = detected
 			return detectedResult
@@ -504,6 +525,50 @@ func parseClashYAMLToMapping(src string) (map[string]any, error) {
 
 func DetectWorkingStandardProxyConfig(src string, cfg *SpeedTestConfig) (string, error) {
 	return detectWorkingStandardProxyConfigWithDialer(src, cfg, nil)
+}
+
+// detectStandardProxyForRoute 按代理网络模式探测标准代理，返回
+// (可用配置, 结果, 是否可用)。
+//   - local_gateway: 必须经本地 VPN 网关拨号；网关不可用直接报错
+//   - auto:          直连优先，失败回退本地网关（与 relay acquireOnce 一致）
+//   - tun / direct:  直连拨号（TUN 在系统层接管流量）
+func detectStandardProxyForRoute(src string, testURLs []string, timeout time.Duration, route SpeedTestRouteOptions) (string, TestResult, bool) {
+	mode := NormalizeProxyNetworkMode(route.Mode)
+	route.LocalGatewayURL = strings.TrimSpace(route.LocalGatewayURL)
+
+	gatewayDialer := func() C.Dialer {
+		gateway := DiscoverLocalGateway(route.LocalGatewayURL, 1800*time.Millisecond)
+		if gateway == "" {
+			return nil
+		}
+		d, err := newUpstreamGatewayDialer(gateway)
+		if err != nil {
+			return nil
+		}
+		return d
+	}
+
+	if mode == ProxyNetworkModeLocalGateway {
+		d := gatewayDialer()
+		if d == nil {
+			return "", TestResult{Error: "未检测到可用的本地 VPN 网关，请在设置中填写本地网关地址（如 127.0.0.1:7897）"}, false
+		}
+		detected, result, ok := detectWorkingStandardProxyWithDialer(src, testURLs, timeout, d)
+		return detected, result, ok
+	}
+
+	detected, result, ok := detectWorkingStandardProxy(src, testURLs, timeout)
+	if ok || mode != ProxyNetworkModeAuto {
+		return detected, result, ok
+	}
+	// auto：直连失败 → 回退本地网关（与环境的 relay 一致，覆盖用户开 TUN 的场景）
+	if d := gatewayDialer(); d != nil {
+		detected2, result2, ok2 := detectWorkingStandardProxyWithDialer(src, testURLs, timeout, d)
+		if ok2 {
+			return detected2, result2, true
+		}
+	}
+	return detected, result, false
 }
 
 func detectWorkingStandardProxyConfigWithDialer(src string, cfg *SpeedTestConfig, upstreamDialer C.Dialer) (string, error) {
