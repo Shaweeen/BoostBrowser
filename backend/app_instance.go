@@ -1701,9 +1701,19 @@ func dropStoreInstalledLoadExtensionArgs(args []string, userDataDir string) []st
 		if extID == "" {
 			continue
 		}
-		if entry, ok := readPreferencesExtensionEntry(userDataDir, extID); ok && isChromiumManagedExtensionEntry(entry) {
-			drop[normalizeExtensionPath(original)] = true
+		entry, ok := readPreferencesExtensionEntry(userDataDir, extID)
+		if !ok || !isChromiumManagedExtensionEntry(entry) {
+			continue
 		}
+		// 只在商城注册确实可加载时才剔除 CLI：条目必须已启用（state=1），且
+		// Chrome 自己在 Default/Extensions/<id>/ 下仍持有有效包。若商城包缺失
+		// 或条目被禁用，Chrome 无法原生加载它——此时剔除 CLI 会把扩展彻底
+		// 变成“数据能识别但加载不成功”（Preferences 与钱包/LES 数据仍在，
+		// 但没有任何加载路径）。保留 CLI 让 BrowserStudio 管理包继续加载。
+		if !extensionSettingIsLoadable(entry) || !chromeStoreManagedExtensionPackageExists(userDataDir, extID) {
+			continue
+		}
+		drop[normalizeExtensionPath(original)] = true
 	}
 	if len(drop) == 0 {
 		return args
@@ -1732,6 +1742,32 @@ func dropStoreInstalledLoadExtensionArgs(args []string, userDataDir string) []st
 		out = append(out, "--load-extension="+strings.Join(kept, ","))
 	}
 	return out
+}
+
+// chromeStoreManagedExtensionPackageExists 报告 Chrome 自身是否仍为某个商城
+// 管理的扩展 ID 持有可加载的包（Default/Extensions/<id>/<version>/manifest.json）。
+// 只有它存在时，剔除 --load-extension 才是安全的：真正加载的是商城包。
+func chromeStoreManagedExtensionPackageExists(userDataDir, extID string) bool {
+	extID = strings.ToLower(strings.TrimSpace(extID))
+	if userDataDir == "" || !isWebStoreExtensionID(extID) {
+		return false
+	}
+	for _, profileDir := range chromeProfileDirs(userDataDir) {
+		root := filepath.Join(profileDir, "Extensions", extID)
+		versions, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, v := range versions {
+			if !v.IsDir() {
+				continue
+			}
+			if validateUnpackedExtensionManifest(filepath.Join(root, v.Name())) == nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // webStoreCompatScript 在主文档执行前注入，补齐 Chrome for Testing (google-148)
