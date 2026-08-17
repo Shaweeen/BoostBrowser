@@ -340,7 +340,15 @@ export function ExtensionManagementPage() {
         : await importExtensionToBrowserProfiles(targetIds, item.downloadAddress)
       // Backend message already covers skip / prefs / deferred; do not append long noise.
       const baseMsg = result?.message || `已分配到 ${targetIds.length} 个实例`
-      toast.success(baseMsg)
+      // 检测到所有选中环境都已安装该扩展（可能来自浏览器商城或之前的分配）：
+      // 明确提醒用户已安装并确认跳过，绝不覆盖用户已安装的版本。
+      if (!result?.updatedProfiles?.length && (result?.skippedCount || 0) > 0) {
+        window.confirm(
+          `「${item.name}」已在所选 ${targetIds.length} 个环境中安装（可能来自浏览器商城或之前的分配）。\n已自动跳过，不会覆盖你已安装的版本。\n\n点击「确定」确认跳过。`,
+        )
+      } else {
+        toast.success(baseMsg)
+      }
       if (item.distributionMode === 'global' || targetIds.length === profiles.length) {
         setAppliedGlobalProfiles(prev => {
           const next = new Map(prev)

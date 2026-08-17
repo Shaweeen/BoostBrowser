@@ -770,6 +770,25 @@ func profileHasLoadableEquivalentExtension(userDataDir string, extensionID strin
 	return false
 }
 
+// isChromiumManagedExtensionEntry reports a Preferences row owned by Chrome
+// itself (Chrome Web Store install / built-in component extension), identified
+// by location=1 (INTERNAL) or from_webstore=true. Such rows have no
+// BrowserStudio-managed `path`; Chrome resolves the package inside
+// Default/Extensions/<id>/ itself and keeps auto-update. They must never be
+// rewritten into unpacked rows, replaced by an imported package, or re-injected
+// via --load-extension.
+func isChromiumManagedExtensionEntry(entry map[string]any) bool {
+	if entry == nil {
+		return false
+	}
+	location, _ := entry["location"].(float64)
+	if location == chromeExtLocationInternal {
+		return true
+	}
+	fromStore, _ := entry["from_webstore"].(bool)
+	return fromStore
+}
+
 func extensionSettingIsLoadable(entry map[string]any) bool {
 	if entry == nil {
 		return false
@@ -777,6 +796,12 @@ func extensionSettingIsLoadable(entry map[string]any) bool {
 	state, _ := entry["state"].(float64)
 	if state != 1 {
 		return false
+	}
+	// Chrome Web Store / built-in install: enabled + location=INTERNAL means
+	// Chrome loads it natively without any `path`/--load-extension. Count it as
+	// installed so import/assign skip it and never overwrite the user version.
+	if isChromiumManagedExtensionEntry(entry) {
+		return true
 	}
 	path, _ := entry["path"].(string)
 	path = strings.TrimSpace(path)

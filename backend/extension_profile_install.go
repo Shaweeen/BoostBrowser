@@ -80,6 +80,13 @@ func materializeExtensionPackageForProfile(userDataDir, packageDir string) (loca
 	if validateUnpackedExtensionManifest(dest) == nil {
 		return dest, extID, version, nil
 	}
+	// Never clear Chrome's own Web Store package dir. If the profile has a
+	// store-managed install for this id (location=INTERNAL), its version folder
+	// is authoritative and the user's installed version must be preserved —
+	// deleting it is what previously caused "extensions lost after update".
+	if entry, ok := readPreferencesExtensionEntry(userDataDir, extID); ok && isChromiumManagedExtensionEntry(entry) {
+		return dest, extID, version, nil
+	}
 	if _, statErr := os.Stat(dest); statErr == nil {
 		if directoryHasAnyFile(dest) {
 			return "", "", "", fmt.Errorf("profile materialize: existing profile extension directory is invalid and was preserved: %s", dest)
@@ -218,9 +225,6 @@ func isExtensionInstalledInProfile(userDataDir, packageDir string) bool {
 	if err != nil {
 		return false
 	}
-	if validateUnpackedExtensionManifest(absPkg) != nil {
-		return false
-	}
 	extID := resolveExtensionPackageID(absPkg)
 	if extID == "" {
 		return false
@@ -235,6 +239,17 @@ func isExtensionInstalledInProfile(userDataDir, packageDir string) bool {
 	}
 	state, _ := entry["state"].(float64)
 	if state != 1 {
+		return false
+	}
+	// Chrome Web Store / built-in install: Chrome loads this extension id
+	// natively and the BrowserStudio-managed package is not involved. Treat it
+	// as installed so start paths never re-inject CLI or rewrite the row — a
+	// re-injection would create a duplicate install and re-fire onInstalled
+	// (wallet welcome/unlock popups).
+	if isChromiumManagedExtensionEntry(entry) {
+		return true
+	}
+	if validateUnpackedExtensionManifest(absPkg) != nil {
 		return false
 	}
 	path, _ := entry["path"].(string)
@@ -385,6 +400,12 @@ func ensurePreferencesUnpackedExtension(userDataDir, extID, absPackageDir, versi
 			"withholding_permissions":    false,
 		}
 	} else {
+		// Respect an existing Chrome Web Store / built-in install: never convert
+		// it into an unpacked row or repoint it at a BrowserStudio package. The
+		// user's store version (and its auto-update) stays authoritative.
+		if isChromiumManagedExtensionEntry(existing) {
+			return nil
+		}
 		// Heal registration without wiping Chrome-written wallet metadata.
 		existing["state"] = float64(1)
 		delete(existing, "disable_reasons")
@@ -571,6 +592,12 @@ func disableExtensionInProfile(userDataDir, packageDir string) error {
 		}
 	}
 	if existing == nil {
+		return nil
+	}
+	// Never disable a Chrome Web Store / built-in install on unbind: it was not
+	// installed by BrowserStudio and the user may still rely on it after the
+	// assignment is removed.
+	if isChromiumManagedExtensionEntry(existing) {
 		return nil
 	}
 	existing["state"] = float64(0)

@@ -32,7 +32,11 @@ export interface BrowserProfile {
 export interface ExtensionImportResult {
   extensionDir: string
   extensionId: string
+  extensionVersion?: string
+  previousVersion?: string
   updatedProfiles: string[]
+  skippedCount?: number
+  deferredRunningCount?: number
   message: string
 }
 

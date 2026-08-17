@@ -504,6 +504,12 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	}
 
 	args = normalizeLoadExtensionArgs(args)
+	// 用户在浏览器商城里自行安装的扩展（Preferences location=INTERNAL）由
+	// Chrome 原生加载，禁止再通过 --load-extension 注入同一 ID 的管理包：
+	// 双重安装会再次触发 onInstalled（Rabby/MetaMask 欢迎/解锁弹窗），并可能
+	// 覆盖用户自行安装的版本。这里只剔除商城里已原生安装的条目，
+	// BrowserStudio 自己分配的 unpacked 包不受影响（仍是权威分配记录）。
+	args = dropStoreInstalledLoadExtensionArgs(args, userDataDir)
 	userLaunchExtensionCount := len(activeLoadExtensionDirs(sanitizedProfileLaunchArgs))
 	if userLaunchExtensionCount > 0 {
 		log.Info("启动时保留用户指定的扩展启动参数（不改写用户数据）",
@@ -1640,4 +1646,59 @@ func createBlankTab(browserConn *websocket.Conn, msgId int) (string, error) {
 		return "", fmt.Errorf("Target.createTarget 未返回有效的 targetId")
 	}
 	return targetId, nil
+}
+
+// dropStoreInstalledLoadExtensionArgs removes --load-extension entries for
+// packages the profile already loads natively from the Chrome Web Store
+// (Preferences location=INTERNAL / from_webstore). Re-injecting a
+// store-installed extension creates a duplicate install, re-fires onInstalled
+// (Rabby/MetaMask welcome or unlock popups), and risks replacing the user's own
+// version. BrowserStudio-managed unpacked packages are untouched — the saved
+// assignment record stays authoritative for those.
+func dropStoreInstalledLoadExtensionArgs(args []string, userDataDir string) []string {
+	userDataDir = strings.TrimSpace(userDataDir)
+	if userDataDir == "" || len(args) == 0 {
+		return args
+	}
+	dirs := activeLoadExtensionDirs(args)
+	if len(dirs) == 0 {
+		return args
+	}
+	drop := map[string]bool{}
+	for _, original := range dirs {
+		extID := resolveExtensionPackageID(original)
+		if extID == "" {
+			continue
+		}
+		if entry, ok := readPreferencesExtensionEntry(userDataDir, extID); ok && isChromiumManagedExtensionEntry(entry) {
+			drop[normalizeExtensionPath(original)] = true
+		}
+	}
+	if len(drop) == 0 {
+		return args
+	}
+	out := make([]string, 0, len(args))
+	var kept []string
+	seen := map[string]bool{}
+	for _, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		if strings.HasPrefix(strings.ToLower(trimmed), "--load-extension=") {
+			value := strings.TrimSpace(strings.TrimPrefix(trimmed, "--load-extension="))
+			for _, part := range strings.Split(value, ",") {
+				part = strings.TrimSpace(part)
+				key := normalizeExtensionPath(part)
+				if part == "" || drop[key] || seen[key] {
+					continue
+				}
+				seen[key] = true
+				kept = append(kept, part)
+			}
+			continue
+		}
+		out = append(out, arg)
+	}
+	if len(kept) > 0 {
+		out = append(out, "--load-extension="+strings.Join(kept, ","))
+	}
+	return out
 }
