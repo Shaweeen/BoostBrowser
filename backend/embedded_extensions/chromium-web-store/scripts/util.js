@@ -213,7 +213,10 @@ async function boostInstallFromStore(crx_url) {
         r = await fetch(url, {
             method: "POST",
             headers: headers,
-            body: JSON.stringify({ crxUrl: crx_url }),
+            body: JSON.stringify({
+                crxUrl: crx_url,
+                profileId: typeof cfg.profileId === "string" ? cfg.profileId : "",
+            }),
         });
     } catch (e) {
         return { ok: false, status: 0, error: "fetch failed: " + String(e) };
@@ -235,7 +238,7 @@ function _showBoostInstallToast(body) {
                 type: "basic",
                 iconUrl: "assets/icon/icon_128.png",
                 title: "扩展已下载",
-                message: `${name} 已加入启动参数，重启该实例后生效。`,
+                message: `${name} 已下载；关闭并重新启动当前环境后自动启用，无需登录 Google。`,
             });
     } catch (e) {}
 }

@@ -1,11 +1,23 @@
 package launchcode
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type recordingExtensionInstaller struct {
+	profileID string
+	crxURL    string
+}
+
+func (r *recordingExtensionInstaller) InstallExtensionFromCRXURL(profileID string, crxURL string) (string, string, error) {
+	r.profileID = profileID
+	r.crxURL = crxURL
+	return "nkbihfbeogaeaoehlefnkodbefgpgknn", "MetaMask", nil
+}
 
 func TestBuildHandlerRejectsNonLocalRequestBeforeAPIAuth(t *testing.T) {
 	srv := NewLaunchServer(NewLaunchCodeService(NewMemoryLaunchCodeDAO()), nil, nil, 0)
@@ -65,5 +77,32 @@ func TestBuildHandlerAllowsAuthenticatedChromeExtensionAPIOrigin(t *testing.T) {
 	srv.buildHandler(true).ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("authenticated helper extension should be allowed: code=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestWebStoreInstallRequestUsesExplicitProfileInsteadOfLastActive(t *testing.T) {
+	srv := NewLaunchServer(NewLaunchCodeService(NewMemoryLaunchCodeDAO()), nil, nil, 0)
+	srv.SetAPIAuthConfig(APIAuthConfig{Enabled: true, APIKey: "secret-key"})
+	installer := &recordingExtensionInstaller{}
+	srv.SetExtensionInstaller(installer)
+
+	body := bytes.NewBufferString(`{"crxUrl":"https://clients2.google.com/service/update2/crx?id=metamask","profileId":"profile-a"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/extension/install-from-store", body)
+	req.RemoteAddr = "127.0.0.1:3456"
+	req.Host = "127.0.0.1:19876"
+	req.Header.Set("Origin", "chrome-extension://lfoeajgcchlidpicbabpmckkejpckcfb")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(DefaultAPIKeyHeader, "secret-key")
+	w := httptest.NewRecorder()
+
+	srv.buildHandler(true).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("install request failed: code=%d body=%s", w.Code, w.Body.String())
+	}
+	if installer.profileID != "profile-a" {
+		t.Fatalf("explicit environment was not preserved: got=%q", installer.profileID)
+	}
+	if !strings.Contains(installer.crxURL, "clients2.google.com") {
+		t.Fatalf("CRX URL was not forwarded: %q", installer.crxURL)
 	}
 }

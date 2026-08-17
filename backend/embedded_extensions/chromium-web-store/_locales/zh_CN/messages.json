@@ -1,10 +1,10 @@
 {
   "extension_Name": {
-    "message": "Chromium Web Store",
+    "message": "BrowserStudio 扩展商店兼容组件",
     "description": "扩展的标题，显示在 Chrome Web Store 中。"
   },
   "extension_Description": {
-    "message": "在基于 Chromium 的浏览器上启用对来自 Chrome Web Store (或其它地方)的扩展的安装和半自动更新。",
+    "message": "让当前隔离环境无需登录 Google 即可从 Chrome Web Store 安装和使用扩展。",
     "description": "扩展的说明，显示在 Chrome Web Store 中。"
   },
   "options_updateHeading": {

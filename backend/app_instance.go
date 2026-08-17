@@ -449,10 +449,15 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	// Preferences, Local State, Cookies, or extension storage is rewritten.
 	args = append(args, sanitizedProfileLaunchArgs...)
 	args = append(args, sanitizedExtraLaunchArgs...)
-	// Do not inject BrowserStudio's Web Store helper at environment startup.
-	// Existing user extensions and their original extension IDs take priority;
-	// the helper is not required to run those extensions and must not become an
-	// unexpected extra item in chrome://extensions.
+	// Chrome for Testing/Cloak does not expose Google Chrome's native Web Store
+	// installer. Attach one per-profile system compatibility component for this
+	// launch only. It is not persisted as a business extension assignment and it
+	// never rewrites Preferences, Cookies, Local State, wallet or extension data.
+	if browserCoreNeedsWebStoreHelper(selectedCore, chromeBinaryPath) {
+		if helperDir := a.webStoreHelperForProfileLaunch(profileId, userDataDir); helperDir != "" {
+			args = appendWebStoreHelperLaunchArgs(args, helperDir)
+		}
+	}
 	args = appendChromeTestingInfobarSuppressArg(args, isCloakSelectedCore)
 	// One bounded fallback for an already present profile package. Keyless
 	// profile packages are rejected; signed managed packages above are the

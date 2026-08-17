@@ -16,15 +16,15 @@ import (
 	"boost-browser/backend/internal/logger"
 )
 
-// chromium-web-store helper 扩展（让 cloak/ungoogled-chromium 能在
+// chromium-web-store helper 扩展（让 Chrome for Testing/Cloak Chromium 能在
 // chromewebstore.google.com 上点"添加至 Chrome"直接安装扩展）。
 // 之前 v1.1.0/v1.2.x 把这个扩展放在开发机 Z:\BoostBrowser_cloak_test\extensions\
 // 下，profile.launch_args 里硬编码了那个绝对路径。一旦用户那边路径不存在，
 // helper 加载失败 → 用户在 Web Store 看到"无法从该网站添加应用、扩展程序"。
 //
-// 这里把扩展直接 embed 进 boost-browser.exe，启动时解压到 <appRoot>\extensions\
-// chromium-web-store\，cloak_core 启动参数里按 appRoot 拼路径，旧 Z:\ 路径会被
-// app_instance.go 在 cloak 路径上 strip 掉。
+// 这里把扩展直接 embed 进 boost-browser.exe。每个环境启动时只在自己的 UUID
+// user-data-dir 下物化一份兼容组件，使并行运行的环境能携带各自 profileId，避免
+// 用户在 A 环境点击安装却被错误分配到最后启动的 B 环境。
 //
 // 注意：_locales/ 以下划线开头，默认 //go:embed 不会包含，必须用 all: 前缀。
 //
@@ -37,20 +37,19 @@ const (
 	cloakWebStoreHelperVersionFn = ".embedded_version"
 )
 
-// cloakWebStoreHelperPath returns the helper's persistent package path. It is
-// deliberately under data/: the installer/updater may replace application
-// files, but must never make an already usable Cloak environment lose Chrome
-// Web Store support.
-func cloakWebStoreHelperPath(appRoot string) string {
-	if strings.TrimSpace(appRoot) == "" {
+// webStoreHelperPath returns the system compatibility package for one UUID
+// environment. It is BrowserStudio-owned metadata, not Chromium Preferences,
+// Cookies, Local State, extension storage, or an extension-center assignment.
+func webStoreHelperPath(userDataDir string) string {
+	if strings.TrimSpace(userDataDir) == "" {
 		return ""
 	}
-	return filepath.Join(appRoot, "data", "extensions", cloakWebStoreHelperDirName)
+	return filepath.Join(userDataDir, ".browserstudio", "extensions", cloakWebStoreHelperDirName)
 }
 
 // embeddedHelperFingerprint 计算 embed 资源里 chromium-web-store 整棵树的 sha256
 // 指纹（按相对路径排序后逐文件哈希）。任何文件变更都会改变指纹，从而触发
-// ensureEmbeddedCloakExtensions 重新解压 —— 否则只看 manifest.json 时，
+// ensureEmbeddedWebStoreHelper 重新解压 —— 否则只看 manifest.json 时，
 // util.js / background.js 等代码改动不会被部署。
 func embeddedHelperFingerprint() (string, error) {
 	srcRoot := embeddedExtensionsRoot + "/" + cloakWebStoreHelperDirName
@@ -89,16 +88,16 @@ func embeddedHelperFingerprint() (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// ensureEmbeddedCloakExtensions 在 appRoot 下解压 chromium-web-store helper 扩展。
+// ensureEmbeddedWebStoreHelper 在一个 UUID 环境下解压 chromium-web-store helper。
 // 已存在且 manifest 指纹一致则直接返回；否则清空目录重新解压。
 //
-// 返回的 string 是 helper 扩展的绝对路径，调用方 (cloak 启动链路) 可以直接
+// 返回的 string 是 helper 扩展的绝对路径，调用方可以直接
 // 拼到 --load-extension。失败返回空字符串 + 错误，由调用方决定是否阻塞启动。
-func ensureEmbeddedCloakExtensions(appRoot string) (string, error) {
+func ensureEmbeddedWebStoreHelper(userDataDir string) (string, error) {
 	log := logger.New("EmbedExt")
-	dest := cloakWebStoreHelperPath(appRoot)
+	dest := webStoreHelperPath(userDataDir)
 	if dest == "" {
-		return "", fmt.Errorf("appRoot 为空，无法定位扩展目录")
+		return "", fmt.Errorf("userDataDir 为空，无法定位扩展目录")
 	}
 
 	wantFp, err := embeddedHelperFingerprint()
@@ -173,31 +172,6 @@ func ensureEmbeddedCloakExtensions(appRoot string) (string, error) {
 	return dest, nil
 }
 
-// looksLikeStaleCloakExtensionPath 判断一条 --load-extension= 路径是否是
-// 老版本残留的开发机绝对路径或者用户机上根本不存在的路径。
-//
-//   - 含 BoostBrowser_cloak_test 字面量（v1.1.0 错误硬编码）→ stale
-//   - 路径不存在 → stale
-//   - 是 helper 扩展的 appRoot 下规范路径 → 保留（由调用方负责注入）
-func looksLikeStaleCloakExtensionPath(p string, appRoot string) bool {
-	low := strings.ToLower(strings.TrimSpace(p))
-	if low == "" {
-		return true
-	}
-	if strings.Contains(low, "boostbrowser_cloak_test") {
-		return true
-	}
-	// chromium-web-store helper 在 appRoot 之外的路径都视为 stale
-	canon := strings.ToLower(cloakWebStoreHelperPath(appRoot))
-	if canon != "" && strings.Contains(low, "chromium-web-store") && !strings.HasPrefix(low, canon) {
-		return true
-	}
-	if _, err := os.Stat(p); err != nil {
-		return true
-	}
-	return false
-}
-
 // writeHelperBoostEndpoint 把 LaunchServer 的本地 install endpoint 信息写到
 // chromium-web-store helper 扩展目录里。helper 通过 chrome.runtime.getURL
 // 读这份文件，得知 LaunchServer 端口与可选 API key。
@@ -205,10 +179,10 @@ func looksLikeStaleCloakExtensionPath(p string, appRoot string) bool {
 // 必须在 LaunchServer.Start() 成功之后调用，因为 port 可能是随机分配的。
 // helper 的 boost_endpoint.json 不进 fingerprint：它是运行期数据，每次启动
 // 都重写，避免 LaunchServer 切端口后 helper 拿到老端口连不上。
-func writeHelperBoostEndpoint(appRoot string, port int, apiHeader, apiKey string) error {
-	dest := cloakWebStoreHelperPath(appRoot)
+func writeHelperBoostEndpoint(helperDir string, port int, apiHeader, apiKey, profileID string) error {
+	dest := strings.TrimSpace(helperDir)
 	if dest == "" {
-		return fmt.Errorf("appRoot 为空")
+		return fmt.Errorf("helperDir 为空")
 	}
 	if port <= 0 {
 		return fmt.Errorf("LaunchServer 端口无效: %d", port)
@@ -220,13 +194,14 @@ func writeHelperBoostEndpoint(appRoot string, port int, apiHeader, apiKey string
 		"port":      port,
 		"apiHeader": apiHeader,
 		"apiKey":    apiKey,
+		"profileId": strings.TrimSpace(profileID),
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return err
 	}
 	target := filepath.Join(dest, "boost_endpoint.json")
-	if err := os.WriteFile(target, data, 0644); err != nil {
+	if err := os.WriteFile(target, data, 0600); err != nil {
 		return fmt.Errorf("写 boost_endpoint.json 失败: %w", err)
 	}
 	return nil

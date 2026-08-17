@@ -72,10 +72,6 @@ type App struct {
 	finalizeOnce        sync.Once
 	updateMu            sync.Mutex
 	verifiedUpdatePath  string
-	cloakStoreOnce      sync.Once
-	cloakStoreHelperDir string
-	cloakStoreHelperErr error
-
 	// syncProfileReloadAt throttles the sync assistant's periodic SQLite
 	// profile-table reload (the panel process is a separate process whose
 	// in-memory profile map only loads once).
