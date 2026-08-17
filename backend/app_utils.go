@@ -515,6 +515,10 @@ func (a *App) scanChromeDir(chromeRoot string) []browser.Core {
 func (a *App) loadProxies() {
 	log := logger.New("Browser")
 
+	// 「本地代理」动态指向当前检测到的本地 VPN 网关（Clash 混合端口）；
+	// 未检测到网关时保持已有配置（仅行不存在时用默认 7890 占位），避免
+	// 硬编码 7890 与用户实际 Clash 端口（如 7897）不符导致该行永远超时。
+	localGateway := a.discoverLocalGatewayProxy()
 	builtins := []browser.Proxy{
 		{ProxyId: "__direct__", ProxyName: "直连（不走代理）", ProxyConfig: "direct://"},
 		{ProxyId: "__local__", ProxyName: "本地代理", ProxyConfig: "http://127.0.0.1:7890"},
@@ -522,16 +526,24 @@ func (a *App) loadProxies() {
 
 	ensureBuiltins := func(list []browser.Proxy) []browser.Proxy {
 		for _, b := range builtins {
-			found := false
-			for _, p := range list {
+			foundIdx := -1
+			for i, p := range list {
 				if p.ProxyId == b.ProxyId {
-					found = true
+					foundIdx = i
 					break
 				}
 			}
-			if !found {
-				list = append([]browser.Proxy{b}, list...)
+			if foundIdx >= 0 {
+				if b.ProxyId == "__local__" && localGateway != "" && !strings.EqualFold(list[foundIdx].ProxyConfig, localGateway) {
+					list[foundIdx].ProxyConfig = localGateway
+				}
+				continue
 			}
+			add := b
+			if b.ProxyId == "__local__" && localGateway != "" {
+				add.ProxyConfig = localGateway
+			}
+			list = append([]browser.Proxy{add}, list...)
 		}
 		return list
 	}

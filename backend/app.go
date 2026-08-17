@@ -1095,6 +1095,35 @@ func (a *App) speedTestRouteOptions() proxy.SpeedTestRouteOptions {
 	return proxy.SpeedTestRouteOptions{Mode: mode, LocalGatewayURL: gateway}
 }
 
+// discoverLocalGatewayProxy 探测当前可用的本地 VPN 网关（Clash 混合端口，
+// 7890/7897 等），返回其 URL；未检测到返回空串。用于内置「本地代理」行
+// 动态指向用户实际网关端口，避免硬编码 7890 与 Clash Verge Rev（7897）等
+// 实际端口不符导致该行永远“超时/不可用”。
+func (a *App) discoverLocalGatewayProxy() string {
+	explicit := ""
+	if a != nil && a.config != nil {
+		explicit = a.config.Browser.LocalVPNProxy
+	}
+	return proxy.DiscoverLocalGateway(explicit, 1500*time.Millisecond)
+}
+
+// withFreshLocalProxyConfig 返回一份代理列表的副本，其中内置「本地代理」
+// 行指向当前检测到的本地 VPN 网关；未检测到网关时保持原配置不变。
+func (a *App) withFreshLocalProxyConfig(proxies []config.BrowserProxy) []config.BrowserProxy {
+	gw := a.discoverLocalGatewayProxy()
+	if gw == "" {
+		return proxies
+	}
+	out := make([]config.BrowserProxy, len(proxies))
+	copy(out, proxies)
+	for i := range out {
+		if out[i].ProxyId == "__local__" {
+			out[i].ProxyConfig = gw
+		}
+	}
+	return out
+}
+
 // TestProxyConnectivity 测试代理连通性
 func (a *App) TestProxyConnectivity(proxyId string, proxyConfig string) ProxyTestResult {
 	proxies := a.getLatestProxies()
@@ -1306,6 +1335,11 @@ func (a *App) SuggestTimezoneFromProxy(proxyId string) string {
 // BrowserProxyTestSpeed 手动触发单个代理测速并持久化结果
 func (a *App) BrowserProxyTestSpeed(proxyId string) ProxyTestResult {
 	proxies := a.getLatestProxies()
+	// 内置「本地代理」行在测试时动态解析当前本地网关（回环直连，TUN 不截获），
+	// 避免硬编码 7890 与用户实际 Clash 端口不符导致永远超时。
+	if proxyId == "__local__" {
+		proxies = a.withFreshLocalProxyConfig(proxies)
+	}
 	r := proxy.SpeedTest(proxyId, proxies, a.xrayMgr, a.singboxMgr, nil, a.speedTestRouteOptions())
 	for _, item := range proxies {
 		if strings.EqualFold(item.ProxyId, proxyId) {
@@ -1769,22 +1803,33 @@ func (a *App) SaveBrowserProxies(proxies []BrowserProxy) error {
 		normalized = append(normalized, item)
 	}
 
-	// 确保内置代理始终存在（直连 + 本地代理）
+	// 确保内置代理始终存在（直连 + 本地代理）。「本地代理」动态指向当前
+	// 检测到的本地 VPN 网关（Clash 混合端口），未检测到时保持已有配置，
+	// 避免硬编码 7890 与用户实际 Clash 端口（如 7897）不符导致永远超时。
+	localGateway := a.discoverLocalGatewayProxy()
 	builtins := []BrowserProxy{
 		{ProxyId: "__direct__", ProxyName: "直连（不走代理）", ProxyConfig: "direct://"},
 		{ProxyId: "__local__", ProxyName: "本地代理", ProxyConfig: "http://127.0.0.1:7890"},
 	}
 	for _, b := range builtins {
-		found := false
-		for _, p := range normalized {
+		foundIdx := -1
+		for i, p := range normalized {
 			if p.ProxyId == b.ProxyId {
-				found = true
+				foundIdx = i
 				break
 			}
 		}
-		if !found {
-			normalized = append([]BrowserProxy{b}, normalized...)
+		if foundIdx >= 0 {
+			if b.ProxyId == "__local__" && localGateway != "" && !strings.EqualFold(normalized[foundIdx].ProxyConfig, localGateway) {
+				normalized[foundIdx].ProxyConfig = localGateway
+			}
+			continue
 		}
+		add := b
+		if b.ProxyId == "__local__" && localGateway != "" {
+			add.ProxyConfig = localGateway
+		}
+		normalized = append([]BrowserProxy{add}, normalized...)
 	}
 
 	a.config.Browser.Proxies = normalized

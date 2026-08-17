@@ -11,7 +11,8 @@ import (
 	"boost-browser/backend/internal/config"
 )
 
-const defaultIPPureInfoURL = "https://my.ippure.com/v1/info"
+// defaultIPPureInfoURL 用 var 而非 const，便于测试覆盖为本地目标。
+var defaultIPPureInfoURL = "https://my.ippure.com/v1/info"
 
 // FetchIPPureInfo 通过指定代理链路查询 IPPure 的出口 IP 健康信息。
 // 返回值为第三方接口原始 JSON（map 形式），不做本地评分计算。
@@ -43,20 +44,45 @@ func FetchIPPureInfo(
 		return nil, fmt.Errorf("未找到代理配置")
 	}
 
-	data, err := fetchIPPureInfoWithSource(src, proxyId, proxies, xrayMgr, singboxMgr, 20*time.Second, routeOpts)
-	if err == nil {
-		return data, nil
+	fetch := func(opts SpeedTestRouteOptions) (map[string]interface{}, error) {
+		return fetchIPPureInfoWithSource(src, proxyId, proxies, xrayMgr, singboxMgr, 20*time.Second, opts)
 	}
-	lastErr := err
+	gatewayOpts := func() SpeedTestRouteOptions {
+		gw := routeOpts
+		gw.Mode = ProxyNetworkModeLocalGateway
+		return gw
+	}
 
-	// auto 模式：直连失败后经本地 VPN 网关重试（与池页测速一致，覆盖 TUN 接管场景）
-	if routeOpts.Mode == ProxyNetworkModeAuto {
-		gwOpts := routeOpts
-		gwOpts.Mode = ProxyNetworkModeLocalGateway
-		if data, gwErr := fetchIPPureInfoWithSource(src, proxyId, proxies, xrayMgr, singboxMgr, 20*time.Second, gwOpts); gwErr == nil {
+	// 拨号顺序按网络模式：
+	//   - tun：直连会被本地 Clash TUN 截获并按 Clash 规则转发，出口会变成
+	//     Clash 节点而不是代理池节点 —— 先经本地 VPN 网关（回环地址不被 TUN
+	//     截获）拿节点真实出口，网关不可用时回退直连（v1.7.129 实测 TUN 模式
+	//     池页/IP健康全超时的根因）；
+	//   - auto：直连优先，失败回退网关（与 relay acquireOnce 一致）；
+	//   - local_gateway / direct：只走字面语义的那一条路径。
+	// 节点就是本地 VPN 网关本身时（内置「本地代理」行即指向网关）直连即可：
+	// TUN 不截获回环，经网关测自己会自环/双跳，直接按 direct 语义拨号。
+	// 仅 local_gateway / tun 需要该捷径（会走网关路由）；auto/direct 下回环
+	// 节点本来就直连，无需探测网关。
+	if (routeOpts.Mode == ProxyNetworkModeLocalGateway || routeOpts.Mode == ProxyNetworkModeTUN) &&
+		isLocalGatewaySource(src, routeOpts.LocalGatewayURL) {
+		routeOpts.Mode = ProxyNetworkModeDirect
+	}
+	attempts := make([]SpeedTestRouteOptions, 0, 2)
+	switch routeOpts.Mode {
+	case ProxyNetworkModeTUN:
+		attempts = append(attempts, gatewayOpts(), routeOpts)
+	case ProxyNetworkModeAuto:
+		attempts = append(attempts, routeOpts, gatewayOpts())
+	default:
+		attempts = append(attempts, routeOpts)
+	}
+	var lastErr error
+	for _, opts := range attempts {
+		if data, err := fetch(opts); err == nil {
 			return data, nil
 		} else {
-			lastErr = gwErr
+			lastErr = err
 		}
 	}
 

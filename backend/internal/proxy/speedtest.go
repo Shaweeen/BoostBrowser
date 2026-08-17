@@ -40,9 +40,11 @@ type SpeedTestConfig struct {
 }
 
 // SpeedTestRouteOptions 测速/健康检测的路由选项,与设置里的代理网络模式对齐:
-//   - local_gateway: 经本地 VPN 网关(Clash 7897 等)拨号到节点
-//   - auto:          直连优先,失败回退本地网关(与 relay acquireOnce 一致)
-//   - tun / direct:  直连拨号(TUN 已在系统层接管流量)
+//   - local_gateway: 经本地 VPN 网关(Clash 7897 等)拨号到节点,网关不可用直接报错
+//   - tun:          网关优先、直连回退(TUN 接管下直连会被本地 Clash TUN 截获,
+//     必须经网关走环境真实路径;无网关时回退直连)
+//   - auto:         直连优先,失败回退本地网关(与 relay acquireOnce 一致)
+//   - direct:       永远直连拨号(用户明确选择,不做任何网关回退)
 type SpeedTestRouteOptions struct {
 	Mode            string
 	LocalGatewayURL string
@@ -124,7 +126,7 @@ func SpeedTest(
 	// 标准 HTTP/HTTPS/SOCKS5 允许供应商未标注或标错协议。候选协议并发
 	// 检查，首个真实 HTTP 响应即返回，最坏耗时受单一总预算约束。
 	// 拨号路径与网络模式一致：local_gateway 经本地 VPN 网关（Clash 7897）
-	// 拨号，auto 直连失败回退网关，tun/direct 直连（TUN 在系统层接管）。
+	// 拨号，tun 网关优先直连回退，auto 直连失败回退网关，direct 永远直连。
 	// 之前这里永远直连：本地 Clash 开 TUN 时直连会被 TUN 截获、经 Clash
 	// 节点转发，节点出口 IP 通常连不上代理服务器 → 池页全部“超时/不可用”，
 	// 而环境（local_gateway 模式）实际走网关是通的。现在池页与环境的
@@ -305,6 +307,48 @@ func isUsableProxyResponseStatus(statusCode int) bool {
 	return (statusCode >= 100 && statusCode < 400) ||
 		statusCode == http.StatusForbidden ||
 		statusCode == http.StatusMethodNotAllowed
+}
+
+// isLoopbackProxySource 判断标准代理节点是否指向本机回环地址（127.0.0.0/8、
+// ::1、localhost）。回环节点 = 本机服务（如本地 Clash 网关）。
+func isLoopbackProxySource(src string) bool {
+	host, _ := proxySourceHostPort(src)
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(strings.Trim(host, "[]"), "localhost")
+}
+
+// isLocalGatewaySource 判断节点是否就是本地 VPN 网关本身（host:port 完全
+// 一致）。只有回环地址才可能匹配；非回环节点直接返回 false。此时直连测试，
+// 避免经网关测自己造成自环/双跳。
+func isLocalGatewaySource(src string, explicitGateway string) bool {
+	if !isLoopbackProxySource(src) {
+		return false
+	}
+	gateway := DiscoverLocalGateway(explicitGateway, 800*time.Millisecond)
+	if gateway == "" {
+		return false
+	}
+	gwHost, gwPort := proxySourceHostPort(gateway)
+	nodeHost, nodePort := proxySourceHostPort(src)
+	if gwHost == "" || gwPort == "" || nodeHost == "" || nodePort == "" {
+		return false
+	}
+	return strings.EqualFold(strings.Trim(gwHost, "[]"), strings.Trim(nodeHost, "[]")) && gwPort == nodePort
+}
+
+// proxySourceHostPort 提取标准代理地址的 host 与端口（去掉 scheme）。
+func proxySourceHostPort(src string) (string, string) {
+	lower := strings.ToLower(strings.TrimSpace(src))
+	if idx := strings.Index(lower, "://"); idx > 0 {
+		lower = lower[idx+len("://"):]
+	}
+	host, port, err := net.SplitHostPort(lower)
+	if err != nil {
+		return strings.TrimSpace(lower), ""
+	}
+	return host, port
 }
 
 func addressToMeta(address string) (C.Metadata, error) {
@@ -536,6 +580,15 @@ func detectStandardProxyForRoute(src string, testURLs []string, timeout time.Dur
 	mode := NormalizeProxyNetworkMode(route.Mode)
 	route.LocalGatewayURL = strings.TrimSpace(route.LocalGatewayURL)
 
+	// 回环地址节点若恰好就是本地 VPN 网关本身（内置「本地代理」行即指向
+	// 网关），直接直连测试——经网关测自己会自环/双跳；回环流量本就不会被
+	// TUN 截获，直连才是正确路径。此判断必须先于 local_gateway / tun 的
+	// 网关路由分支（direct/auto 下回环本来就走直连，无需探测网关）。
+	if (mode == ProxyNetworkModeLocalGateway || mode == ProxyNetworkModeTUN) && isLocalGatewaySource(src, route.LocalGatewayURL) {
+		detected, result, ok := detectWorkingStandardProxy(src, testURLs, timeout)
+		return detected, result, ok
+	}
+
 	gatewayDialer := func() C.Dialer {
 		gateway := DiscoverLocalGateway(route.LocalGatewayURL, 1800*time.Millisecond)
 		if gateway == "" {
@@ -554,6 +607,28 @@ func detectStandardProxyForRoute(src string, testURLs []string, timeout time.Dur
 			return "", TestResult{Error: "未检测到可用的本地 VPN 网关，请在设置中填写本地网关地址（如 127.0.0.1:7897）"}, false
 		}
 		detected, result, ok := detectWorkingStandardProxyWithDialer(src, testURLs, timeout, d)
+		return detected, result, ok
+	}
+
+	// TUN 接管模式：环境流量全部经本地 VPN（Clash TUN）路由。此时应用直连
+	// 会被 TUN 截获、按 Clash 规则转发，节点 IP 从代理出口访问通常连不上
+	// 代理服务器 → 池页全部“超时/不可用”（v1.7.129 只修了 auto，实测 TUN
+	// 模式仍全超时）。因此 TUN 模式先经本地 VPN 网关拨号——网关地址是回环
+	// 地址，不会被 TUN 截获，走的是环境真实路径；网关不可用（Clash 未运行
+	// 等）时回退直连。
+	if mode == ProxyNetworkModeTUN {
+		if d := gatewayDialer(); d != nil {
+			detected, result, ok := detectWorkingStandardProxyWithDialer(src, testURLs, timeout, d)
+			if ok {
+				return detected, result, true
+			}
+		}
+		detected, result, ok := detectWorkingStandardProxy(src, testURLs, timeout)
+		if !ok && result.Error != "" {
+			// 直连失败 + 网关不可用：附上可操作诊断，避免用户看到笼统的
+			// “TCP 连接失败/超时”却不知道是自己 Clash 的问题。
+			result.Error += "；未检测到本地 VPN 网关——若本机开着 Clash TUN，直连会被截获，请确认 Clash 已运行，或在设置中填写本地网关地址"
+		}
 		return detected, result, ok
 	}
 

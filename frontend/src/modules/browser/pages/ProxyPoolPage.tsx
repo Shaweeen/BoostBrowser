@@ -1533,7 +1533,10 @@ export function ProxyPoolPage() {
   }
 
   const handleTestAll = async () => {
-    const testable = filteredList.filter(p => p.proxyConfig !== 'direct://')
+    // 内置行（直连/本地代理）不是用户代理，不参与批量测速：
+    // 「本地代理」指向本机 Clash 网关，若网关未运行或端口不符会显示超时，
+    // 让“可用 x 失败 y”的统计失真。
+    const testable = filteredList.filter(p => !BUILTIN_PROXY_IDS.has(p.proxyId))
     if (testable.length === 0) return
     await runBatchSpeedTest(testable.map(p => p.proxyId), '没有可测速的代理')
   }
@@ -1541,7 +1544,7 @@ export function ProxyPoolPage() {
   /** Only retest nodes already marked failed / unreachable (not pending, not OK). */
   const handleTestFailedOnly = async () => {
     const failed = filteredList.filter(p => {
-      if (p.proxyConfig === 'direct://') return false
+      if (BUILTIN_PROXY_IDS.has(p.proxyId)) return false
       const v = latencyMap[p.proxyId]
       if (v === -2 || v === -3) return true
       if (typeof v === 'number' && v >= 0) return false
@@ -1579,7 +1582,7 @@ export function ProxyPoolPage() {
   }
 
   const handleCheckAllIPHealth = async () => {
-    const testable = filteredList.filter(p => p.proxyConfig !== 'direct://')
+    const testable = filteredList.filter(p => !BUILTIN_PROXY_IDS.has(p.proxyId))
     if (testable.length === 0) return
     setCheckingAllIPHealth(true)
 

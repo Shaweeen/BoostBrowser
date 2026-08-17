@@ -19,6 +19,14 @@ import (
 // http 节点都长这样），统计经过它的 CONNECT 连接数。
 func startConnectProxy(t *testing.T) (string, *int32) {
 	t.Helper()
+	return startConnectProxyWithRewrite(t, nil)
+}
+
+// startConnectProxyWithRewrite 同 startConnectProxy，但支持对 CONNECT 目标
+// 做重写（模拟“直连被 TUN 截断、但经网关可达真实节点”的场景）。
+// rewrite 返回空串表示不改写；返回非空串则替换 CONNECT 目标地址。
+func startConnectProxyWithRewrite(t *testing.T, rewrite func(hostport string) string) (string, *int32) {
+	t.Helper()
 	var conns int32
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect {
@@ -36,6 +44,11 @@ func startConnectProxy(t *testing.T) (string, *int32) {
 		// 探测即可离线通过，不依赖外网。
 		if strings.HasPrefix(dst, "www.gstatic.com:") {
 			return
+		}
+		if rewrite != nil {
+			if rewritten := rewrite(dst); rewritten != "" {
+				dst = rewritten
+			}
 		}
 		up, err := net.Dial("tcp", dst)
 		if err != nil {
@@ -261,6 +274,186 @@ func TestSpeedTestSocks5NodeViaGateway(t *testing.T) {
 	}
 	if atomic.LoadInt32(gatewayConns) == 0 {
 		t.Fatal("socks5 probe must route through the local VPN gateway")
+	}
+}
+
+// TestSpeedTestTUNModeFallsBackToGateway 验证 tun 模式下“直连不可达、经网关可
+// 达”时测速成功 —— 模拟本地 Clash TUN 截获直连（节点 IP 从代理出口连不上）而
+// 网关（回环地址不被 TUN 截获）可达。v1.7.129 只给 auto 加了网关回退，tun 模式
+// 仍只直连 → 用户开 TUN 时池页全部“超时/不可用”的回归。
+func TestSpeedTestTUNModeFallsBackToGateway(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	// 节点 = 本地 http CONNECT 节点（模拟代理池里的 http 节点）。
+	nodeURL, nodeConns := startConnectProxy(t)
+	nodeHost := strings.TrimPrefix(nodeURL, "http://")
+
+	// 本地“Clash 网关”：CONNECT 到 node-unreachable.test 时重写到真实节点地址，
+	// 模拟“直连被 TUN 截断，但经网关可达真实节点”。
+	gatewayURL, gatewayConns := startConnectProxyWithRewrite(t, func(hostport string) string {
+		if strings.HasPrefix(hostport, "node-unreachable.test:") {
+			return nodeHost
+		}
+		return ""
+	})
+
+	proxies := []config.BrowserProxy{{ProxyId: "p1", ProxyName: "p1", ProxyConfig: "http://node-unreachable.test:39876"}}
+	cfg := &SpeedTestConfig{Timeout: 5 * time.Second, TCPTimeout: 3 * time.Second, URLs: []string{target.URL}}
+	result := SpeedTest("p1", proxies, nil, nil, cfg, SpeedTestRouteOptions{
+		Mode:            ProxyNetworkModeTUN,
+		LocalGatewayURL: gatewayURL,
+	})
+	if !result.Ok {
+		t.Fatalf("tun mode with dead direct should succeed via gateway, got: %s", result.Error)
+	}
+	if atomic.LoadInt32(gatewayConns) == 0 {
+		t.Fatal("tun mode must route the probe through the local VPN gateway when direct is blocked")
+	}
+	if atomic.LoadInt32(nodeConns) == 0 {
+		t.Fatal("probe should have reached the real node through the gateway tunnel")
+	}
+}
+
+// TestSpeedTestTUNModeFallsBackToDirectWithoutGateway 验证 tun 模式在本地网关
+// 不可用（Clash 未运行等）时回退直连，节点仍然可用。
+func TestSpeedTestTUNModeFallsBackToDirectWithoutGateway(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	nodeURL, _ := startConnectProxy(t)
+	proxies := []config.BrowserProxy{{ProxyId: "p1", ProxyName: "p1", ProxyConfig: nodeURL}}
+	cfg := &SpeedTestConfig{Timeout: 5 * time.Second, TCPTimeout: 3 * time.Second, URLs: []string{target.URL}}
+	result := SpeedTest("p1", proxies, nil, nil, cfg, SpeedTestRouteOptions{
+		Mode:            ProxyNetworkModeTUN,
+		LocalGatewayURL: "http://127.0.0.1:1", // 没有服务监听
+	})
+	if !result.Ok {
+		t.Fatalf("tun mode without a gateway should fall back to direct, got: %s", result.Error)
+	}
+}
+
+// TestSpeedTestDirectModeIgnoresGateway 验证 direct 模式永远直连，即使本地有
+// 可用网关也不经网关拨号（用户明确选择直连，不做任何回退）。
+func TestSpeedTestDirectModeIgnoresGateway(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	gatewayURL, gatewayConns := startTestGateway(t)
+	nodeURL, _ := startConnectProxy(t)
+	proxies := []config.BrowserProxy{{ProxyId: "p1", ProxyName: "p1", ProxyConfig: nodeURL}}
+	cfg := &SpeedTestConfig{Timeout: 5 * time.Second, TCPTimeout: 3 * time.Second, URLs: []string{target.URL}}
+	result := SpeedTest("p1", proxies, nil, nil, cfg, SpeedTestRouteOptions{
+		Mode:            ProxyNetworkModeDirect,
+		LocalGatewayURL: gatewayURL,
+	})
+	if !result.Ok {
+		t.Fatalf("direct mode should succeed by dialing the node directly, got: %s", result.Error)
+	}
+	if atomic.LoadInt32(gatewayConns) != 0 {
+		t.Fatal("direct mode must never contact the local VPN gateway")
+	}
+}
+
+// TestIPHealthTUNModeViaGateway 验证 IP 健康检测在 tun 模式下先经本地网关获取
+// 节点真实出口 IP（直连在 TUN 下会被截获，出口会变成 Clash 节点而非代理池节点）。
+func TestIPHealthTUNModeViaGateway(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ip":"198.51.100.7","country":"US"}`))
+	}))
+	defer target.Close()
+
+	oldURL := defaultIPPureInfoURL
+	defaultIPPureInfoURL = target.URL
+	defer func() { defaultIPPureInfoURL = oldURL }()
+
+	// IP 健康检测用 socks5 节点：Go 的 http.Transport 对 http 节点 + http 目标
+	// 发绝对 URI GET（代理直接回 204 不转发），socks5 节点才会经网关隧道真正
+	// CONNECT 到目标并返回 JSON。
+	nodeURL := startSocks5Node(t)
+	nodeHost := strings.TrimPrefix(nodeURL, "socks5://")
+	gatewayURL, gatewayConns := startConnectProxyWithRewrite(t, func(hostport string) string {
+		if strings.HasPrefix(hostport, "node-unreachable.test:") {
+			return nodeHost
+		}
+		return ""
+	})
+
+	proxies := []config.BrowserProxy{{ProxyId: "p1", ProxyName: "p1", ProxyConfig: "socks5://node-unreachable.test:39876"}}
+	data, err := FetchIPPureInfo("p1", proxies, nil, nil, SpeedTestRouteOptions{
+		Mode:            ProxyNetworkModeTUN,
+		LocalGatewayURL: gatewayURL,
+	})
+	if err != nil {
+		t.Fatalf("tun mode IP health should succeed via gateway, got: %v", err)
+	}
+	if atomic.LoadInt32(gatewayConns) == 0 {
+		t.Fatal("tun mode IP health must route through the local VPN gateway")
+	}
+	// data["ip"] 只能来自经网关隧道 → 真实节点 → 目标服务器的返回，
+	// 证明探测确实穿透了整条链路。
+	if data["ip"] != "198.51.100.7" {
+		t.Fatalf("unexpected exit ip data: %v", data["ip"])
+	}
+}
+
+// TestIsLocalGatewaySource 验证“节点就是本地网关本身”的判定：仅回环地址且
+// host:port 与检测到的网关完全一致时才命中；其它回环节点与非回环节点不命中。
+func TestIsLocalGatewaySource(t *testing.T) {
+	gatewayURL, _ := startTestGateway(t)
+	gatewayHostPort := strings.TrimPrefix(gatewayURL, "http://")
+
+	// 节点 == 网关（scheme 不同也算，比较的是 host:port）
+	if !isLocalGatewaySource("socks5://"+gatewayHostPort, gatewayURL) {
+		t.Fatal("same host:port as the gateway must be detected as the gateway itself")
+	}
+
+	// 其它回环节点（不同端口）：不是网关，不命中
+	other, _ := startConnectProxy(t)
+	if isLocalGatewaySource(other, gatewayURL) {
+		t.Fatal("a different loopback port must not be treated as the gateway")
+	}
+
+	// 非回环节点：不命中（即使配置了网关）
+	if isLocalGatewaySource("http://198.51.100.7:6396", gatewayURL) {
+		t.Fatal("a non-loopback node must not be treated as the gateway")
+	}
+
+	// 网关不可用时不命中
+	if isLocalGatewaySource("http://"+gatewayHostPort, "http://127.0.0.1:1") {
+		t.Fatal("unavailable gateway must not match")
+	}
+}
+
+// TestSpeedTestNodeEqualsGatewayTestable 验证节点恰好就是本地网关本身时
+// （内置「本地代理」行即指向本地 Clash 网关），local_gateway / tun 模式仍能
+// 测通——直接直连本机服务，避免经网关测自己（自环/双跳）。
+func TestSpeedTestNodeEqualsGatewayTestable(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	gatewayURL, _ := startTestGateway(t)
+
+	// 节点 == 网关本身
+	proxies := []config.BrowserProxy{{ProxyId: "p1", ProxyName: "p1", ProxyConfig: gatewayURL}}
+	cfg := &SpeedTestConfig{Timeout: 5 * time.Second, TCPTimeout: 3 * time.Second, URLs: []string{target.URL}}
+	for _, mode := range []string{ProxyNetworkModeLocalGateway, ProxyNetworkModeTUN, ProxyNetworkModeAuto} {
+		result := SpeedTest("p1", proxies, nil, nil, cfg, SpeedTestRouteOptions{
+			Mode:            mode,
+			LocalGatewayURL: gatewayURL,
+		})
+		if !result.Ok {
+			t.Fatalf("%s mode: node == gateway should be testable, got: %s", mode, result.Error)
+		}
 	}
 }
 
