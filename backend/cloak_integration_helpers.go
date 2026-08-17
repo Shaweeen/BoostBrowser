@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -307,18 +308,22 @@ func getUserAgentOverride(debugPort int) (string, map[string]any, error) {
 	}
 	ua := strings.TrimSpace(info.UserAgent)
 	if ua == "" {
-		ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.177 Safari/537.36"
+		ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.167 Safari/537.36"
 	}
 	ua = strings.ReplaceAll(ua, "Chromium/", "Chrome/")
+	// 用浏览器自身上报的 UA 提取真实内核版本号。之前硬编码 146 会让
+	// Sec-CH-UA / navigator.userAgentData 与 google-148 实际内核不一致，
+	// Web Store 仍可能判定为非品牌 Chrome。
+	major, full := chromeBrandVersionsFromUA(ua)
 	metadata := map[string]any{
 		"brands": []map[string]string{
-			{"brand": "Google Chrome", "version": "146"},
-			{"brand": "Chromium", "version": "146"},
+			{"brand": "Google Chrome", "version": major},
+			{"brand": "Chromium", "version": major},
 			{"brand": "Not A(Brand", "version": "24"},
 		},
 		"fullVersionList": []map[string]string{
-			{"brand": "Google Chrome", "version": "146.0.7680.177"},
-			{"brand": "Chromium", "version": "146.0.7680.177"},
+			{"brand": "Google Chrome", "version": full},
+			{"brand": "Chromium", "version": full},
 			{"brand": "Not A(Brand", "version": "24.0.0.0"},
 		},
 		"platform":        "Windows",
@@ -329,5 +334,18 @@ func getUserAgentOverride(debugPort int) (string, map[string]any, error) {
 	}
 	return ua, metadata, nil
 }
+
+// chromeBrandVersionsFromUA 从 UA 提取 Chrome/<major> 与 Chrome/<full> 版本号，
+// 用于构建与真实内核一致的 UA-CH 品牌列表。
+func chromeBrandVersionsFromUA(ua string) (major, full string) {
+	m := chromeVersionRE.FindStringSubmatch(ua)
+	if len(m) == 5 {
+		return m[1], m[1] + "." + m[2] + "." + m[3] + "." + m[4]
+	}
+	// 提取失败（罕见）时回退到当前内置 google-148 内核版本。
+	return "148", "148.0.7778.167"
+}
+
+var chromeVersionRE = regexp.MustCompile(`Chrome/(\d+)\.(\d+)\.(\d+)\.(\d+)`)
 
 const stealthJS = `Object.defineProperty(navigator, 'webdriver', {get: () => undefined});`

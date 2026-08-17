@@ -10,15 +10,14 @@ import (
 	"path/filepath"
 )
 
-// cloak 内核默认启用的 chrome://flags 实验。
+// 所有受管 Chromium 内核默认启用的 chrome://flags 实验。
 // 每项是 chrome://flags 里的 internal name + 选项 index（@N）。
 //
 // extension-mime-request-handling@2  => "Always prompt for install"
 //
 //	作用：从任意 https 站点下载到 .crx 时，直接弹原生"添加扩展程序？"对话框。
-//	配合 chromium-web-store helper 扩展，让 chromewebstore.google.com 上
-//	"添加至 Chrome"按钮 → 下载 .crx → 自动弹安装框，不需要用户手动拖拽到
-//	chrome://extensions。
+//	ungoogled-chromium 官方 FAQ 即推荐用该 flag + CRX 模板 URL 从商城安装扩展，
+//	对 cloak / Chrome for Testing / 指纹内核等所有 Chromium 家族内核通用。
 var cloakDefaultLabsExperiments = []string{
 	"extension-mime-request-handling@2",
 }

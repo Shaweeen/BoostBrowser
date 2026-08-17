@@ -4,7 +4,9 @@ import (
 	"boost-browser/backend/internal/browser"
 	"boost-browser/backend/internal/logger"
 	"boost-browser/backend/internal/proxy"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -503,6 +505,22 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		args = filtered
 	}
 
+	// 所有受管内核都是 Chromium 家族（cloak / Chrome for Testing / 用户经
+	// 内核管理添加的 fingerprint-chromium、ungoogled-chromium 等）。
+	// extension-mime-request-handling@2（"Always prompt for install"）让 Web
+	// Store 的 CRX 下载直接弹原生安装框——这也是 ungoogled-chromium 官方 FAQ
+	// 推荐的从商城安装扩展的方式。首次适配启动时写入。
+	if !isStartPrepDone(userDataDir) {
+		// Only seed labs flags on first-adapt starts; rewriting Local State
+		// every open races Chrome and costs multi-open time.
+		if err := ensureCloakLocalStateFlags(userDataDir); err != nil {
+			logger.New("CloakFlags").Warn("写入扩展兼容内核默认 flags 失败（不阻塞启动）",
+				logger.F("profile_id", profileId),
+				logger.F("user_data_dir", userDataDir),
+				logger.F("error", err.Error()),
+			)
+		}
+	}
 	args = normalizeLoadExtensionArgs(args)
 	// 用户在浏览器商城里自行安装的扩展（Preferences location=INTERNAL）由
 	// Chrome 原生加载，禁止再通过 --load-extension 注入同一 ID 的管理包：
@@ -617,6 +635,14 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 					logger.F("profile_id", profileId),
 					logger.F("debug_port", stableDebugPort),
 				)
+			}
+			// google-148 (Chrome for Testing) 等非 cloak 内核：在内核自建的初始
+			// 标签页注入 Web Store 兼容（真实内核版本的 UA-CH 品牌 + 补齐
+			// chrome.webstorePrivate），用户创建环境后打开 chromewebstore.google.com
+			// 即可正常访问与安装扩展，不再出现「改用 Chrome？」提示。不引入任何
+			// helper 扩展或本地安装协议。cloak 内核已在 C++ 层处理品牌呈现，跳过。
+			if !isCloakSelectedCore {
+				a.applyWebStoreCompatibilityToInitialTab(stableDebugPort, profileId)
 			}
 			// Non-cloak stealth inject skipped on hot path after first alignment —
 			// it added multi-open latency and is not required for Cloak profiles.
@@ -1701,4 +1727,132 @@ func dropStoreInstalledLoadExtensionArgs(args []string, userDataDir string) []st
 		out = append(out, "--load-extension="+strings.Join(kept, ","))
 	}
 	return out
+}
+
+// webStoreCompatScript 在主文档执行前注入，补齐 Chrome for Testing (google-148)
+// 内核缺失的 chrome.webstorePrivate 私有 API。新版 Chrome Web Store 的
+// “添加至 Chrome”按钮依赖该 API 完成安装；CfT 是 Chromium 品牌构建，此 API
+// 不存在 → 商店判定为非 Chrome，显示“切换到 Chrome”横幅并禁用安装。
+//
+// 这里把安装动作转发到 clients2.google.com 的 CRX 下载地址，配合内核自身的
+// extension-mime-request-handling@2 flag 弹原生“添加扩展程序？”对话框一步安装。
+// 不依赖任何本地协议 / 本地服务器 / helper 扩展。
+const webStoreCompatScript = `(() => {
+  try {
+    if (!window.chrome || window.chrome.webstorePrivate) return;
+    const getExtId = () => {
+      const m = /detail(?:\/[^\/]+)?\/([a-z]{32})/.exec(window.location.href);
+      return m ? m[1] : null;
+    };
+    const crxUrlFor = (id) => {
+      const v = /Chrome\/([\d.]+)/.exec(navigator.userAgent);
+      const prod = v ? v[1] : "148.0.7778.167";
+      return "https://clients2.google.com/service/update2/crx?response=redirect&acceptformat=crx2,crx3&prodversion=" + prod +
+        "&x=id%3D" + encodeURIComponent(id) + "%26installsource%3Dondemand%26uc";
+    };
+    window.chrome.webstorePrivate = {
+      getExtensionStatus: function (id, manifest, cb) { cb && cb("installable"); },
+      beginInstallWithManifest3: function (extinfo, cb) {
+        const id = (extinfo && extinfo.id) || getExtId();
+        if (id) {
+          const w = window.open(crxUrlFor(id), "_blank");
+          if (w) { try { w.opener = null; } catch (e) {} }
+        }
+        // 原生安装框的结果页面脚本无法感知，返回 user_cancelled 让按钮复位。
+        cb && cb("user_cancelled");
+      },
+      isInIncognitoMode: function (cb) { cb && cb(false); },
+      getReferrerChain: function (cb) { cb && cb("EgIIAA=="); },
+      completeInstall: function (id, cb) { cb && cb(true); },
+    };
+  } catch (e) {}
+})();
+`
+
+// applyWebStoreCompatibilityToInitialTab 在内核自建的初始标签页上注入 Web Store
+// 兼容：
+//   - Emulation.setUserAgentOverride（真实内核版本的 UA-CH 品牌）→ 修复
+//     Sec-CH-UA 请求头与 navigator.userAgentData，消除“切换到 Chrome”横幅
+//   - Page.addScriptToEvaluateOnNewDocument（chrome.webstorePrivate 补齐）→
+//     “添加至 Chrome”按钮可用，CRX 下载触发内核原生安装框
+//
+// 只作用于初始标签页，用户在该标签页内的后续导航沿用覆写（Emulation 按
+// target 会话生效）。不创建后台常驻 CDP 连接、不启动任何本地协议服务、
+// 不改写用户数据。cloak 内核在 C++ 层已处理品牌呈现，调用方应跳过。
+func (a *App) applyWebStoreCompatibilityToInitialTab(debugPort int, profileId string) {
+	log := logger.New("Browser")
+	if debugPort <= 0 {
+		return
+	}
+	client := http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/json/list", debugPort))
+	if err != nil {
+		return
+	}
+	var targets []struct {
+		Type string `json:"type"`
+		URL  string `json:"url"`
+		ID   string `json:"id"`
+	}
+	decodeErr := json.NewDecoder(resp.Body).Decode(&targets)
+	resp.Body.Close()
+	if decodeErr != nil {
+		return
+	}
+	targetID := ""
+	for _, t := range targets {
+		if t.Type != "page" {
+			continue
+		}
+		u := strings.ToLower(strings.TrimSpace(t.URL))
+		if u == "" || strings.HasPrefix(u, "about:blank") || strings.HasPrefix(u, "chrome://newtab") {
+			targetID = t.ID
+			break
+		}
+	}
+	if targetID == "" {
+		return
+	}
+	pageWs := fmt.Sprintf("ws://127.0.0.1:%d/devtools/page/%s", debugPort, targetID)
+	conn, _, err := websocket.DefaultDialer.Dial(pageWs, nil)
+	if err != nil {
+		log.Warn("Web Store 兼容注入：连接初始标签页失败",
+			logger.F("profile_id", profileId),
+			logger.F("error", err.Error()),
+		)
+		return
+	}
+	defer conn.Close()
+	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	fixedUA, metadata, uaErr := getUserAgentOverride(debugPort)
+	if uaErr == nil && fixedUA != "" && metadata != nil {
+		uaMsg := cdpMessage{
+			Id:     1,
+			Method: "Emulation.setUserAgentOverride",
+			Params: map[string]any{
+				"userAgent":         fixedUA,
+				"platform":          "Win32",
+				"userAgentMetadata": metadata,
+			},
+		}
+		_ = conn.WriteJSON(uaMsg)
+		var uaResp cdpResponse
+		_ = conn.ReadJSON(&uaResp)
+	}
+
+	scriptMsg := cdpMessage{
+		Id:     2,
+		Method: "Page.addScriptToEvaluateOnNewDocument",
+		Params: map[string]any{"source": webStoreCompatScript},
+	}
+	_ = conn.WriteJSON(scriptMsg)
+	var scriptResp cdpResponse
+	_ = conn.ReadJSON(&scriptResp)
+
+	log.Info("已为初始标签页注入 Web Store 兼容（UA-CH 真实版本 + webstorePrivate，无 helper 协议）",
+		logger.F("profile_id", profileId),
+		logger.F("debug_port", debugPort),
+	)
 }
