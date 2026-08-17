@@ -208,7 +208,8 @@ func singleHTTPProxyTest(proxyId string, px C.Proxy, testURL string, method stri
 			}
 			return px.DialContext(ctx, &meta)
 		},
-		DisableKeepAlives:     true,
+		// keep-alive 打开以便第二次请求复用同一条连接，测出纯 HTTP RTT。
+		DisableKeepAlives:     false,
 		ResponseHeaderTimeout: timeout,
 		TLSHandshakeTimeout:   timeout,
 	}
@@ -221,28 +222,62 @@ func singleHTTPProxyTest(proxyId string, px C.Proxy, testURL string, method stri
 	}
 	defer client.CloseIdleConnections()
 
-	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, method, testURL, nil)
+	newReq := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, method, testURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/148 Safari/537.36")
+		req.Header.Set("Cache-Control", "no-cache")
+		return req, nil
+	}
+
+	// 预热请求（不计时）：完成 TCP 建连 + 代理握手 + 远端 DNS，并确认代理可出网。
+	// 之前把“完整建连 + 请求”耗时直接当延迟，对慢速住宅 IP 会把真实 RTT 放大
+	// 约 3 倍（TCP 握手 + SOCKS5 握手 + DNS 都算进去），代理池里 1300-2400ms 的
+	// 数字其实多数是 400-800ms 的真实往返。
+	warmStart := time.Now()
+	warmReq, err := newReq()
 	if err != nil {
 		return TestResult{ProxyId: proxyId, Ok: false, Error: err.Error()}
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/144 Safari/537.36")
-	req.Header.Set("Cache-Control", "no-cache")
+	warmResp, err := client.Do(warmReq)
+	warmLatency := time.Since(warmStart).Milliseconds()
+	if err != nil {
+		return TestResult{ProxyId: proxyId, Ok: false, LatencyMs: warmLatency, Error: err.Error()}
+	}
+	_, _ = io.CopyN(io.Discard, warmResp.Body, 1024)
+	warmResp.Body.Close()
+	warmUsable := isUsableProxyResponseStatus(warmResp.StatusCode)
 
-	resp, err := client.Do(req)
+	// 第二次请求计时：同一连接上的纯 HTTP RTT（与 Clash unified-delay 一致）。
+	timedReq, err := newReq()
+	if err != nil {
+		return TestResult{ProxyId: proxyId, Ok: warmUsable, LatencyMs: warmLatency}
+	}
+	start := time.Now()
+	timedResp, err := client.Do(timedReq)
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
+		// 服务端在预热后主动关闭连接（Connection: close）等场景：回退到预热
+		// 请求的完整建连耗时，代理仍判定可用，不误报失败。
+		if warmUsable {
+			return TestResult{ProxyId: proxyId, Ok: true, LatencyMs: warmLatency}
+		}
 		return TestResult{ProxyId: proxyId, Ok: false, LatencyMs: latency, Error: err.Error()}
 	}
-	defer resp.Body.Close()
-	_, _ = io.CopyN(io.Discard, resp.Body, 1024)
+	_, _ = io.CopyN(io.Discard, timedResp.Body, 1024)
+	timedResp.Body.Close()
 
 	// 代理连通性测试以“能通过代理拿到 HTTP 响应”为准。
 	// 部分测试站会对不同出口返回 204/200/301/403，不能只认 200/204，否则会造成假失败。
-	if isUsableProxyResponseStatus(resp.StatusCode) {
+	if isUsableProxyResponseStatus(timedResp.StatusCode) {
 		return TestResult{ProxyId: proxyId, Ok: true, LatencyMs: latency}
 	}
-	return TestResult{ProxyId: proxyId, Ok: false, LatencyMs: latency, Error: fmt.Sprintf("HTTP %d", resp.StatusCode)}
+	if warmUsable {
+		return TestResult{ProxyId: proxyId, Ok: true, LatencyMs: latency}
+	}
+	return TestResult{ProxyId: proxyId, Ok: false, LatencyMs: latency, Error: fmt.Sprintf("HTTP %d", timedResp.StatusCode)}
 }
 
 func isUsableProxyResponseStatus(statusCode int) bool {
