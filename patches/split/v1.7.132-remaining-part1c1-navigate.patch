@@ -1,0 +1,245 @@
+diff --git a/backend/app_instance.go b/backend/app_instance.go
+--- a/backend/app_instance.go
++++ b/backend/app_instance.go
+@@ -1444,30 +1444,15 @@
+ 	return nil
+ }
+ 
+-// navigateToTargetURLs 通过 CDP 将浏览器导航到目标 URL。
+-//
+-// 非 Cloak 内核（ungoogled-chromium 等）：
+-//
+-//	先创建空白标签页 → 注入 UA override + stealth JS（确保 Sec-CH-UA 在首次请求前就正确）
+-//	→ 再用 Page.navigate 导航到真实 URL。
+-//	这解决了 Chrome Web Store 检测 Sec-CH-UA 为 "Chromium" 而非 "Google Chrome"
+-//	导致显示「切换到 Chrome」横幅的问题。
+-//
+-// Cloak 内核（cloakOnly=true）：
+-//
+-//	只用 Target.createTarget(url) 直接打开目标 URL 的新标签页。完全不走
+-//	Page.addScriptToEvaluateOnNewDocument / Emulation.setUserAgentOverride，
+-//	因为：
+-//	1. cloak 已在 C++ 源码层面处理 UA / Sec-CH-UA / navigator.* 字段；
+-//	2. wrapper 端再次 CDP 注入会被 Fingerprint Pro 等检测识别成
+-//	   Browser Tampering / Bot: nodriver 双红灯。
+-func navigateToTargetURLs(debugPort int, urls []string, profileId string, cloakOnly bool) {
++// navigateToTargetURLs opens user-configured start URLs with Target.createTarget.
++// Every kernel uses the same owner: no about:blank, no UA override, no stealth
++// script. Store compatibility (if needed later) lives in webstore_compat_watch.go.
++func navigateToTargetURLs(debugPort int, urls []string, profileId string) {
+ 	log := logger.New("Browser")
+ 	if len(urls) == 0 {
+ 		return
+ 	}
+ 
+-	// 获取 browser target 的 WebSocket URL（用于 Target.createTarget）
+ 	browserWsURL, err := getBrowserWebSocketURL(debugPort)
+ 	if err != nil {
+ 		log.Warn("CDP 导航：获取浏览器 WebSocket 失败",
+@@ -1485,190 +1470,31 @@
+ 		)
+ 		return
+ 	}
++	defer browserConn.Close()
+ 	browserConn.SetReadDeadline(time.Now().Add(15 * time.Second))
+ 
+-	// Cloak 内核：直接 Target.createTarget(url)，不再注入任何 CDP 脚本
+-	if cloakOnly {
+-		for i, url := range urls {
+-			createMsg := cdpMessage{
+-				Id:     i + 200,
+-				Method: "Target.createTarget",
+-				Params: map[string]any{"url": url},
+-			}
+-			if err := browserConn.WriteJSON(createMsg); err != nil {
+-				log.Warn("CDP 导航(cloak)：Target.createTarget 写入失败",
+-					logger.F("profile_id", profileId),
+-					logger.F("url", url),
+-					logger.F("error", err.Error()),
+-				)
+-				continue
+-			}
+-			browserConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+-			var resp cdpResponse
+-			_ = browserConn.ReadJSON(&resp)
+-			log.Info("CDP 导航(cloak)：目标页面已打开（无 stealth/UA 注入）",
+-				logger.F("profile_id", profileId),
+-				logger.F("url", url),
+-			)
++	for i, rawURL := range urls {
++		createMsg := cdpMessage{
++			Id:     i + 200,
++			Method: "Target.createTarget",
++			Params: map[string]any{"url": rawURL},
+ 		}
+-		browserConn.Close()
+-		return
+-	}
+-
+-	// 获取 UA 覆写参数（将 Chromium 替换为 Chrome）—— 仅非 cloak 路径需要
+-	fixedUA, uaMetadata, uaErr := getUserAgentOverride(debugPort)
+-	if uaErr != nil {
+-		log.Warn("CDP 导航：获取 UA 覆写参数失败，将直接导航（可能导致 Chrome Web Store 检测异常）",
+-			logger.F("profile_id", profileId),
+-			logger.F("error", uaErr.Error()),
+-		)
+-	}
+-
+-	// 逐个创建标签页：先 about:blank → 注入 → 再导航
+-	for i, url := range urls {
+-		targetId, createErr := createBlankTab(browserConn, i+1)
+-		if createErr != nil {
+-			log.Warn("CDP 导航：创建空白标签页失败，回退到直接导航",
++		if err := browserConn.WriteJSON(createMsg); err != nil {
++			log.Warn("CDP 导航：Target.createTarget 写入失败",
+ 				logger.F("profile_id", profileId),
+-				logger.F("url", url),
+-				logger.F("error", createErr.Error()),
++				logger.F("url", rawURL),
++				logger.F("error", err.Error()),
+ 			)
+-			// 回退：直接用 Target.createTarget(url) 创建
+-			fallbackMsg := cdpMessage{
+-				Id:     i + 100,
+-				Method: "Target.createTarget",
+-				Params: map[string]any{"url": url},
+-			}
+-			_ = browserConn.WriteJSON(fallbackMsg)
+-			var fallbackResp cdpResponse
+-			_ = browserConn.ReadJSON(&fallbackResp)
+ 			continue
+ 		}
+-
+-		// 获取新标签页的 WebSocket URL
+-		targetWsURL := fmt.Sprintf("ws://127.0.0.1:%d/devtools/page/%s", debugPort, targetId)
+-
+-		// 连接到新标签页并注入 UA override + stealth JS
+-		pageConn, _, dialErr := websocket.DefaultDialer.Dial(targetWsURL, nil)
+-		if dialErr != nil {
+-			log.Warn("CDP 导航：连接新标签页失败，回退到直接导航",
+-				logger.F("profile_id", profileId),
+-				logger.F("url", url),
+-				logger.F("targetId", targetId),
+-				logger.F("error", dialErr.Error()),
+-			)
+-			continue
+-		}
+-
+-		injectSuccess := false
+-
+-		// 注入 stealth JS（Page.addScriptToEvaluateOnNewDocument）
+-		stealthMsg := cdpMessage{
+-			Id:     1,
+-			Method: "Page.addScriptToEvaluateOnNewDocument",
+-			Params: map[string]any{
+-				"source": stealthJS,
+-			},
+-		}
+-		if writeErr := pageConn.WriteJSON(stealthMsg); writeErr == nil {
+-			pageConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+-			var stealthResp cdpResponse
+-			_ = pageConn.ReadJSON(&stealthResp)
+-		}
+-
+-		// 注入 UA override（Emulation.setUserAgentOverride）
+-		if fixedUA != "" && uaMetadata != nil {
+-			uaMsg := cdpMessage{
+-				Id:     2,
+-				Method: "Emulation.setUserAgentOverride",
+-				Params: map[string]any{
+-					"userAgent":         fixedUA,
+-					"platform":          "Win32",
+-					"userAgentMetadata": uaMetadata,
+-				},
+-			}
+-			if writeErr := pageConn.WriteJSON(uaMsg); writeErr == nil {
+-				pageConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+-				var uaResp cdpResponse
+-				_ = pageConn.ReadJSON(&uaResp)
+-				injectSuccess = true
+-				log.Info("CDP 导航：UA override 注入成功",
+-					logger.F("profile_id", profileId),
+-					logger.F("targetId", targetId),
+-				)
+-			}
+-		} else {
+-			injectSuccess = true
+-		}
+-
+-		if !injectSuccess {
+-			log.Warn("CDP 导航：UA override 注入失败，继续导航（可能触发 Chrome Web Store 横幅检测）",
+-				logger.F("profile_id", profileId),
+-				logger.F("targetId", targetId),
+-			)
+-		}
+-
+-		// 导航到目标 URL
+-		navMsg := cdpMessage{
+-			Id:     3,
+-			Method: "Page.navigate",
+-			Params: map[string]any{
+-				"url": url,
+-			},
+-		}
+-		if navErr := pageConn.WriteJSON(navMsg); navErr != nil {
+-			log.Warn("CDP 导航：Page.navigate 失败",
+-				logger.F("profile_id", profileId),
+-				logger.F("url", url),
+-				logger.F("error", navErr.Error()),
+-			)
+-		} else {
+-			pageConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+-			var navResp cdpResponse
+-			_ = pageConn.ReadJSON(&navResp)
+-			log.Info("CDP 导航：目标页面已导航",
+-				logger.F("profile_id", profileId),
+-				logger.F("url", url),
+-				logger.F("targetId", targetId),
+-			)
+-		}
+-		pageConn.Close()
+-	}
+-	browserConn.Close()
+-}
+-
+-// createBlankTab 通过 CDP Target.createTarget 创建一个 about:blank 空白标签页，
+-// 并返回新标签页的 targetId 用于后续注入和导航。
+-func createBlankTab(browserConn *websocket.Conn, msgId int) (string, error) {
+-	createMsg := cdpMessage{
+-		Id:     msgId,
+-		Method: "Target.createTarget",
+-		Params: map[string]any{
+-			"url": "about:blank",
+-		},
+-	}
+-	if err := browserConn.WriteJSON(createMsg); err != nil {
+-		return "", fmt.Errorf("发送 Target.createTarget 失败: %w", err)
+-	}
+-
+-	var resp cdpResponse
+-	if err := browserConn.ReadJSON(&resp); err != nil {
+-		return "", fmt.Errorf("读取 Target.createTarget 响应失败: %w", err)
+-	}
+-	if resp.Error != nil {
+-		return "", fmt.Errorf("Target.createTarget 错误: %s", resp.Error.Message)
+-	}
+-
+-	result := resp.Result
+-	if result == nil {
+-		return "", fmt.Errorf("Target.createTarget 返回空 result")
+-	}
+-	targetId, ok := result["targetId"].(string)
+-	if !ok || targetId == "" {
+-		return "", fmt.Errorf("Target.createTarget 未返回有效的 targetId")
++		browserConn.SetReadDeadline(time.Now().Add(5 * time.Second))
++		var resp cdpResponse
++		_ = browserConn.ReadJSON(&resp)
++		log.Info("CDP 导航：目标页面已打开（无 stealth/UA 注入）",
++			logger.F("profile_id", profileId),
++			logger.F("url", rawURL),
++		)
+ 	}
+-	return targetId, nil
+ }
+ 
+ // dropStoreInstalledLoadExtensionArgs removes --load-extension entries for
