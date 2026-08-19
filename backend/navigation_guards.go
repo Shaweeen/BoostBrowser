@@ -140,9 +140,14 @@ func isAuthSensitiveURL(raw string) bool {
 }
 
 // shouldAttachPageCDP is the focus-probe owner: Runtime.evaluate / page
-// WebSockets must not open on one-time OAuth documents. URL-only decisions
-// from /json are allowed so Authorize can be gated without attaching.
+// WebSockets must not open on one-time OAuth documents, chrome internals,
+// or extension/wallet surfaces. After an extension is installed in the
+// environment, connect/sign stays Chrome ↔ extension. URL-only decisions
+// from /json are still allowed so Authorize can be gated without attaching.
 func shouldAttachPageCDP(raw string) bool {
+	if isInternalBrowserURL(raw) {
+		return false
+	}
 	return !isAuthSensitiveURL(raw)
 }
 
@@ -157,8 +162,12 @@ func shouldMirrorSyncNavigation(raw string) bool {
 	return !isAuthSensitiveURL(raw)
 }
 
-// shouldReplaySyncInput is the input-replay owner for auth surfaces. Clicking
-// Authorize / typing on a one-time OAuth page must not be mirrored.
+// shouldReplaySyncInput is the input-replay owner for auth and extension
+// surfaces. Clicking Authorize, or clicking inside Rabby/MetaMask, must not
+// be mirrored or CDP-injected. Dapp pages stay replayable.
 func shouldReplaySyncInput(raw string) bool {
+	if isInternalBrowserURL(raw) {
+		return false
+	}
 	return !isAuthSensitiveURL(raw)
 }
