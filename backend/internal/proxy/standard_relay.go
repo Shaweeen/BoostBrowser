@@ -117,12 +117,9 @@ func (m *StandardRelayManager) acquireOnce(
 	m.mu.Unlock()
 
 	if working == "" {
-		// Probe the environment proxy itself first. TUN already captures that
-		// transport at the OS layer, and a directly reachable proxy needs no
-		// extra local-VPN hop. This prevents Auto from creating an unnecessary
-		// Browser -> local gateway -> environment proxy chain on every launch.
-		// Only a failed direct probe falls back to a local gateway. Explicit
-		// local_gateway mode retains the user's requested two-hop route.
+		// Auto prefers a healthy loopback gateway so Clash TUN does not
+		// capture a 6s dead-direct probe on every start. local_gateway is
+		// explicit two-hop. Other modes probe the node directly.
 		probeConfig := &SpeedTestConfig{Timeout: 6 * time.Second, TCPTimeout: 3 * time.Second, URLs: []string{defaultTestURL}}
 		var err error
 		if options.Mode == ProxyNetworkModeLocalGateway {
@@ -132,18 +129,29 @@ func (m *StandardRelayManager) acquireOnce(
 				return "", "", fmt.Errorf("未检测到可用的本地 VPN HTTP/SOCKS 网关；请确认非 TUN 模式端口并填写本地 VPN 网关")
 			}
 			working, err = detectWorkingStandardProxyConfigWithDialer(src, probeConfig, upstreamDialer)
-		} else {
-			working, err = DetectWorkingStandardProxyConfig(src, probeConfig)
-			if err != nil && options.Mode == ProxyNetworkModeAuto {
-				gateway = m.discoverLocalGatewayCached(options.LocalGatewayURL)
-				if gateway != "" {
-					if upstreamDialer, dialerErr := newUpstreamGatewayDialer(gateway); dialerErr == nil && upstreamDialer != nil {
-						working, err = detectWorkingStandardProxyConfigWithDialer(src, probeConfig, upstreamDialer)
-					} else {
-						gateway = ""
-					}
+		} else if options.Mode == ProxyNetworkModeAuto {
+			// Prefer a healthy loopback gateway (Clash mixed). A 6s dead-direct
+			// probe under TUN is captured and just delays every environment start.
+			gateway = m.discoverLocalGatewayCached(options.LocalGatewayURL)
+			if gateway != "" {
+				if upstreamDialer, dialerErr := newUpstreamGatewayDialer(gateway); dialerErr == nil && upstreamDialer != nil {
+					working, err = detectWorkingStandardProxyConfigWithDialer(src, probeConfig, upstreamDialer)
+				} else {
+					gateway = ""
 				}
 			}
+			if working == "" {
+				var directErr error
+				working, directErr = DetectWorkingStandardProxyConfig(src, probeConfig)
+				if working == "" {
+					err = directErr
+				} else {
+					gateway = ""
+					err = nil
+				}
+			}
+		} else {
+			working, err = DetectWorkingStandardProxyConfig(src, probeConfig)
 		}
 		if err != nil {
 			return "", "", fmt.Errorf("代理协议/认证验证失败；自动模式已先尝试环境代理直连，再尝试本地 VPN 网关。非 TUN 请确认网关端口，TUN 请确认代理服务器未被重复转发: %w", err)

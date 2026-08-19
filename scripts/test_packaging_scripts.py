@@ -199,6 +199,28 @@ class PackagingScriptsTest(unittest.TestCase):
         self.assertNotIn("automaticExtensionStartupCleanupDelays", startup_tabs)
         self.assertNotIn("closeAssignedExtensionAutoPagesAfterStart", startup_tabs)
 
+    def test_webstore_compat_is_store_url_gated_and_never_auto_attaches(self):
+        watch = self.read("backend/webstore_compat_watch.go")
+        startup = self.read("backend/app_instance.go")
+        syncer = self.read("backend/app_input_syncer.go")
+        guards = self.read("backend/navigation_guards.go")
+
+        self.assertNotIn('"Target.setAutoAttach"', watch)
+        self.assertNotIn('"Target.setAutoAttach"', startup)
+        self.assertIn('"Target.setDiscoverTargets"', watch)
+        self.assertIn("shouldInjectWebStoreCompat", watch)
+        self.assertNotIn("shouldInjectWebStoreCompat", startup)
+        self.assertNotIn("startWebStoreCompatWatch", startup)
+        self.assertNotIn("applyWebStoreCompatibilityToInitialTab", startup)
+        self.assertNotIn("webStoreHelperForProfileLaunch", startup)
+        self.assertIn("shouldMirrorSyncNavigation", syncer)
+        self.assertIn("shouldReplaySyncInput", syncer)
+        self.assertIn("shouldAttachPageCDP", syncer)
+        self.assertIn("func isAuthSensitiveURL", guards)
+        self.assertIn("func shouldAttachPageCDP", guards)
+        self.assertIn("func shouldMirrorSyncNavigation", guards)
+        self.assertIn("func shouldInjectWebStoreCompat", guards)
+
     def test_extension_distribution_is_explicit_and_never_profile_or_startup_driven(self):
         app = self.read("backend/app.go")
         launch = self.read("backend/app_instance.go")

@@ -92,12 +92,22 @@ func (a *App) setChrome148AsGlobalDefault(alignProfiles bool) (browser.Core, err
 	if !alignProfiles {
 		return core, nil
 	}
-	conn := a.db.GetConn()
-	if conn == nil {
-		return browser.Core{}, fmt.Errorf("应用数据库尚未初始化")
+	changed := make([]*browser.Profile, 0)
+	for _, profile := range a.browserMgr.List() {
+		if a.isProfileUsingCloakCore(profile.ProfileId) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(profile.CoreId), core.CoreId) {
+			continue
+		}
+		copy := profile
+		copy.CoreId = core.CoreId
+		changed = append(changed, &copy)
 	}
-	if _, err := conn.Exec("UPDATE browser_profiles SET core_id = ?", core.CoreId); err != nil {
-		return browser.Core{}, fmt.Errorf("更新全部环境 Chrome 148 内核失败: %w", err)
+	if len(changed) > 0 {
+		if err := a.browserMgr.ProfileDAO.UpsertMany(changed); err != nil {
+			return browser.Core{}, fmt.Errorf("更新非 Cloak 环境的 Chrome 148 内核失败: %w", err)
+		}
 	}
 	a.browserMgr.ReloadProfilesFromDAO()
 	if a.config != nil {
@@ -128,9 +138,11 @@ func (a *App) prepareAllProfileExtensionsAfterUpdate(coreID string) (int, error)
 			launchArgs = appendPreparedExtensionRecoveryArgs(launchArgs, packageDirs)
 			recovered++
 		}
-		if !sameStringSlice(profile.LaunchArgs, launchArgs) || !strings.EqualFold(profile.CoreId, coreID) {
+		if !sameStringSlice(profile.LaunchArgs, launchArgs) || (!a.isProfileUsingCloakCore(profile.ProfileId) && !strings.EqualFold(profile.CoreId, coreID)) {
 			profile.LaunchArgs = launchArgs
-			profile.CoreId = coreID
+			if !a.isProfileUsingCloakCore(profile.ProfileId) {
+				profile.CoreId = coreID
+			}
 			copy := profile
 			changed = append(changed, &copy)
 		}
@@ -149,6 +161,9 @@ func (a *App) prepareAllProfileExtensionsAfterUpdate(coreID string) (int, error)
 
 func (a *App) persistAllProfileDataPointersAfterUpdate() error {
 	for _, profile := range a.browserMgr.List() {
+		if profile.Running || profile.Pid > 0 || profile.DebugPort > 0 {
+			continue
+		}
 		if err := a.browserMgr.WriteProfileDataPointer(&profile, "closed", 0, time.Now()); err != nil {
 			return fmt.Errorf("更新环境 %s 身份指向失败: %w", profile.ProfileId, err)
 		}

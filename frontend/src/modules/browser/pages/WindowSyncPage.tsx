@@ -1120,6 +1120,7 @@ export function WindowSyncPage() {
                   <div>1. 勾选环境 → 设主控 → 开始同步。在主控窗口操作，跟随窗口实时复现。</div>
                   <div>2. <span className="font-medium">Esc</span> 暂停/恢复 · <span className="font-medium">Ctrl+滚轮</span> 缩放 · <span className="font-medium">Shift+滚轮</span> 横向滚动 · 滚轮/滚动条/键鼠/输入法均可同步。</div>
                   <div>3. 默认同步无延时（最跟手）；仅当需要模拟人工错峰时，再手动打开「随机延时」。</div>
+                  <div>4. 「Connect / 连接」会带到每扇窗；授权页请各点一次 Authorize（一次性 state，不会同步）。账号密码登录仍可同步。</div>
                 </div>
               </div>
             </div>

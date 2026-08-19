@@ -222,21 +222,6 @@ func (a *App) waitBrowserDebugReadyAsync(profileId string, debugPort int, timeou
 			logger.F("profile_id", profileId),
 			logger.F("debug_port", debugPort),
 		)
-	} else {
-		if stealthErr := injectStealthToAllPagesWithUA(debugPort, true); stealthErr != nil {
-			logger.New("Browser").Warn("延迟就绪后反检测脚本注入失败（非致命）",
-				logger.F("profile_id", profileId),
-				logger.F("debug_port", debugPort),
-				logger.F("error", stealthErr.Error()),
-			)
-		} else {
-			logger.New("Browser").Info("延迟就绪后反检测脚本注入成功",
-				logger.F("profile_id", profileId),
-				logger.F("debug_port", debugPort),
-			)
-		}
-		// crashprobe: 临时停用延迟就绪后的 Turnstile 自动点击监控，继续收缩每实例后台 CDP 链路。
-		// startTurnstileMonitor(debugPort, profileId)
 	}
 
 	// Delayed-ready is still the same user start; size only the main frame once.

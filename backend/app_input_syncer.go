@@ -240,7 +240,25 @@ func focusedCDPTargetPrefer(debugPort int, preferExtension bool) (cdpTarget, boo
 	haveFocused, haveEditable := false, false
 	haveFocusedExt, haveEditableExt := false, false
 	haveVisible, haveVisibleExt := false, false
+	var authTarget cdpTarget
+	haveAuth := false
 	for _, target := range pages {
+		if isAuthSensitiveURL(target.URL) {
+			if !haveAuth || popupLikeCDPTarget(target) {
+				authTarget = target
+				haveAuth = true
+			}
+		}
+	}
+	// One-time OAuth/consent: treat that document as focused so replay is
+	// gated, and never Runtime.evaluate it (nodriver/tampering signal).
+	if haveAuth && !preferExtension {
+		return authTarget, true
+	}
+	for _, target := range pages {
+		if !shouldAttachPageCDP(target.URL) {
+			continue
+		}
 		result, err := cdpCallTarget(target, "Runtime.evaluate", map[string]any{
 			"expression": focusProbe, "returnByValue": true,
 		})
@@ -428,6 +446,9 @@ func (s *InputSyncer) cdpCSSViewportSize(port int, target cdpTarget) (w, h float
 }
 
 func cdpCSSViewportSizeFresh(target cdpTarget) (w, h float64, ok bool) {
+	if !shouldAttachPageCDP(target.URL) {
+		return 0, 0, false
+	}
 	result, err := cdpCallTarget(target, "Runtime.evaluate", map[string]any{
 		"expression":    `(() => ({w: window.innerWidth||0, h: window.innerHeight||0}))()`,
 		"returnByValue": true,
@@ -2268,6 +2289,12 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 			}
 			return callNextHook(nCode, wParam, lParam)
 		}
+		s.mu.Lock()
+		masterPort := s.masterDebug
+		s.mu.Unlock()
+		if t, ok := s.focusedMasterCDPTargetMode(masterPort, false); ok && !shouldReplaySyncInput(t.URL) {
+			return callNextHook(nCode, wParam, lParam)
+		}
 		for _, hwnd := range followers {
 			if !isWindow(hwnd) {
 				continue
@@ -2712,6 +2739,9 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
 				}
 			}
 			masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(event.masterPort, preferExt)
+			if hasMasterTarget && !shouldReplaySyncInput(masterTarget.URL) {
+				continue
+			}
 			waitPopup := hasMasterTarget && waitForFollowerCDPMatch(masterTarget)
 			var wg sync.WaitGroup
 			for i, hwnd := range event.hwnds {
@@ -2866,6 +2896,9 @@ func (s *InputSyncer) dispatchPageMouseViaCDPNow(msg uint32, screenX, screenY in
 	// Main frame → dapp page; wallet/extension HWND → prefer extension document.
 	preferExt := masterSurface != 0 && masterSurface != s.masterHwnd
 	masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(masterPort, preferExt)
+	if hasMasterTarget && !shouldReplaySyncInput(masterTarget.URL) {
+		return
+	}
 	button := "left"
 	if msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP {
 		button = "right"
@@ -2998,6 +3031,9 @@ func (s *InputSyncer) dispatchPageMouseMoveViaCDPNow(screenX, screenY int, butto
 	s.mu.Unlock()
 	preferExt := masterSurface != 0 && masterSurface != s.masterHwnd
 	masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(masterPort, preferExt)
+	if hasMasterTarget && !shouldReplaySyncInput(masterTarget.URL) {
+		return
+	}
 	var wg sync.WaitGroup
 	for i, hwnd := range hwnds {
 		port := 0
@@ -3102,6 +3138,9 @@ func (s *InputSyncer) dispatchPageWheelViaCDPNow(msg uint32, screenX, screenY in
 	s.mu.Unlock()
 	preferExt := masterSurface != 0 && masterSurface != s.masterHwnd
 	masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(masterPort, preferExt)
+	if hasMasterTarget && !shouldReplaySyncInput(masterTarget.URL) {
+		return
+	}
 	waitPopup := hasMasterTarget && waitForFollowerCDPMatch(masterTarget)
 	// Master CSS viewport once: wheel deltas must scale by page proportion, not
 	// only by physical Chrome_RenderWidgetHostHWND size (title bar / DPI drift).
@@ -3239,6 +3278,9 @@ func (s *InputSyncer) syncFollowersToMasterAbsoluteZoom(revision uint64, screenX
 		for _, hwnd := range hwnds {
 			s.dispatchPageWheelFallback(hwnd, WM_MOUSEWHEEL, screenX, screenY, originalDelta, keyState)
 		}
+		return
+	}
+	if !shouldReplaySyncInput(masterTarget.URL) {
 		return
 	}
 	masterCSSWidth, _, ok := cdpCSSViewportSizeFresh(masterTarget)
@@ -3581,7 +3623,7 @@ func (s *InputSyncer) urlSyncLoop(stopCh <-chan struct{}) {
 			}
 		}
 		masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(masterDebug, preferExt)
-		if atomic.LoadInt32(&s.pageKeyboardFocus) == 1 && hasMasterTarget {
+		if atomic.LoadInt32(&s.pageKeyboardFocus) == 1 && hasMasterTarget && shouldReplaySyncInput(masterTarget.URL) {
 			if state := s.getMasterFocusedEditableStateOnTarget(masterTarget); state != "" && state != s.lastFocusedEditableState {
 				s.lastFocusedEditableState = state
 				waitPopup := waitForFollowerCDPMatch(masterTarget)
@@ -3612,11 +3654,10 @@ func (s *InputSyncer) urlSyncLoop(stopCh <-chan struct{}) {
 			url = s.getMasterURL(masterDebug)
 		}
 		if url != "" && url != s.lastSyncURL && !isAboutBlank(url) {
-			// Do not force-navigate followers to a wallet popup/notification
-			// document: that replaces their main tab with a full-page extension
-			// UI and desyncs browsing. Extension password display is mirrored
-			// via focused-target insertText + editable-state sync instead.
-			if extensionLikeCDPTarget(cdpTarget{URL: url}) {
+			// Do not force-navigate followers onto wallet/extension documents
+			// or one-time OAuth/consent URLs. Extension password display is
+			// mirrored via focused-target insertText; OAuth state is per-window.
+			if !shouldMirrorSyncNavigation(url) {
 				s.lastSyncURL = url
 			} else {
 				s.lastSyncURL = url
@@ -3661,7 +3702,7 @@ func (s *InputSyncer) reseedURLSyncBaseline(masterDebug int) {
 		return
 	}
 	editable := ""
-	if hasMasterTarget && atomic.LoadInt32(&s.pageKeyboardFocus) == 1 {
+	if hasMasterTarget && atomic.LoadInt32(&s.pageKeyboardFocus) == 1 && shouldAttachPageCDP(url) {
 		editable = s.getMasterFocusedEditableStateOnTarget(masterTarget)
 	}
 	s.mu.Lock()
@@ -3690,6 +3731,14 @@ func cdpRuntimeValue(result map[string]any) (any, bool) {
 }
 
 func (s *InputSyncer) getMasterURL(debugPort int) string {
+	if target, ok := focusedCDPTargetPrefer(debugPort, false); ok {
+		if u := strings.TrimSpace(target.URL); u != "" {
+			return u
+		}
+		if !shouldAttachPageCDP(target.URL) {
+			return ""
+		}
+	}
 	result, err := cdpCall(debugPort, "Runtime.evaluate", map[string]any{
 		"expression":    "location.href",
 		"returnByValue": true,
@@ -3735,6 +3784,9 @@ const focusedEditableStateExpression = `(() => {
 })()`
 
 func (s *InputSyncer) getMasterFocusedEditableStateOnTarget(target cdpTarget) string {
+	if !shouldAttachPageCDP(target.URL) {
+		return ""
+	}
 	if strings.TrimSpace(target.WebSocketDebuggerUrl) == "" {
 		return ""
 	}
@@ -3753,7 +3805,7 @@ func (s *InputSyncer) getMasterFocusedEditableStateOnTarget(target cdpTarget) st
 }
 
 func (s *InputSyncer) applyFollowerFocusedEditableStateOnTarget(debugPort int, master cdpTarget, state string, waitPopup bool) {
-	if state == "" || debugPort <= 0 {
+	if state == "" || debugPort <= 0 || !shouldReplaySyncInput(master.URL) {
 		return
 	}
 	followerTarget, ok := matchingFollowerCDPTarget(master, debugPort, waitPopup)
@@ -3831,7 +3883,7 @@ func (s *InputSyncer) applyFollowerFocusedEditableStateOnTarget(debugPort int, m
 
 func (s *InputSyncer) navigateFollower(debugPort int, url string) {
 	url = strings.TrimSpace(url)
-	if url == "" || isAboutBlank(url) {
+	if url == "" || isAboutBlank(url) || !shouldMirrorSyncNavigation(url) {
 		return
 	}
 	// Same document → skip. Unconditional Page.navigate reloads the dapp, drops

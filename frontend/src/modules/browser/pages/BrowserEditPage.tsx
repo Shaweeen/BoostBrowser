@@ -49,6 +49,7 @@ export function BrowserEditPage() {
   const [saveError, setSaveError] = useState('')
   const [deletedDataOffer, setDeletedDataOffer] = useState<DeletedEnvironmentDataOffer | null>(null)
   const [deletedDataBusy, setDeletedDataBusy] = useState(false)
+  const [environmentRunning, setEnvironmentRunning] = useState(false)
 
   useEffect(() => {
     const loadData = async () => {
@@ -67,6 +68,7 @@ export function BrowserEditPage() {
 
       if (isCreate) {
         setLaunchArgsText(resolvedDefaultLaunchArgs.join('\n'))
+        setEnvironmentRunning(false)
         return
       }
       const list = await fetchBrowserProfiles()
@@ -88,6 +90,7 @@ export function BrowserEditPage() {
         keywords: current.keywords || [],
         groupId: current.groupId || '',
       })
+      setEnvironmentRunning(!!current.running)
       setLaunchArgsText(currentLaunchArgs.join('\n'))
     }
     loadData()
@@ -118,7 +121,7 @@ export function BrowserEditPage() {
         }
       } else if (id) {
         await updateBrowserProfile(id, payload)
-        toast.success('环境已更新')
+        toast.success(environmentRunning ? '环境已更新，代理等启动参数需重启后生效' : '环境已更新')
         navigate('/browser/list')
       }
       setIsDirty(false)
@@ -272,6 +275,9 @@ export function BrowserEditPage() {
         </div>
         {formData.proxyId && (
           <p className="text-xs text-[var(--color-text-muted)] mt-2">已选择代理池代理，手动配置将被忽略</p>
+        )}
+        {environmentRunning && (
+          <p className="text-xs text-[var(--color-warning, #b45309)] mt-2">当前环境正在运行，改代理只在下次启动后生效。</p>
         )}
       </Card>
 

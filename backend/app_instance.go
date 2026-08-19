@@ -4,9 +4,7 @@ import (
 	"boost-browser/backend/internal/browser"
 	"boost-browser/backend/internal/logger"
 	"boost-browser/backend/internal/proxy"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -351,20 +349,16 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		log.Info("xray 桥接成功", logger.F("socks_url", socksURL))
 	} else if !profile.ProxyPaused && proxy.IsStandardProxyURL(resolvedProxyConfig) && a.standardRelayMgr != nil {
 		networkMode := proxy.NormalizeProxyNetworkMode(a.config.Browser.ProxyNetworkMode)
-		if networkMode == proxy.ProxyNetworkModeTUN {
-			// TUN 接管模式：环境流量全部交给本地 VPN(TUN) 在系统层路由，
-			// 不再给浏览器配置 --proxy-server，也不启动本地 relay —— 完全
-			// 脱离 Chrome 代理模块，避免双层代理与网络回路。代理池节点需
-			// 导入本地 Clash 并在其中选择；或改用 local_gateway 模式让
-			// 环境按原路径走代理池节点。
+		if proxy.ShouldSkipChromeProxyOnLaunch(networkMode, resolvedProxyConfig) {
 			effectiveProxy = ""
-			log.Info("TUN 接管模式：跳过 Chrome 代理与本地 relay，流量由本地 VPN TUN 接管",
+			log.Info("TUN 接管模式：未绑定远程节点，跳过 Chrome 代理与本地 relay",
 				logger.F("profile_id", profileId),
 				logger.F("proxy_id", profile.ProxyId),
 			)
 		} else {
+			relayMode := proxy.LaunchRelayMode(networkMode)
 			localProxy, relayKey, relayErr := a.standardRelayMgr.Acquire(profileId, resolvedProxyConfig, proxy.StandardProxyRouteOptions{
-				Mode:            a.config.Browser.ProxyNetworkMode,
+				Mode:            relayMode,
 				LocalGatewayURL: a.config.Browser.LocalVPNProxy,
 			})
 			if relayErr != nil {
@@ -377,7 +371,11 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 				acquiredStandardRelay = true
 				effectiveProxy = localProxy
 				a.persistDetectedStandardProxy(profile.ProxyId, resolvedProxyConfig, relayKey)
-				log.Info("标准代理已切换为本地转发", logger.F("profile_id", profileId), logger.F("local_proxy", localProxy))
+				log.Info("标准代理已切换为本地转发",
+					logger.F("profile_id", profileId),
+					logger.F("local_proxy", localProxy),
+					logger.F("relay_mode", relayMode),
+				)
 			}
 		}
 	}
@@ -465,15 +463,12 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	// Preferences, Local State, Cookies, or extension storage is rewritten.
 	args = append(args, sanitizedProfileLaunchArgs...)
 	args = append(args, sanitizedExtraLaunchArgs...)
-	// Chrome for Testing/Cloak does not expose Google Chrome's native Web Store
-	// installer. Attach one per-profile system compatibility component for this
-	// launch only. It is not persisted as a business extension assignment and it
-	// never rewrites Preferences, Cookies, Local State, wallet or extension data.
-	if browserCoreNeedsWebStoreHelper(selectedCore, chromeBinaryPath) {
-		if helperDir := a.webStoreHelperForProfileLaunch(profileId, userDataDir); helperDir != "" {
-			args = appendWebStoreHelperLaunchArgs(args, helperDir)
-		}
-	}
+	// v1.7.132: do not unpack or --load-extension the Web Store helper on
+	// every start. That extra unpacked extension + CDP watch is what made
+	// environment open slow. User-assigned --load-extension paths and
+	// Chrome-native store installs stay as-is (Preferences / Local Extension
+	// Settings / wallets are never rewritten here). Install new extensions
+	// from 扩展管理「分配」or inside the browser.
 	args = appendChromeTestingInfobarSuppressArg(args, isCloakSelectedCore)
 	// One bounded fallback for an already present profile package. Keyless
 	// profile packages are rejected; signed managed packages above are the
@@ -650,30 +645,13 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 					logger.F("debug_port", stableDebugPort),
 				)
 			}
-			// google-148 (Chrome for Testing) 等非 cloak 内核：在内核自建的初始
-			// 标签页注入 Web Store 兼容（真实内核版本的 UA-CH 品牌 + 补齐
-			// chrome.webstorePrivate），用户创建环境后打开 chromewebstore.google.com
-			// 即可正常访问与安装扩展，不再出现「改用 Chrome？」提示。不引入任何
-			// helper 扩展或本地安装协议。cloak 内核已在 C++ 层处理品牌呈现，跳过。
-			if !isCloakSelectedCore {
-				// 初始标签页注入 + 浏览器级 auto-attach 全标签页监听：无论用户
-				// 在新标签页/新窗口/弹窗中打开 chromewebstore.google.com，
-				// 都携带真实内核版本的 Google Chrome UA-CH 品牌，不再出现
-				// 「改用 Chrome？」横幅。监听随浏览器进程退出自动结束。
-				a.applyWebStoreCompatibilityToInitialTab(stableDebugPort, profileId)
-				go startWebStoreCompatWatch(stableDebugPort, profileId)
-			}
-			// Non-cloak stealth inject skipped on hot path after first alignment —
-			// it added multi-open latency and is not required for Cloak profiles.
+			// v1.7.132: start never attaches Web Store CDP or a helper
+			// extension. Discover/inject stays in webstore_compat_watch.go
+			// for explicit later use; opening an environment must not wait
+			// on /json/list or a debugger socket.
 
-			// stealth 注入完成后，通过 CDP 导航到用户明确配置的目标 URL。
-			// 默认启动页完全由浏览器内核创建，BrowserStudio 不传入默认 URL。
-			//
-			// CloakBrowser 内核分支只用 Target.createTarget(url) 直接打开标签页，
-			// 完全跳过 Page.addScriptToEvaluateOnNewDocument + Emulation.setUserAgentOverride，
-			// 否则 nodriver / Browser Tampering 检测会捕获到 CDP 注入痕迹。
 			if len(targetURLs) > 0 {
-				navigateToTargetURLs(stableDebugPort, targetURLs, profileId, isCloakSelectedCore)
+				navigateToTargetURLs(stableDebugPort, targetURLs, profileId)
 			}
 
 			// One-shot main environment frame size on this user start only.
