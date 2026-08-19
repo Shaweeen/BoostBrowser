@@ -1,17 +1,13 @@
 v1.7.132 remaining wiring (Shaweeen)
 
-Windows — apply ALL parts in this exact order, then pack v1.7.132:
+Windows — if part1a + part1b already applied, do NOT reset --hard.
+Fetch the repaired part1c1, then continue (skip part1c2, it is now inside part1c1):
 
   git fetch origin release/1.7.132-ext-auth-proxy
-  git checkout release/1.7.132-ext-auth-proxy
-  git apply patches/split/v1.7.132-remaining-part1a-syncer.patch
-  git apply patches/split/v1.7.132-remaining-part1b-start.patch
-  git apply patches/split/v1.7.132-remaining-part1c1-navigate.patch
-  git apply patches/split/v1.7.132-remaining-part1c2-dead-inject.patch
-  git apply patches/split/v1.7.132-remaining-part1d-watch-script.patch
-  git apply patches/split/v1.7.132-remaining-part2.patch
-  python3 scripts/test_packaging_scripts.py
+  git checkout origin/release/1.7.132-ext-auth-proxy -- patches/split/v1.7.132-remaining-part1c1-navigate.patch
+  git apply --ignore-whitespace patches/split/v1.7.132-remaining-part1c1-navigate.patch
+  git apply --ignore-whitespace patches/split/v1.7.132-remaining-part1d-watch-script.patch
+  git apply --ignore-whitespace patches/split/v1.7.132-remaining-part2.patch
+  python scripts/test_packaging_scripts.py
 
-Sensitive: no rewrite of Cookies / Preferences / LES / wallets /
-user-assigned --load-extension. Helper source stays on disk.
-Start no longer unpacks helper or attaches store debugger.
+Do not apply part1c2. Cookies / Preferences / LES / wallets / user --load-extension are not rewritten.
