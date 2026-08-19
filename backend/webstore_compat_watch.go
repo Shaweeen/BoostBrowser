@@ -226,3 +226,4 @@ const webStoreCompatScript = `(() => {
     };
   } catch (e) {}
 })();
+`
