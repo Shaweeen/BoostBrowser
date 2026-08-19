@@ -1,0 +1,73 @@
+diff --git a/backend/app_input_syncer.go b/backend/app_input_syncer.go
+index 96e87e7..0a53b9a 100644
+--- a/backend/app_input_syncer.go
++++ b/backend/app_input_syncer.go
+@@ -240,7 +240,25 @@ func focusedCDPTargetPrefer(debugPort int, preferExtension bool) (cdpTarget, boo
+ 	haveFocused, haveEditable := false, false
+ 	haveFocusedExt, haveEditableExt := false, false
+ 	haveVisible, haveVisibleExt := false, false
++	var authTarget cdpTarget
++	haveAuth := false
+ 	for _, target := range pages {
++		if isAuthSensitiveURL(target.URL) {
++			if !haveAuth || popupLikeCDPTarget(target) {
++				authTarget = target
++				haveAuth = true
++			}
++		}
++	}
++	// One-time OAuth/consent: treat that document as focused so replay is
++	// gated, and never Runtime.evaluate it (nodriver/tampering signal).
++	if haveAuth && !preferExtension {
++		return authTarget, true
++	}
++	for _, target := range pages {
++		if !shouldAttachPageCDP(target.URL) {
++			continue
++		}
+ 		result, err := cdpCallTarget(target, "Runtime.evaluate", map[string]any{
+ 			"expression": focusProbe, "returnByValue": true,
+ 		})
+@@ -428,6 +446,9 @@ func (s *InputSyncer) cdpCSSViewportSize(port int, target cdpTarget) (w, h float
+ }
+ 
+ func cdpCSSViewportSizeFresh(target cdpTarget) (w, h float64, ok bool) {
++	if !shouldAttachPageCDP(target.URL) {
++		return 0, 0, false
++	}
+ 	result, err := cdpCallTarget(target, "Runtime.evaluate", map[string]any{
+ 		"expression":    `(() => ({w: window.innerWidth||0, h: window.innerHeight||0}))()`,
+ 		"returnByValue": true,
+@@ -2268,6 +2289,12 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
+ 			}
+ 			return callNextHook(nCode, wParam, lParam)
+ 		}
++		s.mu.Lock()
++		masterPort := s.masterDebug
++		s.mu.Unlock()
++		if t, ok := s.focusedMasterCDPTargetMode(masterPort, false); ok && !shouldReplaySyncInput(t.URL) {
++			return callNextHook(nCode, wParam, lParam)
++		}
+ 		for _, hwnd := range followers {
+ 			if !isWindow(hwnd) {
+ 				continue
+@@ -2712,6 +2739,9 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
+ 				}
+ 			}
+ 			masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(event.masterPort, preferExt)
++			if hasMasterTarget && !shouldReplaySyncInput(masterTarget.URL) {
++				continue
++			}
+ 			waitPopup := hasMasterTarget && waitForFollowerCDPMatch(masterTarget)
+ 			var wg sync.WaitGroup
+ 			for i, hwnd := range event.hwnds {
+@@ -2866,6 +2896,9 @@ func (s *InputSyncer) dispatchPageMouseViaCDPNow(msg uint32, screenX, screenY in
+ 	// Main frame → dapp page; wallet/extension HWND → prefer extension document.
+ 	preferExt := masterSurface != 0 && masterSurface != s.masterHwnd
+ 	masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(masterPort, preferExt)
++	if hasMasterTarget && !shouldReplaySyncInput(masterTarget.URL) {
++		return
++	}
+ 	button := "left"
+ 	if msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP {
+ 		button = "left"
