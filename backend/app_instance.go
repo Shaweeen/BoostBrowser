@@ -499,13 +499,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	// switch whenever this launch has an existing extension path, including a
 	// legacy saved assignment, not only when the bounded recovery found one.
 	args = ensureLoadExtensionCommandLineSwitchEnabled(args)
-	if recoveredUserExtensions > 0 {
-		log.Info("已为本次启动临时恢复用户已有扩展（未改写浏览器数据）",
-			logger.F("profile_id", profileId),
-			logger.F("chrome_profile_directory", recoveryProfileDir),
-			logger.F("recovered_extensions", recoveredUserExtensions),
-		)
-	}
 
 	// cloak 路径下额外剥掉几个会暴露 chromium 身份的 launch arg：
 	//   - --extension-mime-request-handling   (Chromium-only debug switch)

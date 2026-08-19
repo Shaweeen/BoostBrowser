@@ -57,6 +57,15 @@ func environmentFrameLooksLikeMain(w, h int, title string) bool {
 	return w >= 200 && h >= 100
 }
 
+// isAutoOpenedWalletHomepageTitle matches MV3 wallet Notification hosts.
+func isAutoOpenedWalletHomepageTitle(title string) bool {
+	lower := strings.ToLower(strings.TrimSpace(title))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "wallet") && strings.Contains(lower, "notification")
+}
+
 func isStrongExtensionPopupTitle(title string) bool {
 	if title == "" {
 		return false
