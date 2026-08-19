@@ -470,12 +470,31 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 	// Settings / wallets are never rewritten here). Install new extensions
 	// from 扩展管理「分配」or inside the browser.
 	args = appendChromeTestingInfobarSuppressArg(args, isCloakSelectedCore)
-	// One bounded fallback for an already present profile package. Keyless
-	// profile packages are rejected; signed managed packages above are the
-	// authoritative same-ID recovery path.
-	recoveryProfileDir := chromeLaunchProfileDirectory(userDataDir, args)
-	args, recoveredUserExtensions := appendProfileExtensionRecoveryLaunchArgs(args, userDataDir)
-	args = normalizeLoadExtensionArgs(args)
+	assignedLaunchArgs := append([]string(nil), args...)
+	assignmentFingerprint, assignmentIDs := assignmentFingerprintFromLaunchArgs(assignedLaunchArgs)
+	args, extensionsSettled := applyCompleteExtensionLaunchArgs(args, userDataDir)
+	if extensionsSettled {
+		log.Info("扩展已完成首次适配，启动跳过注入/扫描/恢复（不读 Preferences/LES/钱包）",
+			logger.F("profile_id", profileId),
+			logger.F("assignment_ids", strings.Join(assignmentIDs, ",")),
+		)
+	} else {
+		recoveryProfileDir := chromeLaunchProfileDirectory(userDataDir, args)
+		var recoveredUserExtensions int
+		args, recoveredUserExtensions = appendProfileExtensionRecoveryLaunchArgs(args, userDataDir)
+		args = normalizeLoadExtensionArgs(args)
+		args, nativePresent, nativeNeedCLI := applyProfileNativeExtensionLaunchArgs(args, userDataDir)
+		args = dropStoreInstalledLoadExtensionArgs(args, userDataDir)
+		if nativePresent > 0 || nativeNeedCLI > 0 || recoveredUserExtensions > 0 {
+			log.Info("首次适配扩展加载（只读，不改写用户数据）",
+				logger.F("profile_id", profileId),
+				logger.F("chrome_profile_directory", recoveryProfileDir),
+				logger.F("native_present", nativePresent),
+				logger.F("need_cli", nativeNeedCLI),
+				logger.F("recovered_extensions", recoveredUserExtensions),
+			)
+		}
+	}
 	// Chrome 137+ disables --load-extension by default. Apply the compatibility
 	// switch whenever this launch has an existing extension path, including a
 	// legacy saved assignment, not only when the bounded recovery found one.
@@ -531,15 +550,9 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		}
 	}
 	args = normalizeLoadExtensionArgs(args)
-	// 用户在浏览器商城里自行安装的扩展（Preferences location=INTERNAL）由
-	// Chrome 原生加载，禁止再通过 --load-extension 注入同一 ID 的管理包：
-	// 双重安装会再次触发 onInstalled（Rabby/MetaMask 欢迎/解锁弹窗），并可能
-	// 覆盖用户自行安装的版本。这里只剔除商城里已原生安装的条目，
-	// BrowserStudio 自己分配的 unpacked 包不受影响（仍是权威分配记录）。
-	args = dropStoreInstalledLoadExtensionArgs(args, userDataDir)
 	userLaunchExtensionCount := len(activeLoadExtensionDirs(sanitizedProfileLaunchArgs))
-	if userLaunchExtensionCount > 0 {
-		log.Info("启动时保留用户指定的扩展启动参数（不改写用户数据）",
+	if userLaunchExtensionCount > 0 && !extensionsSettled {
+		log.Info("首次适配仍保留分配的扩展启动参数（不改写用户数据）",
 			logger.F("profile_id", profileId),
 			logger.F("count", userLaunchExtensionCount),
 		)
@@ -691,6 +704,19 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			}()
 
 			markStartPrepDone(userDataDir)
+			if !extensionsSettled && assignmentFingerprint != "" {
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							logger.New("Extension").Error("maybeMarkExtensionLaunchReady panic recovered",
+								logger.F("profile_id", profileId),
+								logger.F("error", r),
+							)
+						}
+					}()
+					a.maybeMarkExtensionLaunchReady(profileId, userDataDir, assignmentFingerprint, assignedLaunchArgs, assignmentIDs)
+				}()
+			}
 
 			a.emitBrowserInstanceStarted(profile, false)
 
