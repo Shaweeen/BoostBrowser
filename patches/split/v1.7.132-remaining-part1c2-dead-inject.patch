@@ -1,0 +1,92 @@
+diff --git a/backend/app_instance.go b/backend/app_instance.go
+--- a/backend/app_instance.go
++++ b/backend/app_instance.go
+@@ -1761,91 +1587,3 @@
+ 	}
+ 	return false
+ }
+-
+-// webStoreCompatScript 在主文档执行前注入，补齐 Chrome for Testing (google-148)
+-// 内核缺失的 chrome.webstorePrivate 私有 API。新版 Chrome Web Store 的
+-// “添加至 Chrome”按钮依赖该 API 完成安装；CfT 是 Chromium 品牌构建，此 API
+-// 不存在 → 商店判定为非 Chrome，显示“切换到 Chrome”横幅并禁用安装。
+-//
+-// 这里把安装动作转发到 clients2.google.com 的 CRX 下载地址，配合内核自身的
+-// extension-mime-request-handling@2 flag 弹原生“添加扩展程序？”对话框一步安装。
+-// 不依赖任何本地协议 / 本地服务器 / helper 扩展。
+-const webStoreCompatScript = `(() => {
+-  try {
+-    if (!window.chrome || window.chrome.webstorePrivate) return;
+-    const getExtId = () => {
+-      const m = /detail(?:\/[^\/]+)?\/([a-z]{32})/.exec(window.location.href);
+-      return m ? m[1] : null;
+-    };
+-    const crxUrlFor = (id) => {
+-      const v = /Chrome\/([\d.]+)/.exec(navigator.userAgent);
+-      const prod = v ? v[1] : "148.0.7778.167";
+-      return "https://clients2.google.com/service/update2/crx?response=redirect&acceptformat=crx2,crx3&prodversion=" + prod +
+-        "&x=id%3D" + encodeURIComponent(id) + "%26installsource%3Dondemand%26uc";
+-    };
+-    window.chrome.webstorePrivate = {
+-      getExtensionStatus: function (id, manifest, cb) { cb && cb("installable"); },
+-      beginInstallWithManifest3: function (extinfo, cb) {
+-        const id = (extinfo && extinfo.id) || getExtId();
+-        if (id) {
+-          const w = window.open(crxUrlFor(id), "_blank");
+-          if (w) { try { w.opener = null; } catch (e) {} }
+-        }
+-        cb && cb("user_cancelled");
+-      },
+-      isInIncognitoMode: function (cb) { cb && cb(false); },
+-      getReferrerChain: function (cb) { cb && cb("EgIIAA=="); },
+-      completeInstall: function (id, cb) { cb && cb(true); },
+-    };
+-  } catch (e) {}
+-})();
+-`
+-
+-// applyWebStoreCompatibilityToInitialTab 在内核自建的初始标签页上注入 Web Store
+-// 兼容：
+-//   - Emulation.setUserAgentOverride（真实内核版本的 UA-CH 品牌）→ 修复
+-//     Sec-CH-UA 请求头与 navigator.userAgentData，消除“切换到 Chrome”横幅
+-//   - Page.addScriptToEvaluateOnNewDocument（chrome.webstorePrivate 补齐）→
+-//     “添加至 Chrome”按钮可用，CRX 下载触发内核原生安装框
+-//
+-// 只作用于初始标签页，用户在该标签页内的后续导航沿用覆写（Emulation 按
+-// target 会话生效）。不创建后台常驻 CDP 连接、不启动任何本地协议服务、
+-// 不改写用户数据。cloak 内核在 C++ 层已处理品牌呈现，调用方应跳过。
+-func (a *App) applyWebStoreCompatibilityToInitialTab(debugPort int, profileId string) {
+-	if debugPort <= 0 {
+-		return
+-	}
+-	client := http.Client{Timeout: 3 * time.Second}
+-	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/json/list", debugPort))
+-	if err != nil {
+-		return
+-	}
+-	var targets []struct {
+-		Type string `json:"type"`
+-		URL  string `json:"url"`
+-		ID   string `json:"id"`
+-	}
+-	decodeErr := json.NewDecoder(resp.Body).Decode(&targets)
+-	resp.Body.Close()
+-	if decodeErr != nil {
+-		return
+-	}
+-	targetID := ""
+-	for _, t := range targets {
+-		if t.Type != "page" {
+-			continue
+-		}
+-		u := strings.ToLower(strings.TrimSpace(t.URL))
+-		if u == "" || strings.HasPrefix(u, "about:blank") || strings.HasPrefix(u, "chrome://newtab") {
+-			targetID = t.ID
+-			break
+-		}
+-	}
+-	if targetID == "" {
+-		return
+-	}
+-	applyWebStoreCompatToPageTarget(debugPort, targetID, profileId)
+-}
