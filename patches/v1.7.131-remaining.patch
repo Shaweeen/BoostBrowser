@@ -1,0 +1,203 @@
+diff --git a/backend/app_input_syncer.go b/backend/app_input_syncer.go
+index 96e87e7..2ff7ee9 100644
+--- a/backend/app_input_syncer.go
++++ b/backend/app_input_syncer.go
+@@ -2712,6 +2712,9 @@ func (s *InputSyncer) cdpKeyDispatchLoop(stopCh <-chan struct{}, queue <-chan cd
+ 				}
+ 			}
+ 			masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(event.masterPort, preferExt)
++			if hasMasterTarget && !shouldReplaySyncInput(masterTarget.URL) {
++				continue
++			}
+ 			waitPopup := hasMasterTarget && waitForFollowerCDPMatch(masterTarget)
+ 			var wg sync.WaitGroup
+ 			for i, hwnd := range event.hwnds {
+@@ -2866,6 +2869,9 @@ func (s *InputSyncer) dispatchPageMouseViaCDPNow(msg uint32, screenX, screenY in
+ 	// Main frame → dapp page; wallet/extension HWND → prefer extension document.
+ 	preferExt := masterSurface != 0 && masterSurface != s.masterHwnd
+ 	masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(masterPort, preferExt)
++	if hasMasterTarget && !shouldReplaySyncInput(masterTarget.URL) {
++		return
++	}
+ 	button := "left"
+ 	if msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP {
+ 		button = "right"
+@@ -2998,6 +3004,9 @@ func (s *InputSyncer) dispatchPageMouseMoveViaCDPNow(screenX, screenY int, butto
+ 	s.mu.Unlock()
+ 	preferExt := masterSurface != 0 && masterSurface != s.masterHwnd
+ 	masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(masterPort, preferExt)
++	if hasMasterTarget && !shouldReplaySyncInput(masterTarget.URL) {
++		return
++	}
+ 	var wg sync.WaitGroup
+ 	for i, hwnd := range hwnds {
+ 		port := 0
+@@ -3581,7 +3590,7 @@ func (s *InputSyncer) urlSyncLoop(stopCh <-chan struct{}) {
+ 			}
+ 		}
+ 		masterTarget, hasMasterTarget := s.focusedMasterCDPTargetMode(masterDebug, preferExt)
+-		if atomic.LoadInt32(&s.pageKeyboardFocus) == 1 && hasMasterTarget {
++		if atomic.LoadInt32(&s.pageKeyboardFocus) == 1 && hasMasterTarget && shouldReplaySyncInput(masterTarget.URL) {
+ 			if state := s.getMasterFocusedEditableStateOnTarget(masterTarget); state != "" && state != s.lastFocusedEditableState {
+ 				s.lastFocusedEditableState = state
+ 				waitPopup := waitForFollowerCDPMatch(masterTarget)
+@@ -3612,11 +3621,10 @@ func (s *InputSyncer) urlSyncLoop(stopCh <-chan struct{}) {
+ 			url = s.getMasterURL(masterDebug)
+ 		}
+ 		if url != "" && url != s.lastSyncURL && !isAboutBlank(url) {
+-			// Do not force-navigate followers to a wallet popup/notification
+-			// document: that replaces their main tab with a full-page extension
+-			// UI and desyncs browsing. Extension password display is mirrored
+-			// via focused-target insertText + editable-state sync instead.
+-			if extensionLikeCDPTarget(cdpTarget{URL: url}) {
++			// Do not force-navigate followers onto wallet/extension documents
++			// or one-time OAuth/consent URLs. Extension password display is
++			// mirrored via focused-target insertText; OAuth state is per-window.
++			if !shouldMirrorSyncNavigation(url) {
+ 				s.lastSyncURL = url
+ 			} else {
+ 				s.lastSyncURL = url
+@@ -3831,7 +3839,7 @@ func (s *InputSyncer) applyFollowerFocusedEditableStateOnTarget(debugPort int, m
+ 
+ func (s *InputSyncer) navigateFollower(debugPort int, url string) {
+ 	url = strings.TrimSpace(url)
+-	if url == "" || isAboutBlank(url) {
++	if url == "" || isAboutBlank(url) || !shouldMirrorSyncNavigation(url) {
+ 		return
+ 	}
+ 	// Same document → skip. Unconditional Page.navigate reloads the dapp, drops
+diff --git a/backend/app_instance.go b/backend/app_instance.go
+index 85fa9ae..4033562 100644
+--- a/backend/app_instance.go
++++ b/backend/app_instance.go
+@@ -650,16 +650,12 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
+ 					logger.F("debug_port", stableDebugPort),
+ 				)
+ 			}
+-			// google-148 (Chrome for Testing) 等非 cloak 内核：在内核自建的初始
+-			// 标签页注入 Web Store 兼容（真实内核版本的 UA-CH 品牌 + 补齐
+-			// chrome.webstorePrivate），用户创建环境后打开 chromewebstore.google.com
+-			// 即可正常访问与安装扩展，不再出现「改用 Chrome？」提示。不引入任何
+-			// helper 扩展或本地安装协议。cloak 内核已在 C++ 层处理品牌呈现，跳过。
++			// google-148 (Chrome for Testing) 等非 cloak 内核：只在用户真正打开
++			// Chrome / Edge / Opera 商店页时注入 Web Store 兼容。禁止对
++			// about:blank / OAuth / 普通网页做全标签 CDP 自动附加 + UA 覆写，
++			// 否则环境打开变慢，且 CDP 附加会被 X 等站点当成自动化痕迹导致授权失败。
++			// cloak 内核已在 C++ 层处理品牌呈现，跳过。
+ 			if !isCloakSelectedCore {
+-				// 初始标签页注入 + 浏览器级 auto-attach 全标签页监听：无论用户
+-				// 在新标签页/新窗口/弹窗中打开 chromewebstore.google.com，
+-				// 都携带真实内核版本的 Google Chrome UA-CH 品牌，不再出现
+-				// 「改用 Chrome？」横幅。监听随浏览器进程退出自动结束。
+ 				a.applyWebStoreCompatibilityToInitialTab(stableDebugPort, profileId)
+ 				go startWebStoreCompatWatch(stableDebugPort, profileId)
+ 			}
+@@ -1824,16 +1820,11 @@ const webStoreCompatScript = `(() => {
+ })();
+ `
+ 
+-// applyWebStoreCompatibilityToInitialTab 在内核自建的初始标签页上注入 Web Store
+-// 兼容：
+-//   - Emulation.setUserAgentOverride（真实内核版本的 UA-CH 品牌）→ 修复
+-//     Sec-CH-UA 请求头与 navigator.userAgentData，消除“切换到 Chrome”横幅
+-//   - Page.addScriptToEvaluateOnNewDocument（chrome.webstorePrivate 补齐）→
+-//     “添加至 Chrome”按钮可用，CRX 下载触发内核原生安装框
+-//
+-// 只作用于初始标签页，用户在该标签页内的后续导航沿用覆写（Emulation 按
+-// target 会话生效）。不创建后台常驻 CDP 连接、不启动任何本地协议服务、
+-// 不改写用户数据。cloak 内核在 C++ 层已处理品牌呈现，调用方应跳过。
++// applyWebStoreCompatibilityToInitialTab injects Web Store compatibility only
++// on page targets that are already a store URL. Startup about:blank / newtab
++// must stay untouched: a UA override on the initial blank tab persists into
++// later navigations (including OAuth) and is the slow-open + auth-failure path.
++// The discover watch is the owner for later store navigations.
+ func (a *App) applyWebStoreCompatibilityToInitialTab(debugPort int, profileId string) {
+ 	if debugPort <= 0 {
+ 		return
+@@ -1853,21 +1844,13 @@ func (a *App) applyWebStoreCompatibilityToInitialTab(debugPort int, profileId st
+ 	if decodeErr != nil {
+ 		return
+ 	}
+-	targetID := ""
+ 	for _, t := range targets {
+-		if t.Type != "page" {
++		if t.Type != "page" || t.ID == "" {
+ 			continue
+ 		}
+-		u := strings.ToLower(strings.TrimSpace(t.URL))
+-		if u == "" || strings.HasPrefix(u, "about:blank") || strings.HasPrefix(u, "chrome://newtab") {
+-			targetID = t.ID
+-			break
++		if !shouldInjectWebStoreCompat(t.URL) {
++			continue
+ 		}
++		applyWebStoreCompatToPageTarget(debugPort, t.ID, profileId)
+ 	}
+-	if targetID == "" {
+-		return
+-	}
+-	// 注入逻辑与全标签页监听共用同一实现（见 webstore_compat_watch.go 的
+-	// applyWebStoreCompatToPageTarget）。
+-	applyWebStoreCompatToPageTarget(debugPort, targetID, profileId)
+ }
+diff --git a/docs/DELETION_LEDGER.md b/docs/DELETION_LEDGER.md
+index a4d947e..07d60bd 100644
+--- a/docs/DELETION_LEDGER.md
++++ b/docs/DELETION_LEDGER.md
+@@ -459,3 +459,9 @@ behavior is intentionally retired.
+ | ID | Removed code / behaviour | Last known revision | Why removed | Maintained replacement | Verification | Recovery path |
+ |---|---|---|---|---|---|---|
+ | CLEAN-111 | Always-direct dialing for pool speed tests / IP health checks under `tun` network mode (no gateway fallback); batch speed test / IP health / retest-failed including the built-in 本地代理 row (hardcoded `http://127.0.0.1:7890`); gateway routing for a node whose host:port equals the local gateway itself | `v1.7.129` (`b589b76`) | With local Clash TUN active, direct dials are captured by TUN and routed per Clash rules — the node IP is usually unreachable from the Clash node's exit, so every imported node showed “timeout/unavailable”. The built-in 本地代理 row always timed out for Clash Verge Rev setups listening on 7897 instead of 7890, and batch “test all / retest failed / IP health” counted it as a failure, making the whole pool look dead. Routing the gateway node through the gateway itself self-looped / double-hopped. | `tun` mode now dials gateway-first (loopback gateway is not TUN-captured and matches the environment's real path) with direct fallback; the built-in 本地代理 row is refreshed to the discovered local gateway (7890/7897/7891/10808/10809) at load/save and at test time, excluded from batch speed test / IP health / retest-failed, and a node whose host:port equals the gateway is tested directly to avoid self-route; IP health reports the pool node's real exit IP instead of the Clash node's. | 6 new regression tests (tun gateway fallback with blocked direct, tun direct fallback without a gateway, direct mode never touching the gateway, tun IP health through the gateway tunnel, node==gateway detection, node==gateway testable in all modes); full Go suite, go vet, frontend `tsc --noEmit` and 30 packaging tests. | Inspect with `git show b589b76:backend/internal/proxy/speedtest.go` and `git show b589b76:backend/app.go`; restore tun-mode always-direct dialing only for historical comparison, never in place of the gateway-aware routing. |
++
++## v1.7.131 OAuth isolation and store-only Web Store CDP
++
++| ID | Removed code / behaviour | Last known revision | Why removed | Maintained replacement | Verification | Recovery path |
++|---|---|---|---|---|---|---|
++| CLEAN-112 | Browser-level `Target.setAutoAttach` on every page target plus `applyWebStoreCompatibilityToInitialTab` injecting UA override / `webstorePrivate` into startup `about:blank` / `chrome://newtab`; URL-sync `Page.navigate` of one-time OAuth/consent URLs and CDP click/key replay on those surfaces | `v1.7.130` (`52f629c`) | Auto-attach connected CDP to every new tab (blank, OAuth popups, dapps). That made environment open slow and is a nodriver/tampering signal. URL-sync then cloned `x.com/i/oauth2/authorize?state=…` onto every follower, consuming the one-time state and producing a storm of “You weren't able to give access to the App”. | `backend/navigation_guards.go` is the single owner: `shouldInjectWebStoreCompat` (store hosts only), `shouldMirrorSyncNavigation`, `shouldReplaySyncInput`. The watch uses `Target.setDiscoverTargets` and attaches only after a store URL is seen. Initial-tab inject skips blank/newtab. Sync records auth URLs as the baseline but never navigates or replays them. Profile/cookie/extension/wallet data is untouched. | New `navigation_guards_test.go` covers X/Discord/Google/GitHub OAuth vs GenLayer/X-home/Discord-channels; packaging guard forbids `Target.setAutoAttach` and requires store-URL gating; focused Go tests for the new predicates. | Inspect with `git show 52f629c:backend/webstore_compat_watch.go` and `git show 52f629c:backend/app_input_syncer.go`. Restore blanket auto-attach only for historical comparison, never in place of store-URL discover. |
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index e11c37e..f1cecc7 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "boost-browser-frontend",
+-  "version": "1.7.130",
++  "version": "1.7.131",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "boost-browser-frontend",
+-      "version": "1.7.130",
++      "version": "1.7.131",
+       "hasInstallScript": true,
+       "dependencies": {
+         "@types/js-yaml": "^4.0.9",
+diff --git a/scripts/test_packaging_scripts.py b/scripts/test_packaging_scripts.py
+index ddbdb1d..ffc06e2 100644
+--- a/scripts/test_packaging_scripts.py
++++ b/scripts/test_packaging_scripts.py
+@@ -199,6 +199,23 @@ class PackagingScriptsTest(unittest.TestCase):
+         self.assertNotIn("automaticExtensionStartupCleanupDelays", startup_tabs)
+         self.assertNotIn("closeAssignedExtensionAutoPagesAfterStart", startup_tabs)
+ 
++    def test_webstore_compat_is_store_url_gated_and_never_auto_attaches(self):
++        watch = self.read("backend/webstore_compat_watch.go")
++        startup = self.read("backend/app_instance.go")
++        syncer = self.read("backend/app_input_syncer.go")
++        guards = self.read("backend/navigation_guards.go")
++
++        self.assertNotIn('"Target.setAutoAttach"', watch)
++        self.assertNotIn('"Target.setAutoAttach"', startup)
++        self.assertIn('"Target.setDiscoverTargets"', watch)
++        self.assertIn("shouldInjectWebStoreCompat", watch)
++        self.assertIn("shouldInjectWebStoreCompat", startup)
++        self.assertIn("shouldMirrorSyncNavigation", syncer)
++        self.assertIn("shouldReplaySyncInput", syncer)
++        self.assertIn("func isAuthSensitiveURL", guards)
++        self.assertIn("func shouldMirrorSyncNavigation", guards)
++        self.assertIn("func shouldInjectWebStoreCompat", guards)
++
+     def test_extension_distribution_is_explicit_and_never_profile_or_startup_driven(self):
+         app = self.read("backend/app.go")
+         launch = self.read("backend/app_instance.go")
