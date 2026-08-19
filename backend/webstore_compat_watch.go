@@ -14,6 +14,11 @@ import (
 // and injects Web Store compatibility only when the target is actually a
 // Chrome / Edge / Opera store URL.
 //
+// v1.7.132: environment Start no longer launches this watch. A live debugger
+// on every open made startup slow and is a tampering signal. The function
+// remains the single store-inject owner if a later explicit user action
+// (opening the store from 扩展管理) needs it. Do not call it from Start.
+//
 // This replaces the v1.7.125 Target.setAutoAttach-on-every-page owner.
 // Auto-attach connected CDP to about:blank, OAuth popups and every new tab:
 // that made environment open slow and is a nodriver / tampering signal that
