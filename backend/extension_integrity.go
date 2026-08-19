@@ -109,10 +109,11 @@ func allAssignedPackagesExistOnDisk(launchArgs []string) bool {
 
 // isExtensionAssignmentComplete is the single gate for "do nothing on start".
 // True when:
-//   - no extensions assigned, or
-//   - integrity marker matches current assignment and packages exist, or
-//   - live check: every assigned package has durable Chrome runtime data
-//     (LES/etc.) and we refresh the marker.
+//   - no extensions assigned (Chrome-native / store installs only), or
+//   - integrity marker matches current assignment (hot start: do not read
+//     Preferences, LES, Cookies, or wallet vaults), or
+//   - first live check: every assigned package has durable Chrome runtime
+//     and we persist the marker so later starts skip entirely.
 func isExtensionAssignmentComplete(userDataDir string, launchArgs []string) bool {
 	userDataDir = strings.TrimSpace(userDataDir)
 	fp, ids := assignmentFingerprintFromLaunchArgs(launchArgs)
@@ -127,20 +128,28 @@ func isExtensionAssignmentComplete(userDataDir string, launchArgs []string) bool
 	}
 	if marker, ok := readExtensionIntegrityMarker(userDataDir); ok {
 		if strings.EqualFold(marker.AssignmentFingerprint, fp) {
-			// Marker hit: still require durable data so we never trust a stale flag.
-			if everyAssignedHasDurableRuntime(userDataDir, launchArgs) {
-				return true
-			}
-			// Stale marker (data wiped) — clear and re-verify.
-			clearExtensionIntegrityMarker(userDataDir)
+			// Trust the post-assign adapt. Do not re-open Preferences / LES
+			// on every environment start — that is the slow path the user
+			// sees as "每次启动都在读扩展".
+			return true
 		}
 	}
 	if !everyAssignedHasDurableRuntime(userDataDir, launchArgs) {
 		return false
 	}
-	// Live complete → persist marker so later starts skip entirely.
 	_ = writeExtensionIntegrityMarker(userDataDir, "", fp, ids)
 	return true
+}
+
+// applyCompleteExtensionLaunchArgs is the start-path owner. A complete
+// assignment strips --load-extension and tells the caller to skip recovery,
+// Preferences reads, and any other extension I/O for this launch.
+func applyCompleteExtensionLaunchArgs(args []string, userDataDir string) (next []string, complete bool) {
+	args = normalizeLoadExtensionArgs(args)
+	if !isExtensionAssignmentComplete(userDataDir, args) {
+		return args, false
+	}
+	return stripLoadExtensionArgs(args), true
 }
 
 func everyAssignedHasDurableRuntime(userDataDir string, launchArgs []string) bool {
