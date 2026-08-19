@@ -3,25 +3,27 @@
 ## 敏感数据
 
 本次**不删除、不改写** Cookie、登录态、扩展存储、钱包 vault、Preferences。
-已分配的扩展和商城原生安装的扩展继续按原路径加载。
+已分配并完成首次适配的扩展，以及用户在商城原生安装的扩展，由 Chrome 自己加载。
 
-## 修复：打开环境弹出一堆 Rabby / MetaMask Notification，启动和连钱包很慢
+## 修复：装好扩展后每次启动还在读/注入，连钱包慢、Rabby Notification 铺屏
 
-1.7.132 去掉了商店 helper，但环境保存的 `--load-extension` 仍会在**每次启动**再注入一次。
-Chrome 把这当成新安装，Rabby / MetaMask 触发 `onInstalled`，弹出空白「Wallet Notification」主页。
-批量开环境时每个窗口再叠一块钱包页，启动和点「连接钱包」都会变慢。
+分配并成功装进环境之后，启动仍会：
 
-**替换：**
+1. 读 Preferences / LES 判断要不要 `--load-extension`
+2. 扫描 profile 做扩展恢复
+3. 再打一遍 `--load-extension` → Chrome 当成新安装 → Rabby/MetaMask 弹出 Notification 主页
+4. 连钱包/签名时客户端还可能 CDP 碰到扩展页
 
-1. 启动只读调用已有的 `applyProfileNativeExtensionLaunchArgs`。
-   Preferences 已启用、包路径可加载、且 LES 已存在时，取消该包的 `--load-extension`。
-   Chrome 自己加载已装扩展，不再重放 onInstalled。
-   第一次适配（还没有 LES）仍带 CLI，避免「分配成功但工具栏是空的」。
-2. 启动后 2.5 秒内，只对标题同时含 wallet + notification 的窗口发 `WM_CLOSE`。
-   不走 CDP，不关「Rabby Wallet / MetaMask」工具栏弹窗，不关用户稍后点的连接确认窗。
+**替换（一个 owner）：**
+
+- 首次适配：保留 `--load-extension`，Chrome 写出 Preferences+LES 后写入 `.boost_extension_integrity_v1`
+- **之后每次启动只看这个标记**：去掉 `--load-extension`，不读 Preferences/LES/钱包，不做恢复/注入/巡检
+- 重新「分配」会清标记，再适配一次
+- 商城自装（没有分配 CLI）同样视为已完成，启动不扫描、不注入
+- 钱包连接/签名只走环境里的扩展：客户端不对 `chrome-extension://` 做 CDP attach、不同步点击、不关钱包窗
 
 ## 使用说明
 
-1. 已连过钱包的环境：直接打开，不应再铺满 Notification 白页。
-2. 新分配的钱包扩展：第一次打开仍会走 CLI 适配，属正常。
-3. 点 dapp「连接钱包」后弹出的确认窗请照常点；启动清理只针对自动弹出的 Notification 主页。
+1. 已经连过钱包的环境：关掉再开，不应再铺满 Notification，也不应再被客户端扫一遍扩展。
+2. 新分配的扩展：打开一次完成适配，之后同样不再注入。
+3. 点 dapp「连接钱包」：每扇环境自己的 Rabby/MetaMask 弹确认，客户端不代点、不注入。
