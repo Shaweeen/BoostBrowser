@@ -1,0 +1,274 @@
+diff --git a/backend/browser_runtime_state.go b/backend/browser_runtime_state.go
+index 8ab03c3..6a7dcab 100644
+--- a/backend/browser_runtime_state.go
++++ b/backend/browser_runtime_state.go
+@@ -222,21 +222,6 @@ func (a *App) waitBrowserDebugReadyAsync(profileId string, debugPort int, timeou
+ 			logger.F("profile_id", profileId),
+ 			logger.F("debug_port", debugPort),
+ 		)
+-	} else {
+-		if stealthErr := injectStealthToAllPagesWithUA(debugPort, true); stealthErr != nil {
+-			logger.New("Browser").Warn("延迟就绪后反检测脚本注入失败（非致命）",
+-				logger.F("profile_id", profileId),
+-				logger.F("debug_port", debugPort),
+-				logger.F("error", stealthErr.Error()),
+-			)
+-		} else {
+-			logger.New("Browser").Info("延迟就绪后反检测脚本注入成功",
+-				logger.F("profile_id", profileId),
+-				logger.F("debug_port", debugPort),
+-			)
+-		}
+-		// crashprobe: 临时停用延迟就绪后的 Turnstile 自动点击监控，继续收缩每实例后台 CDP 链路。
+-		// startTurnstileMonitor(debugPort, profileId)
+ 	}
+ 
+ 	// Delayed-ready is still the same user start; size only the main frame once.
+diff --git a/backend/internal/proxy/standard_relay.go b/backend/internal/proxy/standard_relay.go
+index 9a0bb4d..79b3c87 100644
+--- a/backend/internal/proxy/standard_relay.go
++++ b/backend/internal/proxy/standard_relay.go
+@@ -117,12 +117,9 @@ func (m *StandardRelayManager) acquireOnce(
+ 	m.mu.Unlock()
+ 
+ 	if working == "" {
+-		// Probe the environment proxy itself first. TUN already captures that
+-		// transport at the OS layer, and a directly reachable proxy needs no
+-		// extra local-VPN hop. This prevents Auto from creating an unnecessary
+-		// Browser -> local gateway -> environment proxy chain on every launch.
+-		// Only a failed direct probe falls back to a local gateway. Explicit
+-		// local_gateway mode retains the user's requested two-hop route.
++		// Auto prefers a healthy loopback gateway so Clash TUN does not
++		// capture a 6s dead-direct probe on every start. local_gateway is
++		// explicit two-hop. Other modes probe the node directly.
+ 		probeConfig := &SpeedTestConfig{Timeout: 6 * time.Second, TCPTimeout: 3 * time.Second, URLs: []string{defaultTestURL}}
+ 		var err error
+ 		if options.Mode == ProxyNetworkModeLocalGateway {
+@@ -132,18 +129,29 @@ func (m *StandardRelayManager) acquireOnce(
+ 				return "", "", fmt.Errorf("未检测到可用的本地 VPN HTTP/SOCKS 网关；请确认非 TUN 模式端口并填写本地 VPN 网关")
+ 			}
+ 			working, err = detectWorkingStandardProxyConfigWithDialer(src, probeConfig, upstreamDialer)
+-		} else {
+-			working, err = DetectWorkingStandardProxyConfig(src, probeConfig)
+-			if err != nil && options.Mode == ProxyNetworkModeAuto {
+-				gateway = m.discoverLocalGatewayCached(options.LocalGatewayURL)
+-				if gateway != "" {
+-					if upstreamDialer, dialerErr := newUpstreamGatewayDialer(gateway); dialerErr == nil && upstreamDialer != nil {
+-						working, err = detectWorkingStandardProxyConfigWithDialer(src, probeConfig, upstreamDialer)
+-					} else {
+-						gateway = ""
+-					}
++		} else if options.Mode == ProxyNetworkModeAuto {
++			// Prefer a healthy loopback gateway (Clash mixed). A 6s dead-direct
++			// probe under TUN is captured and just delays every environment start.
++			gateway = m.discoverLocalGatewayCached(options.LocalGatewayURL)
++			if gateway != "" {
++				if upstreamDialer, dialerErr := newUpstreamGatewayDialer(gateway); dialerErr == nil && upstreamDialer != nil {
++					working, err = detectWorkingStandardProxyConfigWithDialer(src, probeConfig, upstreamDialer)
++				} else {
++					gateway = ""
+ 				}
+ 			}
++			if working == "" {
++				var directErr error
++				working, directErr = DetectWorkingStandardProxyConfig(src, probeConfig)
++				if working == "" {
++					err = directErr
++				} else {
++					gateway = ""
++					err = nil
++				}
++			}
++		} else {
++			working, err = DetectWorkingStandardProxyConfig(src, probeConfig)
+ 		}
+ 		if err != nil {
+ 			return "", "", fmt.Errorf("代理协议/认证验证失败；自动模式已先尝试环境代理直连，再尝试本地 VPN 网关。非 TUN 请确认网关端口，TUN 请确认代理服务器未被重复转发: %w", err)
+diff --git a/backend/post_update_maintenance.go b/backend/post_update_maintenance.go
+index 260b3de..d9e27ec 100644
+--- a/backend/post_update_maintenance.go
++++ b/backend/post_update_maintenance.go
+@@ -92,12 +92,22 @@ func (a *App) setChrome148AsGlobalDefault(alignProfiles bool) (browser.Core, err
+ 	if !alignProfiles {
+ 		return core, nil
+ 	}
+-	conn := a.db.GetConn()
+-	if conn == nil {
+-		return browser.Core{}, fmt.Errorf("应用数据库尚未初始化")
++	changed := make([]*browser.Profile, 0)
++	for _, profile := range a.browserMgr.List() {
++		if a.isProfileUsingCloakCore(profile.ProfileId) {
++			continue
++		}
++		if strings.EqualFold(strings.TrimSpace(profile.CoreId), core.CoreId) {
++			continue
++		}
++		copy := profile
++		copy.CoreId = core.CoreId
++		changed = append(changed, &copy)
+ 	}
+-	if _, err := conn.Exec("UPDATE browser_profiles SET core_id = ?", core.CoreId); err != nil {
+-		return browser.Core{}, fmt.Errorf("更新全部环境 Chrome 148 内核失败: %w", err)
++	if len(changed) > 0 {
++		if err := a.browserMgr.ProfileDAO.UpsertMany(changed); err != nil {
++			return browser.Core{}, fmt.Errorf("更新非 Cloak 环境的 Chrome 148 内核失败: %w", err)
++		}
+ 	}
+ 	a.browserMgr.ReloadProfilesFromDAO()
+ 	if a.config != nil {
+@@ -128,9 +138,11 @@ func (a *App) prepareAllProfileExtensionsAfterUpdate(coreID string) (int, error)
+ 			launchArgs = appendPreparedExtensionRecoveryArgs(launchArgs, packageDirs)
+ 			recovered++
+ 		}
+-		if !sameStringSlice(profile.LaunchArgs, launchArgs) || !strings.EqualFold(profile.CoreId, coreID) {
++		if !sameStringSlice(profile.LaunchArgs, launchArgs) || (!a.isProfileUsingCloakCore(profile.ProfileId) && !strings.EqualFold(profile.CoreId, coreID)) {
+ 			profile.LaunchArgs = launchArgs
+-			profile.CoreId = coreID
++			if !a.isProfileUsingCloakCore(profile.ProfileId) {
++				profile.CoreId = coreID
++			}
+ 			copy := profile
+ 			changed = append(changed, &copy)
+ 		}
+@@ -149,6 +161,9 @@ func (a *App) prepareAllProfileExtensionsAfterUpdate(coreID string) (int, error)
+ 
+ func (a *App) persistAllProfileDataPointersAfterUpdate() error {
+ 	for _, profile := range a.browserMgr.List() {
++		if profile.Running || profile.Pid > 0 || profile.DebugPort > 0 {
++			continue
++		}
+ 		if err := a.browserMgr.WriteProfileDataPointer(&profile, "closed", 0, time.Now()); err != nil {
+ 			return fmt.Errorf("更新环境 %s 身份指向失败: %w", profile.ProfileId, err)
+ 		}
+diff --git a/docs/DELETION_LEDGER.md b/docs/DELETION_LEDGER.md
+index a4d947e..9fb0681 100644
+--- a/docs/DELETION_LEDGER.md
++++ b/docs/DELETION_LEDGER.md
+@@ -459,3 +459,16 @@ behavior is intentionally retired.
+ | ID | Removed code / behaviour | Last known revision | Why removed | Maintained replacement | Verification | Recovery path |
+ |---|---|---|---|---|---|---|
+ | CLEAN-111 | Always-direct dialing for pool speed tests / IP health checks under `tun` network mode (no gateway fallback); batch speed test / IP health / retest-failed including the built-in 本地代理 row (hardcoded `http://127.0.0.1:7890`); gateway routing for a node whose host:port equals the local gateway itself | `v1.7.129` (`b589b76`) | With local Clash TUN active, direct dials are captured by TUN and routed per Clash rules — the node IP is usually unreachable from the Clash node's exit, so every imported node showed “timeout/unavailable”. The built-in 本地代理 row always timed out for Clash Verge Rev setups listening on 7897 instead of 7890, and batch “test all / retest failed / IP health” counted it as a failure, making the whole pool look dead. Routing the gateway node through the gateway itself self-looped / double-hopped. | `tun` mode now dials gateway-first (loopback gateway is not TUN-captured and matches the environment's real path) with direct fallback; the built-in 本地代理 row is refreshed to the discovered local gateway (7890/7897/7891/10808/10809) at load/save and at test time, excluded from batch speed test / IP health / retest-failed, and a node whose host:port equals the gateway is tested directly to avoid self-route; IP health reports the pool node's real exit IP instead of the Clash node's. | 6 new regression tests (tun gateway fallback with blocked direct, tun direct fallback without a gateway, direct mode never touching the gateway, tun IP health through the gateway tunnel, node==gateway detection, node==gateway testable in all modes); full Go suite, go vet, frontend `tsc --noEmit` and 30 packaging tests. | Inspect with `git show b589b76:backend/internal/proxy/speedtest.go` and `git show b589b76:backend/app.go`; restore tun-mode always-direct dialing only for historical comparison, never in place of the gateway-aware routing. |
++
++## v1.7.131 OAuth isolation and store-only Web Store CDP
++
++| ID | Removed code / behaviour | Last known revision | Why removed | Maintained replacement | Verification | Recovery path |
++|---|---|---|---|---|---|---|
++| CLEAN-112 | Browser-level `Target.setAutoAttach` on every page target plus `applyWebStoreCompatibilityToInitialTab` injecting UA override / `webstorePrivate` into startup `about:blank` / `chrome://newtab`; URL-sync `Page.navigate` of one-time OAuth/consent URLs and CDP click/key replay on those surfaces | `v1.7.130` (`52f629c`) | Auto-attach connected CDP to every new tab (blank, OAuth popups, dapps). That made environment open slow and is a nodriver/tampering signal. URL-sync then cloned `x.com/i/oauth2/authorize?state=…` onto every follower, consuming the one-time state and producing a storm of “You weren't able to give access to the App”. | `backend/navigation_guards.go` is the single owner: `shouldInjectWebStoreCompat` (store hosts only), `shouldMirrorSyncNavigation`, `shouldReplaySyncInput`. The watch uses `Target.setDiscoverTargets` and attaches only after a store URL is seen. Initial-tab inject skips blank/newtab. Sync records auth URLs as the baseline but never navigates or replays them. Profile/cookie/extension/wallet data is untouched. | New `navigation_guards_test.go` covers X/Discord/Google/GitHub OAuth vs GenLayer/X-home/Discord-channels; packaging guard forbids `Target.setAutoAttach` and requires store-URL gating; focused Go tests for the new predicates. | Inspect with `git show 52f629c:backend/webstore_compat_watch.go` and `git show 52f629c:backend/app_input_syncer.go`. Restore blanket auto-attach only for historical comparison, never in place of store-URL discover. |
++
++
++## v1.7.132 start-path extension inject retired; OAuth probe + proxy route aligned
++
++| ID | Removed code / behaviour | Last known revision | Why removed | Maintained replacement | Verification | Recovery path |
++|---|---|---|---|---|---|---|
++| CLEAN-113 | Per-start unpack/`--load-extension` of the Web Store helper; blocking `applyWebStoreCompatibilityToInitialTab` `/json/list`; always-on `startWebStoreCompatWatch`; non-Cloak `about:blank` → stealth/UA → navigate for start URLs; `focusedCDPTargetPrefer` `Runtime.evaluate` on OAuth pages; treating X `/i/flow/login` and Google `/signin` as one-time OAuth; TUN launch dropping a bound remote HTTP/SOCKS node | `v1.7.131` (`eb46144`) | Helper unpack + debugger on every open made environments slow. Focus-probe CDP on `x.com/i/oauth2/authorize` is still a nodriver signal after CLEAN-112. Password-login pages were blocked from batch login. TUN launch ignored the assigned pool node so every env shared Clash's IP. | Start no longer injects a helper or store CDP. User-assigned `--load-extension` and Chrome-native installs stay. New extensions come from 扩展管理「分配」or the in-browser store. `shouldAttachPageCDP` skips OAuth documents; password login still syncs. `ShouldSkipChromeProxyOnLaunch` / `LaunchRelayMode` keep a bound remote node (TUN uses loopback gateway). Cookies, Local Extension Settings, wallets and Preferences are not rewritten. | `navigation_guards_test.go` splits OAuth vs `/i/flow/login`; `route_test.go` covers TUN skip vs assigned node; packaging test forbids helper/watch on `app_instance.go`; packaging + focused Go tests. | Inspect with `git show eb46144:backend/app_instance.go` and `git show eb46144:backend/cloak_web_store_helper.go`. Restore start-time helper attach only for historical comparison, never in place of explicit 分配. |
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index e11c37e..7169824 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "boost-browser-frontend",
+-  "version": "1.7.130",
++  "version": "1.7.132",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "boost-browser-frontend",
+-      "version": "1.7.130",
++      "version": "1.7.132",
+       "hasInstallScript": true,
+       "dependencies": {
+         "@types/js-yaml": "^4.0.9",
+diff --git a/frontend/src/modules/browser/pages/BrowserEditPage.tsx b/frontend/src/modules/browser/pages/BrowserEditPage.tsx
+index 1d4d699..187f254 100644
+--- a/frontend/src/modules/browser/pages/BrowserEditPage.tsx
++++ b/frontend/src/modules/browser/pages/BrowserEditPage.tsx
+@@ -49,6 +49,7 @@ export function BrowserEditPage() {
+   const [saveError, setSaveError] = useState('')
+   const [deletedDataOffer, setDeletedDataOffer] = useState<DeletedEnvironmentDataOffer | null>(null)
+   const [deletedDataBusy, setDeletedDataBusy] = useState(false)
++  const [environmentRunning, setEnvironmentRunning] = useState(false)
+ 
+   useEffect(() => {
+     const loadData = async () => {
+@@ -67,6 +68,7 @@ export function BrowserEditPage() {
+ 
+       if (isCreate) {
+         setLaunchArgsText(resolvedDefaultLaunchArgs.join('\n'))
++        setEnvironmentRunning(false)
+         return
+       }
+       const list = await fetchBrowserProfiles()
+@@ -88,6 +90,7 @@ export function BrowserEditPage() {
+         keywords: current.keywords || [],
+         groupId: current.groupId || '',
+       })
++      setEnvironmentRunning(!!current.running)
+       setLaunchArgsText(currentLaunchArgs.join('\n'))
+     }
+     loadData()
+@@ -118,7 +121,7 @@ export function BrowserEditPage() {
+         }
+       } else if (id) {
+         await updateBrowserProfile(id, payload)
+-        toast.success('环境已更新')
++        toast.success(environmentRunning ? '环境已更新，代理等启动参数需重启后生效' : '环境已更新')
+         navigate('/browser/list')
+       }
+       setIsDirty(false)
+@@ -273,6 +276,9 @@ export function BrowserEditPage() {
+         {formData.proxyId && (
+           <p className="text-xs text-[var(--color-text-muted)] mt-2">已选择代理池代理，手动配置将被忽略</p>
+         )}
++        {environmentRunning && (
++          <p className="text-xs text-[var(--color-warning, #b45309)] mt-2">当前环境正在运行，改代理只在下次启动后生效。</p>
++        )}
+       </Card>
+ 
+       <ProxyPickerModal
+diff --git a/frontend/src/modules/browser/pages/WindowSyncPage.tsx b/frontend/src/modules/browser/pages/WindowSyncPage.tsx
+index e23821b..0601705 100644
+--- a/frontend/src/modules/browser/pages/WindowSyncPage.tsx
++++ b/frontend/src/modules/browser/pages/WindowSyncPage.tsx
+@@ -1120,6 +1120,7 @@ export function WindowSyncPage() {
+                   <div>1. 勾选环境 → 设主控 → 开始同步。在主控窗口操作，跟随窗口实时复现。</div>
+                   <div>2. <span className="font-medium">Esc</span> 暂停/恢复 · <span className="font-medium">Ctrl+滚轮</span> 缩放 · <span className="font-medium">Shift+滚轮</span> 横向滚动 · 滚轮/滚动条/键鼠/输入法均可同步。</div>
+                   <div>3. 默认同步无延时（最跟手）；仅当需要模拟人工错峰时，再手动打开「随机延时」。</div>
++                  <div>4. 「Connect / 连接」会带到每扇窗；授权页请各点一次 Authorize（一次性 state，不会同步）。账号密码登录仍可同步。</div>
+                 </div>
+               </div>
+             </div>
+diff --git a/scripts/test_packaging_scripts.py b/scripts/test_packaging_scripts.py
+index ddbdb1d..98bb7ee 100644
+--- a/scripts/test_packaging_scripts.py
++++ b/scripts/test_packaging_scripts.py
+@@ -199,6 +199,28 @@ class PackagingScriptsTest(unittest.TestCase):
+         self.assertNotIn("automaticExtensionStartupCleanupDelays", startup_tabs)
+         self.assertNotIn("closeAssignedExtensionAutoPagesAfterStart", startup_tabs)
+ 
++    def test_webstore_compat_is_store_url_gated_and_never_auto_attaches(self):
++        watch = self.read("backend/webstore_compat_watch.go")
++        startup = self.read("backend/app_instance.go")
++        syncer = self.read("backend/app_input_syncer.go")
++        guards = self.read("backend/navigation_guards.go")
++
++        self.assertNotIn('"Target.setAutoAttach"', watch)
++        self.assertNotIn('"Target.setAutoAttach"', startup)
++        self.assertIn('"Target.setDiscoverTargets"', watch)
++        self.assertIn("shouldInjectWebStoreCompat", watch)
++        self.assertNotIn("shouldInjectWebStoreCompat", startup)
++        self.assertNotIn("startWebStoreCompatWatch", startup)
++        self.assertNotIn("applyWebStoreCompatibilityToInitialTab", startup)
++        self.assertNotIn("webStoreHelperForProfileLaunch", startup)
++        self.assertIn("shouldMirrorSyncNavigation", syncer)
++        self.assertIn("shouldReplaySyncInput", syncer)
++        self.assertIn("shouldAttachPageCDP", syncer)
++        self.assertIn("func isAuthSensitiveURL", guards)
++        self.assertIn("func shouldAttachPageCDP", guards)
++        self.assertIn("func shouldMirrorSyncNavigation", guards)
++        self.assertIn("func shouldInjectWebStoreCompat", guards)
++
+     def test_extension_distribution_is_explicit_and_never_profile_or_startup_driven(self):
+         app = self.read("backend/app.go")
+         launch = self.read("backend/app_instance.go")
