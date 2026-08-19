@@ -1,0 +1,40 @@
+diff --git a/backend/webstore_compat_watch.go b/backend/webstore_compat_watch.go
+--- a/backend/webstore_compat_watch.go
++++ b/backend/webstore_compat_watch.go
+@@ -193,3 +193,35 @@ func browserDebugAlive(debugPort int) bool {
+ 	resp.Body.Close()
+ 	return resp.StatusCode == http.StatusOK
+ }
++
++// webStoreCompatScript fills chrome.webstorePrivate on Chrome-for-Testing.
++// Start never injects this. The watch may use it only on an actual store URL.
++const webStoreCompatScript = `(() => {
++  try {
++    if (!window.chrome || window.chrome.webstorePrivate) return;
++    const getExtId = () => {
++      const m = /detail(?:\/[^\/]+)?\/([a-z]{32})/.exec(window.location.href);
++      return m ? m[1] : null;
++    };
++    const crxUrlFor = (id) => {
++      const v = /Chrome\/([\d.]+)/.exec(navigator.userAgent);
++      const prod = v ? v[1] : "148.0.7778.167";
++      return "https://clients2.google.com/service/update2/crx?response=redirect&acceptformat=crx2,crx3&prodversion=" + prod +
++        "&x=id%3D" + encodeURIComponent(id) + "%26installsource%3Dondemand%26uc";
++    };
++    window.chrome.webstorePrivate = {
++      getExtensionStatus: function (id, manifest, cb) { cb && cb("installable"); },
++      beginInstallWithManifest3: function (extinfo, cb) {
++        const id = (extinfo && extinfo.id) || getExtId();
++        if (id) {
++          const w = window.open(crxUrlFor(id), "_blank");
++          if (w) { try { w.opener = null; } catch (e) {} }
++        }
++        cb && cb("user_cancelled");
++      },
++      isInIncognitoMode: function (cb) { cb && cb(false); },
++      getReferrerChain: function (cb) { cb && cb("EgIIAA=="); },
++      completeInstall: function (id, cb) { cb && cb(true); },
++    };
++  } catch (e) {}
++})();
++`
