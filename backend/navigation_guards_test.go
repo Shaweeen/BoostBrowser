@@ -33,13 +33,12 @@ func TestIsChromeWebStoreURL(t *testing.T) {
 	}
 }
 
-func TestIsAuthSensitiveURLCoversOAuthAndLeavesNormalPagesAlone(t *testing.T) {
+func TestIsAuthSensitiveURLCoversOAuthAndLeavesLoginAndNormalPagesAlone(t *testing.T) {
 	auth := []string{
 		"https://x.com/i/oauth2/authorize?client_id=1&state=once&response_type=code",
 		"https://twitter.com/i/oauth2/authorize?state=once",
 		"https://twitter.com/oauth/authorize?oauth_token=abc",
 		"https://api.twitter.com/oauth/authenticate",
-		"https://x.com/i/flow/login",
 		"https://discord.com/oauth2/authorize?client_id=1&response_type=code",
 		"https://accounts.google.com/o/oauth2/v2/auth?client_id=1",
 		"https://accounts.google.com/signin/oauth",
@@ -54,11 +53,39 @@ func TestIsAuthSensitiveURLCoversOAuthAndLeavesNormalPagesAlone(t *testing.T) {
 		if !isAuthSensitiveURL(raw) {
 			t.Fatalf("expected auth-sensitive: %s", raw)
 		}
+		if shouldAttachPageCDP(raw) {
+			t.Fatalf("must not CDP-attach auth surface: %s", raw)
+		}
 		if shouldMirrorSyncNavigation(raw) {
 			t.Fatalf("must not URL-sync auth surface: %s", raw)
 		}
 		if shouldReplaySyncInput(raw) {
 			t.Fatalf("must not replay input on auth surface: %s", raw)
+		}
+	}
+
+	// Password / account login must still sync so a farm can log into X/Google.
+	login := []string{
+		"https://x.com/i/flow/login",
+		"https://twitter.com/i/flow/login",
+		"https://accounts.google.com/signin/v2/identifier",
+		"https://accounts.google.com/ServiceLogin",
+		"https://accounts.google.com/accountchooser",
+		"https://github.com/login",
+		"https://discord.com/login",
+	}
+	for _, raw := range login {
+		if isAuthSensitiveURL(raw) {
+			t.Fatalf("password login must not be treated as one-time OAuth: %s", raw)
+		}
+		if !shouldAttachPageCDP(raw) {
+			t.Fatalf("password login may still be probed: %s", raw)
+		}
+		if !shouldMirrorSyncNavigation(raw) {
+			t.Fatalf("password login must still URL-sync: %s", raw)
+		}
+		if !shouldReplaySyncInput(raw) {
+			t.Fatalf("password login must still replay input: %s", raw)
 		}
 	}
 
@@ -102,5 +129,8 @@ func TestShouldMirrorSyncNavigationSkipsInternalAndAuth(t *testing.T) {
 	}
 	if !shouldMirrorSyncNavigation("https://portal.genlayer.foundation/community/journey") {
 		t.Fatal("dapp journey page must remain URL-synced")
+	}
+	if !shouldMirrorSyncNavigation("https://x.com/i/flow/login") {
+		t.Fatal("X password login must remain URL-synced")
 	}
 }

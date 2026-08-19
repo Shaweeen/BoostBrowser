@@ -61,10 +61,11 @@ func isInternalBrowserURL(raw string) bool {
 		strings.HasPrefix(u, "edge://")
 }
 
-// isAuthSensitiveURL is true for one-time OAuth / SSO / consent surfaces.
-// Mirroring these URLs or injecting CDP into them consumes the authorization
-// code/state on every follower and is a classic automation signal (X/Twitter
-// then shows "You weren't able to give access to the App").
+// isAuthSensitiveURL is true only for one-time OAuth / SSO / consent surfaces.
+// Password-login pages (X /i/flow/login, Google /signin, GitHub /login) stay
+// ordinary so batch account login can still sync. Mirroring or CDP-attaching
+// a consent URL consumes the authorization code/state on every follower and
+// is a classic automation signal (X then shows "You weren't able to give access").
 func isAuthSensitiveURL(raw string) bool {
 	if isChromeWebStoreURL(raw) {
 		return false
@@ -102,9 +103,7 @@ func isAuthSensitiveURL(raw string) bool {
 	switch {
 	case host == "x.com" || host == "twitter.com" || host == "api.twitter.com" ||
 		strings.HasSuffix(host, ".x.com") || strings.HasSuffix(host, ".twitter.com"):
-		if strings.Contains(path, "/i/oauth") ||
-			strings.Contains(path, "/oauth/") ||
-			strings.Contains(path, "/i/flow/login") {
+		if strings.Contains(path, "/i/oauth") || strings.Contains(path, "/oauth/") {
 			return true
 		}
 	case host == "discord.com" || host == "discordapp.com" || strings.HasSuffix(host, ".discord.com"):
@@ -112,10 +111,7 @@ func isAuthSensitiveURL(raw string) bool {
 			return true
 		}
 	case host == "accounts.google.com":
-		if strings.Contains(path, "oauth") ||
-			strings.Contains(path, "/signin") ||
-			strings.Contains(path, "/servicelogin") ||
-			strings.Contains(path, "/accountchooser") {
+		if strings.Contains(path, "oauth") || strings.Contains(path, "/o/oauth2") {
 			return true
 		}
 	case host == "login.microsoftonline.com" || host == "login.live.com" || host == "login.windows.net":
@@ -143,10 +139,17 @@ func isAuthSensitiveURL(raw string) bool {
 	return false
 }
 
+// shouldAttachPageCDP is the focus-probe owner: Runtime.evaluate / page
+// WebSockets must not open on one-time OAuth documents. URL-only decisions
+// from /json are allowed so Authorize can be gated without attaching.
+func shouldAttachPageCDP(raw string) bool {
+	return !isAuthSensitiveURL(raw)
+}
+
 // shouldMirrorSyncNavigation is the URL-sync owner: followers may only be
 // Page.navigate'd to ordinary browsing URLs. Blank, chrome internals, extension
 // documents and OAuth/consent surfaces stay local to the environment that
-// opened them.
+// opened them. Password-login pages remain mirrored.
 func shouldMirrorSyncNavigation(raw string) bool {
 	if isInternalBrowserURL(raw) {
 		return false
