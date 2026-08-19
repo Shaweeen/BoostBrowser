@@ -10,19 +10,19 @@ import (
 	"boost-browser/backend/internal/logger"
 )
 
-// startWebStoreCompatWatch 在非 cloak 内核环境上监听内核创建的所有标签页
-// （浏览器级 Target.setAutoAttach），对每个新 page target 注入 Web Store
-// 兼容（真实内核版本的 UA-CH 品牌 + chrome.webstorePrivate 补齐）。这样无论
-// 用户在新标签页、新窗口还是弹窗中打开 chromewebstore.google.com，都不会
-// 再出现「改用 Chrome？」横幅。
+// startWebStoreCompatWatch listens for page targets on a non-cloak environment
+// and injects Web Store compatibility only when the target is actually a
+// Chrome / Edge / Opera store URL.
 //
-// 为什么需要它：applyWebStoreCompatibilityToInitialTab 只覆盖启动时的初始
-// 标签页；用户新建标签页、window.open 弹窗等新 target 不在覆盖范围内，
-// 横幅会再次出现。Target.setAutoAttach 是 Playwright 等工具实现
-// “上下文级 UA 覆写覆盖所有页面”的标准机制。
+// This replaces the v1.7.125 Target.setAutoAttach-on-every-page owner.
+// Auto-attach connected CDP to about:blank, OAuth popups and every new tab:
+// that made environment open slow and is a nodriver / tampering signal that
+// breaks one-time authorizations (X "You weren't able to give access").
 //
-// 只作用于该环境自己的浏览器进程（debugPort），不引入 helper 扩展或任何
-// 本地协议；浏览器进程退出后监听随之结束，不常驻内存。
+// Target.setDiscoverTargets reports created/changed targets without attaching.
+// Injection (UA override + webstorePrivate) happens only after
+// shouldInjectWebStoreCompat is true. The browser-level watch dies with the
+// environment process.
 func startWebStoreCompatWatch(debugPort int, profileId string) {
 	if debugPort <= 0 {
 		return
@@ -30,19 +30,15 @@ func startWebStoreCompatWatch(debugPort int, profileId string) {
 	for {
 		err := runWebStoreCompatWatchSession(debugPort, profileId)
 		if err == nil {
-			// 浏览器进程关闭，正常结束监听。
 			return
 		}
 		if !browserDebugAlive(debugPort) {
 			return
 		}
-		// 浏览器仍在但连接异常（例如应用重启竞态），稍后重连。
 		time.Sleep(2 * time.Second)
 	}
 }
 
-// runWebStoreCompatWatchSession 建立一次浏览器级 CDP 会话并进入事件循环，
-// 直到连接断开。返回 nil 表示浏览器已关闭。
 func runWebStoreCompatWatchSession(debugPort int, profileId string) error {
 	log := logger.New("WebStoreCompat")
 	browserWS, err := getBrowserWebSocketURL(debugPort)
@@ -56,30 +52,26 @@ func runWebStoreCompatWatchSession(debugPort int, profileId string) error {
 	defer conn.Close()
 
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	attachMsg := cdpMessage{
+	discoverMsg := cdpMessage{
 		Id:     1,
-		Method: "Target.setAutoAttach",
+		Method: "Target.setDiscoverTargets",
 		Params: map[string]any{
-			"autoAttach":             true,
-			"waitForDebuggerOnStart": false,
-			"flatten":                true,
+			"discover": true,
 		},
 	}
-	if err := conn.WriteJSON(attachMsg); err != nil {
+	if err := conn.WriteJSON(discoverMsg); err != nil {
 		return err
 	}
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	var attachResp cdpResponse
-	if err := conn.ReadJSON(&attachResp); err != nil {
+	var discoverResp cdpResponse
+	if err := conn.ReadJSON(&discoverResp); err != nil {
 		return err
 	}
-	if attachResp.Error != nil {
-		return fmt.Errorf("Target.setAutoAttach 失败: %s", attachResp.Error.Message)
+	if discoverResp.Error != nil {
+		return fmt.Errorf("Target.setDiscoverTargets 失败: %s", discoverResp.Error.Message)
 	}
 
-	// 事件循环：auto-attach 生效后，浏览器对现有与未来所有 target 发送
-	// Target.attachedToTarget 事件（flatten 模式附带 sessionId）。只关心
-	// page 类型的新标签页，其余事件（console/network 等）一律忽略。
+	injected := map[string]struct{}{}
 	for {
 		conn.SetReadDeadline(time.Time{})
 		var evt struct {
@@ -88,36 +80,52 @@ func runWebStoreCompatWatchSession(debugPort int, profileId string) error {
 				TargetInfo struct {
 					TargetID string `json:"targetId"`
 					Type     string `json:"type"`
+					URL      string `json:"url"`
 				} `json:"targetInfo"`
+				TargetID string `json:"targetId"`
 			} `json:"params"`
 		}
 		if err := conn.ReadJSON(&evt); err != nil {
 			return err
 		}
-		if evt.Method != "Target.attachedToTarget" || evt.Params.TargetInfo.Type != "page" {
+		switch evt.Method {
+		case "Target.targetDestroyed":
+			if id := evt.Params.TargetID; id != "" {
+				delete(injected, id)
+			}
+			continue
+		case "Target.targetCreated", "Target.targetInfoChanged":
+		default:
 			continue
 		}
-		targetID := evt.Params.TargetInfo.TargetID
-		if targetID == "" {
+		info := evt.Params.TargetInfo
+		if info.Type != "page" || info.TargetID == "" {
 			continue
 		}
-		log.Info("新标签页自动附加，注入 Web Store 兼容",
+		if !shouldInjectWebStoreCompat(info.URL) {
+			continue
+		}
+		if _, done := injected[info.TargetID]; done {
+			continue
+		}
+		injected[info.TargetID] = struct{}{}
+		log.Info("商店页发现，注入 Web Store 兼容",
 			logger.F("profile_id", profileId),
-			logger.F("target_id", targetID),
+			logger.F("target_id", info.TargetID),
+			logger.F("url", info.URL),
 			logger.F("debug_port", debugPort),
 		)
-		applyWebStoreCompatToPageTarget(debugPort, targetID, profileId)
+		applyWebStoreCompatToPageTarget(debugPort, info.TargetID, profileId)
 	}
 }
 
-// applyWebStoreCompatToPageTarget 对指定 page target 注入 Web Store 兼容：
-//   - Emulation.setUserAgentOverride（真实内核版本的 UA-CH 品牌）→ 修复
-//     Sec-CH-UA 请求头与 navigator.userAgentData，消除「改用 Chrome？」横幅
-//   - Page.addScriptToEvaluateOnNewDocument（chrome.webstorePrivate 补齐）→
-//     「添加至 Chrome」按钮可用，CRX 下载触发内核原生安装框
+// applyWebStoreCompatToPageTarget injects Web Store compatibility on one
+// already-confirmed store page:
+//   - Emulation.setUserAgentOverride (real kernel UA-CH brand)
+//   - Page.addScriptToEvaluateOnNewDocument (chrome.webstorePrivate)
 //
-// 覆写在 target 级生效并随后续导航保留。注入后即关闭连接，不常驻。
-// cloak 内核在 C++ 层已处理品牌呈现，调用方应跳过。
+// Callers must have filtered with shouldInjectWebStoreCompat. The page
+// WebSocket is opened only for that store target and closed immediately.
 func applyWebStoreCompatToPageTarget(debugPort int, targetID, profileId string) {
 	log := logger.New("Browser")
 	if debugPort <= 0 || targetID == "" {
@@ -162,14 +170,13 @@ func applyWebStoreCompatToPageTarget(debugPort int, targetID, profileId string) 
 	var scriptResp cdpResponse
 	_ = conn.ReadJSON(&scriptResp)
 
-	log.Info("已为标签页注入 Web Store 兼容（UA-CH 真实版本 + webstorePrivate，无 helper 协议）",
+	log.Info("已为商店页注入 Web Store 兼容（UA-CH 真实版本 + webstorePrivate，无 helper 协议）",
 		logger.F("profile_id", profileId),
 		logger.F("target_id", targetID),
 		logger.F("debug_port", debugPort),
 	)
 }
 
-// browserDebugAlive 探测指定调试端口上的浏览器进程是否仍在运行。
 func browserDebugAlive(debugPort int) bool {
 	if debugPort <= 0 {
 		return false
