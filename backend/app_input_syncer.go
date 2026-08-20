@@ -3653,31 +3653,31 @@ func (s *InputSyncer) urlSyncLoop(stopCh <-chan struct{}) {
 		if url == "" {
 			url = s.getMasterURL(masterDebug)
 		}
-		if url != "" && url != s.lastSyncURL && !isAboutBlank(url) {
-			// Do not force-navigate followers onto wallet/extension documents
-			// or one-time OAuth/consent URLs. Extension password display is
-			// mirrored via focused-target insertText; OAuth state is per-window.
-			if !shouldMirrorSyncNavigation(url) {
-				s.lastSyncURL = url
-			} else {
-				s.lastSyncURL = url
-				s.invalidateMasterCDPTargetCache()
-				var wg sync.WaitGroup
-				for _, port := range followerDebug {
-					if port > 0 {
-						wg.Add(1)
-						go func(debugPort int) {
-							defer wg.Done()
-							s.withCDPPortLock(debugPort, func() {
-								s.navigateFollower(debugPort, url)
-							})
-						}(port)
-					}
+		if shouldMirrorMasterURL(url) && url != s.lastSyncURL {
+			// The master is authoritative for ordinary pages, OAuth consent,
+			// wallet connect/sign and extension popups.
+			s.lastSyncURL = url
+			s.invalidateMasterCDPTargetCache()
+			var wg sync.WaitGroup
+			for _, port := range followerDebug {
+				if port > 0 {
+					wg.Add(1)
+					go func(debugPort int) {
+						defer wg.Done()
+						s.withCDPPortLock(debugPort, func() {
+							s.navigateFollower(debugPort, url)
+						})
+					}(port)
 				}
-				wg.Wait()
 			}
+			wg.Wait()
 		}
 	}
+}
+
+func shouldMirrorMasterURL(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	return raw != "" && !isAboutBlank(raw)
 }
 
 // reseedURLSyncBaseline captures the master's current URL and focused editable
@@ -3883,7 +3883,7 @@ func (s *InputSyncer) applyFollowerFocusedEditableStateOnTarget(debugPort int, m
 
 func (s *InputSyncer) navigateFollower(debugPort int, url string) {
 	url = strings.TrimSpace(url)
-	if url == "" || isAboutBlank(url) || !shouldMirrorSyncNavigation(url) {
+	if !shouldMirrorMasterURL(url) {
 		return
 	}
 	// Same document → skip. Unconditional Page.navigate reloads the dapp, drops

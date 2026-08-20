@@ -344,6 +344,12 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 				continue
 			}
 			if _, ok := byID[id]; !ok {
+				// A process-discovery miss is not proof that an environment
+				// stopped. Preserve the last known runtime while Chromium is
+				// still alive so an empty/slow CIM scan cannot poison sync.
+				if p.Running && p.Pid > 0 && isProcessAlive(p.Pid) {
+					continue
+				}
 				p.Running = false
 				p.Pid = 0
 				p.DebugPort = 0

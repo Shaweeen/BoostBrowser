@@ -56,7 +56,6 @@ func isInternalBrowserURL(raw string) bool {
 		return true
 	}
 	return strings.HasPrefix(u, "chrome://") ||
-		strings.HasPrefix(u, "chrome-extension://") ||
 		strings.HasPrefix(u, "devtools://") ||
 		strings.HasPrefix(u, "edge://")
 }
@@ -159,7 +158,7 @@ func shouldMirrorSyncNavigation(raw string) bool {
 	if isInternalBrowserURL(raw) {
 		return false
 	}
-	return !isAuthSensitiveURL(raw)
+	return true
 }
 
 // shouldReplaySyncInput is the input-replay owner for auth and extension
@@ -169,5 +168,5 @@ func shouldReplaySyncInput(raw string) bool {
 	if isInternalBrowserURL(raw) {
 		return false
 	}
-	return !isAuthSensitiveURL(raw)
+	return true
 }

@@ -56,11 +56,11 @@ func TestIsAuthSensitiveURLCoversOAuthAndLeavesLoginAndNormalPagesAlone(t *testi
 		if shouldAttachPageCDP(raw) {
 			t.Fatalf("must not CDP-attach auth surface: %s", raw)
 		}
-		if shouldMirrorSyncNavigation(raw) {
-			t.Fatalf("must not URL-sync auth surface: %s", raw)
+		if !shouldMirrorSyncNavigation(raw) {
+			t.Fatalf("OAuth surface must URL-sync from the master: %s", raw)
 		}
-		if shouldReplaySyncInput(raw) {
-			t.Fatalf("must not replay input on auth surface: %s", raw)
+		if !shouldReplaySyncInput(raw) {
+			t.Fatalf("OAuth surface must replay master input: %s", raw)
 		}
 	}
 
@@ -112,15 +112,13 @@ func TestIsAuthSensitiveURLCoversOAuthAndLeavesLoginAndNormalPagesAlone(t *testi
 	}
 }
 
-func TestShouldMirrorSyncNavigationSkipsInternalAndAuth(t *testing.T) {
+func TestShouldMirrorSyncNavigationSkipsOnlyInternal(t *testing.T) {
 	skip := []string{
 		"",
 		"about:blank",
 		"about:blank#blocked",
 		"chrome://newtab/",
-		"chrome-extension://nkbihfbeogaeaoehlefnkodbefgpgknn/popup.html",
 		"devtools://devtools/bundled/inspector.html",
-		"https://x.com/i/oauth2/authorize?state=one-time",
 	}
 	for _, raw := range skip {
 		if shouldMirrorSyncNavigation(raw) {
@@ -132,5 +130,8 @@ func TestShouldMirrorSyncNavigationSkipsInternalAndAuth(t *testing.T) {
 	}
 	if !shouldMirrorSyncNavigation("https://x.com/i/flow/login") {
 		t.Fatal("X password login must remain URL-synced")
+	}
+	if !shouldMirrorSyncNavigation("chrome-extension://nkbihfbeogaeaoehlefnkodbefgpgknn/popup.html") {
+		t.Fatal("wallet extension popup must remain URL-synced")
 	}
 }

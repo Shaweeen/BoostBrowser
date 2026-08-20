@@ -171,10 +171,13 @@ export function WindowSyncPage() {
   }, [])
 
   useEffect(() => {
-    // Collect once when the assistant opens. Afterwards collection is strictly
-    // user-driven; focus changes and one-second timers must not mutate a
-    // configuration while the user is pausing, closing or replacing windows.
+    // Keep live discovery warm while the assistant is open. Refresh only
+    // replaces the visible list; the backend preserves active runtime state
+    // and repairs HWND/PID targets, so a transient scan miss cannot stop sync.
     void loadProfiles()
+    const refreshTimer = window.setInterval(() => {
+      void loadProfiles(false, true)
+    }, 2000)
     const offPauseChanged = EventsOn('window-sync:pause-changed', (payload: { paused?: boolean }) => {
       const paused = payload?.paused === true
       setSyncStatus(prev => prev ? { ...prev, paused } : prev)
@@ -189,6 +192,7 @@ export function WindowSyncPage() {
     })
 
     return () => {
+      window.clearInterval(refreshTimer)
       offPauseChanged?.()
       if (resumeNoticeTimerRef.current) {
         window.clearTimeout(resumeNoticeTimerRef.current)
