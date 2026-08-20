@@ -128,10 +128,13 @@ func isExtensionAssignmentComplete(userDataDir string, launchArgs []string) bool
 	}
 	if marker, ok := readExtensionIntegrityMarker(userDataDir); ok {
 		if strings.EqualFold(marker.AssignmentFingerprint, fp) {
-			// Trust the post-assign adapt. Do not re-open Preferences / LES
-			// on every environment start — that is the slow path the user
-			// sees as "每次启动都在读扩展".
-			return true
+			// The marker is an optimization hint, not proof that Chrome still
+			// owns a loadable copy. A user update, profile repair, or antivirus
+			// cleanup can remove Preferences/LES while leaving the marker and
+			// package directory behind. Revalidate the durable runtime before
+			// stripping --load-extension; otherwise a downloaded extension can
+			// silently disappear on a normal restart.
+			return everyAssignedHasDurableRuntime(userDataDir, launchArgs)
 		}
 	}
 	if !everyAssignedHasDurableRuntime(userDataDir, launchArgs) {
