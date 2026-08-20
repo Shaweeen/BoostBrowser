@@ -3073,7 +3073,11 @@ func (s *InputSyncer) dispatchPageMouseMoveViaCDPNow(screenX, screenY int, butto
 func (s *InputSyncer) dispatchPageWheelViaCDP(msg uint32, screenX, screenY int, delta int16, keyState uint16) {
 	if msg == WM_MOUSEWHEEL && keyState&MK_CONTROL != 0 {
 		revision := atomic.AddUint64(&s.zoomSyncRevision, 1)
-		s.enqueuePageInput(pageInputCritical, func() {
+		// Ctrl+wheel changes the browser's page zoom on the master first. The
+		// follower operation is debounced by revision and must not share the
+		// bounded input queue: dropping a critical queue item leaves the master
+		// zoomed while followers keep their previous scale.
+		s.runWorker(func() {
 			s.dispatchAbsolutePageZoomAfterSettle(revision, screenX, screenY, delta, keyState)
 		})
 		return
