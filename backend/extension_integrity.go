@@ -128,13 +128,14 @@ func isExtensionAssignmentComplete(userDataDir string, launchArgs []string) bool
 	}
 	if marker, ok := readExtensionIntegrityMarker(userDataDir); ok {
 		if strings.EqualFold(marker.AssignmentFingerprint, fp) {
-			// The marker is an optimization hint, not proof that Chrome still
-			// owns a loadable copy. A user update, profile repair, or antivirus
-			// cleanup can remove Preferences/LES while leaving the marker and
-			// package directory behind. Revalidate the durable runtime before
-			// stripping --load-extension; otherwise a downloaded extension can
-			// silently disappear on a normal restart.
-			return everyAssignedHasDurableRuntime(userDataDir, launchArgs)
+			// Chrome owns the installed extension after the first successful
+			// adaptation. The marker is deliberately the hot-start boundary:
+			// do not rescan Preferences/LES or run client-side extension repair
+			// on every environment start. Update-time repair is disabled as
+			// well; this keeps user-installed extensions and wallet state under
+			// Chrome/profile ownership instead of making the client a second
+			// extension manager.
+			return true
 		}
 	}
 	if !everyAssignedHasDurableRuntime(userDataDir, launchArgs) {

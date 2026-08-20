@@ -53,14 +53,14 @@ func TestIntegrityMarkerFastPathAndClearOnStaleData(t *testing.T) {
 		t.Fatal("marker path must stay complete")
 	}
 
-	// Wipe LES + disable prefs entry → must be incomplete, even when the
-	// integrity marker is still present. The marker must never hide a lost
-	// user-downloaded extension at the next normal start.
+	// The marker is the hot-start boundary. Client startup does not rescan or
+	// repair Chrome-owned extension state; Chrome remains the owner after the
+	// first successful adaptation.
 	_ = os.RemoveAll(les)
 	// Remove Preferences settings so read-only detect has nothing left.
 	_ = os.Remove(filepath.Join(userData, "Default", "Preferences"))
-	if isExtensionAssignmentComplete(userData, args) {
-		t.Fatal("after wiping LES and prefs must be incomplete")
+	if !isExtensionAssignmentComplete(userData, args) {
+		t.Fatal("settled marker must keep the hot-start path fast")
 	}
 }
 

@@ -40,10 +40,12 @@ func (a *App) RunPostUpdateMaintenance() error {
 	if err != nil {
 		return err
 	}
-	recovered, recoveryErr := a.prepareAllProfileExtensionsAfterUpdate(core.CoreId)
-	if recoveryErr != nil {
-		log.Warn("更新后部分扩展按原 ID 恢复失败（Cookies、扩展存储和应用数据未改动）", logger.F("error", recoveryErr.Error()))
-	}
+	// User-installed extensions are Chrome/profile-owned. Do not download,
+	// rewrite launch args, or repair extension registration during an update;
+	// those client-side fixes were the source of extension loss in older builds.
+	// Keep the inventory read above for diagnostics only.
+	recovered := 0
+	var recoveryErr error
 	if pointerErr := a.persistAllProfileDataPointersAfterUpdate(); pointerErr != nil {
 		if recoveryErr != nil {
 			recoveryErr = fmt.Errorf("%v；%w", recoveryErr, pointerErr)
