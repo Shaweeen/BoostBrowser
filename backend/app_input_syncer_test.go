@@ -144,6 +144,26 @@ func TestPlanSyncSessionTargetsDropsClosedKeepsUnresolvedAlive(t *testing.T) {
 	}
 }
 
+func TestPlanSyncSessionTargetsDoesNotUsePersistedWindowHints(t *testing.T) {
+	// A runtime registry entry can outlive a browser frame. The live process
+	// resolution wins; an unresolved active follower may keep only its current
+	// session target, never a handle from a previous run.
+	byID := map[string]syncProfileCandidate{
+		"master":   {profileID: "master", pid: 11, hintHWND: windows.HWND(101)},
+		"follower": {profileID: "follower", pid: 22, hintHWND: windows.HWND(202)},
+	}
+	resolved := map[int]windows.HWND{11: 111}
+	master, followers, _, next, ok := planSyncSessionTargets(
+		"master", []string{"follower"}, []windows.HWND{windows.HWND(303)}, byID, resolved,
+	)
+	if !ok || master != windows.HWND(111) {
+		t.Fatalf("master=%v ok=%v; live resolution must override persisted hint", master, ok)
+	}
+	if len(followers) != 1 || followers[0] != windows.HWND(303) || next[0] != windows.HWND(303) {
+		t.Fatalf("followers=%v next=%v; active session target should be retained", followers, next)
+	}
+}
+
 func TestPlanSyncSessionTargetsMasterGoneReturnsNotOK(t *testing.T) {
 	byID := map[string]syncProfileCandidate{
 		"master": {profileID: "master", pid: 0},

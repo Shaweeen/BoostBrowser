@@ -95,12 +95,9 @@ export function WindowSyncPage() {
   const loadProfilesSeq = useRef(0)
   const startingRef = useRef(false)
   const stoppingRef = useRef(false)
-  const loadProfiles = useCallback((force = false, silent = false): Promise<SyncProfileInfo[]> => {
+  const loadProfiles = useCallback((force = false): Promise<SyncProfileInfo[]> => {
     const seq = ++loadProfilesSeq.current
-    // Background polls run silently: they must not flash the refresh button
-    // spinner or prune the user's in-progress selection when a window is
-    // transiently resolving.
-    if (!silent) setRefreshing(true)
+    setRefreshing(true)
     const request = (async () => {
       // force = explicit refresh: bypass the backend's 2s process-scan cache so
       // a just-started environment is visible immediately.
@@ -125,23 +122,21 @@ export function WindowSyncPage() {
         return sorted
       }
 
-      if (!silent) {
-        // This is an explicit collection boundary (manual refresh only). Drop
-        // selections whose current top-level window no longer exists so a closed
-        // environment cannot poison the next master/follower configuration.
-        const availableIds = new Set(sorted.filter(item => item.status === 'running').map(item => item.profileId))
-        setSelectedIds(prev => {
-          const next = new Set<string>()
-          prev.forEach(id => {
-            if (availableIds.has(id)) next.add(id)
-          })
-          return next
+      // This is an explicit collection boundary (open/manual refresh only).
+      // Drop selections whose current top-level window no longer exists so a
+      // closed environment cannot poison the next master/follower set.
+      const availableIds = new Set(sorted.filter(item => item.status === 'running').map(item => item.profileId))
+      setSelectedIds(prev => {
+        const next = new Set<string>()
+        prev.forEach(id => {
+          if (availableIds.has(id)) next.add(id)
         })
-        setMasterId(prev => (prev && availableIds.has(prev) ? prev : null))
-      }
+        return next
+      })
+      setMasterId(prev => (prev && availableIds.has(prev) ? prev : null))
       return sorted
     })().finally(() => {
-      if (seq === loadProfilesSeq.current && !silent) setRefreshing(false)
+      if (seq === loadProfilesSeq.current) setRefreshing(false)
     })
     return request
   }, [])
@@ -171,13 +166,11 @@ export function WindowSyncPage() {
   }, [])
 
   useEffect(() => {
-    // Keep live discovery warm while the assistant is open. Refresh only
-    // replaces the visible list; the backend preserves active runtime state
-    // and repairs HWND/PID targets, so a transient scan miss cannot stop sync.
+    // Environment discovery is an explicit boundary: load once when the
+    // assistant opens, then refresh when the user is choosing or changing the
+    // master/follower set. A background poll could replace an HWND while a
+    // native toolbar press/release pair is in flight.
     void loadProfiles()
-    const refreshTimer = window.setInterval(() => {
-      void loadProfiles(false, true)
-    }, 2000)
     const offPauseChanged = EventsOn('window-sync:pause-changed', (payload: { paused?: boolean }) => {
       const paused = payload?.paused === true
       setSyncStatus(prev => prev ? { ...prev, paused } : prev)
@@ -192,7 +185,6 @@ export function WindowSyncPage() {
     })
 
     return () => {
-      window.clearInterval(refreshTimer)
       offPauseChanged?.()
       if (resumeNoticeTimerRef.current) {
         window.clearTimeout(resumeNoticeTimerRef.current)

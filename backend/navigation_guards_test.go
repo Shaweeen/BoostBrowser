@@ -112,13 +112,15 @@ func TestIsAuthSensitiveURLCoversOAuthAndLeavesLoginAndNormalPagesAlone(t *testi
 	}
 }
 
-func TestShouldMirrorSyncNavigationSkipsOnlyInternal(t *testing.T) {
+func TestShouldMirrorSyncNavigationDoesNotReplaceTabsWithWalletPopups(t *testing.T) {
 	skip := []string{
 		"",
 		"about:blank",
 		"about:blank#blocked",
 		"chrome://newtab/",
 		"devtools://devtools/bundled/inspector.html",
+		"chrome-extension://nkbihfbeogaeaoehlefnkodbefgpgknn/popup.html",
+		"chrome-extension://acmacodkjbdgmoleebolmdjonilkdbch/notification.html?requestId=local",
 	}
 	for _, raw := range skip {
 		if shouldMirrorSyncNavigation(raw) {
@@ -131,7 +133,10 @@ func TestShouldMirrorSyncNavigationSkipsOnlyInternal(t *testing.T) {
 	if !shouldMirrorSyncNavigation("https://x.com/i/flow/login") {
 		t.Fatal("X password login must remain URL-synced")
 	}
-	if !shouldMirrorSyncNavigation("chrome-extension://nkbihfbeogaeaoehlefnkodbefgpgknn/popup.html") {
-		t.Fatal("wallet extension popup must remain URL-synced")
+	for _, path := range []string{"popup.html", "notification.html#/confirm", "index.html#/sign", "index.html#/approve"} {
+		raw := "chrome-extension://nkbihfbeogaeaoehlefnkodbefgpgknn/" + path
+		if !shouldReplaySyncInput(raw) || !shouldAttachPageCDP(raw) {
+			t.Fatalf("wallet interaction must remain synchronized: %s", path)
+		}
 	}
 }

@@ -150,20 +150,19 @@ func shouldAttachPageCDP(raw string) bool {
 	return !isAuthSensitiveURL(raw)
 }
 
-// shouldMirrorSyncNavigation is the URL-sync owner: followers may only be
-// Page.navigate'd to ordinary browsing URLs. Blank, chrome internals, extension
-// documents and OAuth/consent surfaces stay local to the environment that
-// opened them. Password-login pages remain mirrored.
+// shouldMirrorSyncNavigation governs URL copies, not input replay. Opening an
+// extension is synchronized by its toolbar click; its private popup URL must
+// never replace a follower's work tab. Wallet clicks/sign/confirm remain enabled
+// through shouldReplaySyncInput on each environment's own extension target.
 func shouldMirrorSyncNavigation(raw string) bool {
-	if isInternalBrowserURL(raw) {
+	if isInternalBrowserURL(raw) || strings.HasPrefix(strings.ToLower(strings.TrimSpace(raw)), "chrome-extension://") {
 		return false
 	}
 	return true
 }
 
-// shouldReplaySyncInput is the input-replay owner for auth and extension
-// surfaces. Clicking Authorize, or clicking inside Rabby/MetaMask, must not
-// be mirrored or CDP-injected. Dapp pages stay replayable.
+// shouldReplaySyncInput allows master-controlled wallet and authorization
+// interaction on matching follower targets, including confirm/sign buttons.
 func shouldReplaySyncInput(raw string) bool {
 	if isInternalBrowserURL(raw) {
 		return false

@@ -431,10 +431,10 @@ func planSyncSessionTargets(
 		}
 		hwnd := resolvedWindows[c.pid]
 		if hwnd == 0 {
-			hwnd = c.hintHWND
-		}
-		if hwnd == 0 {
-			hwnd = prev // process alive but frame unresolved: keep previous target
+			// A single scan can miss a frame while Chromium is moving between
+			// processes. Keep only the target already owned by this active session;
+			// never substitute a persisted HWND from another run.
+			hwnd = prev
 		}
 		return hwnd, c.debugPort
 	}
@@ -536,16 +536,12 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	defer syncSessionMu.Unlock()
 	log := logger.New("SyncAPI")
 	// Live scan from already-started client envs (same as GetSyncProfiles).
-	// Never apply a snapshot after this — that used to wipe live discoveries
-	// and left the assistant stuck around ~30 while 100+ ran.
-	// Ads/MoreLogin-style: sync is input-only — never closes user work tabs.
+	// The selected profile IDs are the session source of truth. Resolve their
+	// current main frames from the live process tree below; do not reuse a
+	// persisted HWND here because a closed/reopened environment can leave that
+	// handle alive long enough for the first toolbar click to hit the wrong
+	// window. Sync is input-only — never closes user work tabs.
 	_ = a.getSyncProfilesLocal()
-	snapshotEntries := make(map[string]browserRuntimeSnapshotEntry)
-	if snap, ok := a.readBrowserRuntimeSnapshot(); ok {
-		for _, entry := range snap.Entries {
-			snapshotEntries[entry.ProfileID] = entry
-		}
-	}
 
 	masterProfileId = strings.TrimSpace(masterProfileId)
 	if masterProfileId == "" {
@@ -607,18 +603,18 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 		rootPIDs = append(rootPIDs, candidate.profile.Pid)
 	}
 	resolvedWindows := findProcessTreeWindows(rootPIDs)
-	masterHwnd := validRuntimeSnapshotWindow(snapshotEntries[masterProfileId])
+	masterHwnd := resolvedWindows[masterSnapshot.Pid]
 	if masterHwnd == 0 {
-		masterHwnd = resolvedWindows[masterSnapshot.Pid]
+		masterHwnd = findMainEnvironmentBrowserWindow(masterSnapshot.Pid)
 	}
 	if masterHwnd == 0 {
 		return fmt.Errorf("未找到主控实例窗口")
 	}
 	resolved := make([]followerWindow, len(followers))
 	for i, candidate := range followers {
-		hwnd := validRuntimeSnapshotWindow(snapshotEntries[candidate.id])
+		hwnd := resolvedWindows[candidate.profile.Pid]
 		if hwnd == 0 {
-			hwnd = resolvedWindows[candidate.profile.Pid]
+			hwnd = findMainEnvironmentBrowserWindow(candidate.profile.Pid)
 		}
 		resolved[i] = followerWindow{hwnd: hwnd, debugPort: candidate.profile.DebugPort}
 	}

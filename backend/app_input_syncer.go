@@ -73,7 +73,8 @@ type InputSyncer struct {
 	cdpKeyDrops           int32
 	pageInputQueue        chan pageInputEvent
 	pageInputDrops        int32
-	zoomSyncRevision      uint64 // debounce Ctrl+wheel into absolute zoom alignment
+	zoomSyncRevision      uint64              // debounce Ctrl+wheel into absolute zoom alignment
+	nativeMousePresses    nativeMouseSequence // hook-thread-owned native click pairs
 
 	// URL 同步
 	urlStopCh                chan struct{}
@@ -770,6 +771,7 @@ func (s *InputSyncer) Start(masterHwnd windows.HWND, followerHwnds []windows.HWN
 	s.stopOnce = sync.Once{}
 	s.cdpKeyQueue = make(chan cdpKeyEvent, 512)
 	s.pageInputQueue = make(chan pageInputEvent, 512)
+	s.nativeMousePresses = make(nativeMouseSequence)
 	s.randomDelayMu.Lock()
 	s.randomDelayNext = make(map[windows.HWND]time.Time)
 	s.randomDelayMu.Unlock()
@@ -989,6 +991,7 @@ func (s *InputSyncer) clearRuntimeState() {
 	s.followerDebug = nil
 	s.cdpKeyQueue = nil
 	s.pageInputQueue = nil
+	s.nativeMousePresses = nil
 	s.lastSyncURL = ""
 	s.lastFocusedEditableState = ""
 	s.cachedMasterPort = 0
@@ -1418,26 +1421,14 @@ func syncMouseDragThrottle(followerCount int) time.Duration {
 // Chrome 内部会根据 Y 坐标将消息路由到标签栏/地址栏/render child
 // ============================================================================
 
-// mapCoordsChromeManager maps master screen coords → follower client lParam.
-// For in-page hits prefer the Chrome render widget (content pixels) so dapp /
-// extension-injected buttons land on the same control. Otherwise fall back to
-// outer/client rects (Chrome-Manager order).
+// mapCoordsChromeManager maps content through the renderer and native browser
+// chrome through fixed-size toolbar geometry. Never scale toolbar height with
+// the page: that moves extension clicks into the caption on shorter followers.
 func mapCoordsChromeManager(screenX, screenY int, masterHwnd, followerHwnd windows.HWND) (uintptr, bool) {
 	if pointInsideChromeRender(masterHwnd, screenX, screenY) {
-		if lparam, ok := mapCoordsViaRenderContent(screenX, screenY, masterHwnd, followerHwnd); ok {
-			return lparam, true
-		}
+		return mapCoordsViaRenderContent(screenX, screenY, masterHwnd, followerHwnd)
 	}
-	if lparam, ok := mapCoordsOuterWindowRects(screenX, screenY, masterHwnd, followerHwnd); ok {
-		return lparam, true
-	}
-	if lparam, ok := mapCoordsViaClientArea(screenX, screenY, masterHwnd, followerHwnd); ok {
-		return lparam, true
-	}
-	if lparam, ok := mapCoordsViaRenderContent(screenX, screenY, masterHwnd, followerHwnd); ok {
-		return lparam, true
-	}
-	return 0, false
+	return mapChromeToolbarInput(screenX, screenY, masterHwnd, followerHwnd)
 }
 
 type syncInputSurfaceCandidate struct {
@@ -1666,50 +1657,14 @@ func expectedPopupSurfaceLeft(popupLeft, popupRight, masterLeft, masterRight, fo
 }
 
 func mapPointBetweenInputSurfaces(screenX, screenY int, masterSurface, followerSurface windows.HWND) (uintptr, bool) {
-	// Chrome-Manager primary path: outer GetWindowRect proportions → client lParam.
-	if lparam, ok := mapCoordsOuterWindowRects(screenX, screenY, masterSurface, followerSurface); ok {
-		return lparam, true
-	}
-	// Client-area fallback for unusual DPI/chrome frames.
+	// Popup messages also require client coordinates. Reuse the client-area
+	// mapper instead of interpreting an outer-window offset as a client point.
 	mx, my := screenToClient(masterSurface, screenX, screenY)
 	mw, mh, ok := getClientSize(masterSurface)
-	if !ok || mw <= 0 || mh <= 0 || mx < 0 || my < 0 || mx > mw || my > mh {
+	if !ok || mx < 0 || my < 0 || mx >= mw || my >= mh {
 		return 0, false
 	}
-	fw, fh, ok := getClientSize(followerSurface)
-	if !ok || fw <= 0 || fh <= 0 {
-		return 0, false
-	}
-	fx := int(float64(mx) / float64(mw) * float64(fw))
-	fy := int(float64(my) / float64(mh) * float64(fh))
-	if fx < -32768 || fx > 32767 || fy < -32768 || fy > 32767 {
-		return 0, false
-	}
-	return MAKELONG(uint16(int16(fx)), uint16(int16(fy))), true
-}
-
-// mapCoordsOuterWindowRects implements Chrome-Manager's outer-rect calibration:
-// rel = (screen - masterOuter) / masterOuterSize; client = rel * followerOuterSize.
-func mapCoordsOuterWindowRects(screenX, screenY int, masterSurface, followerSurface windows.HWND) (uintptr, bool) {
-	ml, mt, mr, mb := getWindowRect(masterSurface)
-	fl, ft, fr, fb := getWindowRect(followerSurface)
-	fW, fH := int(fr-fl), int(fb-ft)
-	cx, cy, ok := chromeManagerMapPoint(screenX, screenY, int(ml), int(mt), int(mr), int(mb), fW, fH)
-	if !ok {
-		return 0, false
-	}
-	// PostMessage mouse messages expect client coords of the target HWND.
-	// Outer proportions approximate client for similarly-chromed Chrome windows
-	// (same technique as Chrome-Manager). Clamp into follower client if available.
-	if fw, fh, cok := getClientSize(followerSurface); cok && fw > 0 && fh > 0 {
-		if cx > fw {
-			cx = fw
-		}
-		if cy > fh {
-			cy = fh
-		}
-	}
-	return MAKELONG(uint16(int16(cx)), uint16(int16(cy))), true
+	return mapCoordsViaClientArea(screenX, screenY, masterSurface, followerSurface)
 }
 
 func mapScreenPointBetweenInputSurfaces(screenX, screenY int, masterSurface, followerSurface windows.HWND) (int, int, bool) {
@@ -1748,10 +1703,8 @@ func mapChromeInputTarget(screenX, screenY int, masterMain, followerMain windows
 			return followerSurface, lparam, true
 		}
 	}
-	// No matching extension popup on follower: still map into the main frame so
-	// the click is not dropped (better for dapp "Connect" under partial popup lag).
-	lparam, ok := mapCoordsChromeManager(screenX, screenY, masterMain, followerMain)
-	return followerMain, lparam, ok
+	// A popup click belongs to that popup, never to the browser underneath it.
+	return 0, 0, false
 }
 
 // listChromePopupSurfaces / chromePopupListSearch remain available for
@@ -2289,45 +2242,52 @@ func (s *InputSyncer) mouseHookCallback(nCode int, wParam uintptr, lParam uintpt
 			}
 			return callNextHook(nCode, wParam, lParam)
 		}
-		s.mu.Lock()
-		masterPort := s.masterDebug
-		s.mu.Unlock()
-		if t, ok := s.focusedMasterCDPTargetMode(masterPort, false); ok && !shouldReplaySyncInput(t.URL) {
-			return callNextHook(nCode, wParam, lParam)
-		}
-		for _, hwnd := range followers {
-			if !isWindow(hwnd) {
-				continue
-			}
-
-			// 映射坐标到跟随窗口客户区坐标（Chrome-Manager 风格）
-			targetHwnd, lparam, ok := mapChromeInputTarget(screenX, screenY, s.masterHwnd, hwnd)
-			if !ok {
-				continue
-			}
-
-			// 构造 wParam（按键状态）
-			var wparam uintptr
-			switch msg {
+		// Native toolbar controls belong to Chrome, regardless of the active
+		// tab's URL (including chrome://newtab). Do not gate them by page URL.
+		down := msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN
+		button := msg
+		if !down {
+			button--
+		} // Each Win32 button-up immediately follows its down code.
+		var wparam uintptr
+		if down {
+			switch button {
 			case WM_LBUTTONDOWN:
 				wparam = MK_LBUTTON
-			case WM_LBUTTONUP:
-				wparam = 0
 			case WM_RBUTTONDOWN:
 				wparam = MK_RBUTTON
-			case WM_RBUTTONUP:
-				wparam = 0
 			case WM_MBUTTONDOWN:
 				wparam = MK_MBUTTON
-			case WM_MBUTTONUP:
-				wparam = 0
 			}
+		}
+		targets := s.nativeMousePresses.resolve(button, down, atomic.LoadUint64(&s.dispatchGeneration), func() []nativeMouseTarget {
+			var targets []nativeMouseTarget
+			for _, hwnd := range followers {
+				if !isWindow(hwnd) {
+					continue
+				}
+				target, point, ok := mapChromeInputTarget(screenX, screenY, s.masterHwnd, hwnd)
+				if ok {
+					targets = append(targets, nativeMouseTarget{owner: uintptr(hwnd), window: uintptr(target), point: point, pid: windowPID(target)})
+				}
+			}
+			return targets
+		})
+		for _, target := range targets {
+			hwnd, targetHwnd, lparam := windows.HWND(target.owner), windows.HWND(target.window), target.point
 
 			// 发到顶层窗口：先 WM_MOUSEMOVE 让 Chrome 更新 hover 状态
-			s.dispatchWithRandomDelay(hwnd, func() {
-				popupSurface := targetHwnd != hwnd
-				sendChromeUIMouseMessage(targetHwnd, WM_MOUSEMOVE, wparam, lparam, popupSurface)
-				sendChromeUIMouseMessage(targetHwnd, uintptr(msg), wparam, lparam, popupSurface)
+			// Reuse the ordered input worker: a bounded native hit-test must not
+			// block the low-level hook while the master awaits its real click.
+			s.enqueuePageInput(pageInputCritical, func() {
+				s.dispatchWithRandomDelay(hwnd, func() {
+					popupSurface := targetHwnd != hwnd
+					if !isWindow(targetHwnd) || windowPID(targetHwnd) != target.pid || (!popupSurface && !chromeClientMousePoint(targetHwnd, lparam)) {
+						return
+					}
+					sendChromeUIMouseMessage(targetHwnd, WM_MOUSEMOVE, wparam, lparam, popupSurface)
+					sendChromeUIMouseMessage(targetHwnd, uintptr(msg), wparam, lparam, popupSurface)
+				})
 			})
 
 			// 仅在首次点击时记录详细日志（避免日志过多）
@@ -3388,7 +3348,7 @@ func (s *InputSyncer) dispatchPageMouseFallback(hwnd windows.HWND, msg uint32, s
 	if !isWindow(hwnd) {
 		return
 	}
-	lparam, ok := mapCoordsChromeManager(screenX, screenY, s.masterHwnd, hwnd)
+	target, lparam, ok := mapChromeInputTarget(screenX, screenY, s.masterHwnd, hwnd)
 	if !ok {
 		return
 	}
@@ -3400,7 +3360,11 @@ func (s *InputSyncer) dispatchPageMouseFallback(hwnd windows.HWND, msg uint32, s
 	} else if msg == WM_MBUTTONDOWN {
 		wparam = MK_MBUTTON
 	}
-	s.postMessageWithRandomDelay(hwnd, uintptr(msg), wparam, lparam)
+	s.dispatchWithRandomDelay(hwnd, func() {
+		if isWindow(target) && (target != hwnd || chromeClientMousePoint(target, lparam)) {
+			procPostMessageW.Call(uintptr(target), uintptr(msg), wparam, lparam)
+		}
+	})
 }
 
 func digitRuneFromVirtualKey(vk uint32) rune {
@@ -3657,9 +3621,9 @@ func (s *InputSyncer) urlSyncLoop(stopCh <-chan struct{}) {
 		if url == "" {
 			url = s.getMasterURL(masterDebug)
 		}
-		if shouldMirrorMasterURL(url) && url != s.lastSyncURL {
-			// The master is authoritative for ordinary pages, OAuth consent,
-			// wallet connect/sign and extension popups.
+		if shouldMirrorSyncNavigation(url) && url != s.lastSyncURL {
+			// Extension popup actions replay on each follower's own extension;
+			// their private document URLs must not replace ordinary browser tabs.
 			s.lastSyncURL = url
 			s.invalidateMasterCDPTargetCache()
 			var wg sync.WaitGroup
@@ -3677,11 +3641,6 @@ func (s *InputSyncer) urlSyncLoop(stopCh <-chan struct{}) {
 			wg.Wait()
 		}
 	}
-}
-
-func shouldMirrorMasterURL(raw string) bool {
-	raw = strings.TrimSpace(raw)
-	return raw != "" && !isAboutBlank(raw)
 }
 
 // reseedURLSyncBaseline captures the master's current URL and focused editable
@@ -3887,16 +3846,20 @@ func (s *InputSyncer) applyFollowerFocusedEditableStateOnTarget(debugPort int, m
 
 func (s *InputSyncer) navigateFollower(debugPort int, url string) {
 	url = strings.TrimSpace(url)
-	if !shouldMirrorMasterURL(url) {
+	if !shouldMirrorSyncNavigation(url) {
 		return
 	}
 	// Same document → skip. Unconditional Page.navigate reloads the dapp, drops
 	// injected providers / wallet sessions, and looks like "sync start/stop
 	// refreshed every page".
-	if current := strings.TrimSpace(s.getMasterURL(debugPort)); urlsMatchForSync(current, url) {
+	target, ok := focusedCDPTarget(debugPort)
+	if !ok || extensionLikeCDPTarget(target) {
 		return
 	}
-	_, _ = cdpCall(debugPort, "Page.navigate", map[string]any{
+	if urlsMatchForSync(strings.TrimSpace(target.URL), url) {
+		return
+	}
+	_, _ = cdpCallTarget(target, "Page.navigate", map[string]any{
 		"url": url,
 	})
 }
