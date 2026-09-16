@@ -33,6 +33,16 @@ func TestChromeManagerMapPointAbsoluteWhenSameSize(t *testing.T) {
 	}
 }
 
+func TestMapScreenPointBetweenRenderRectsKeepsContentOffset(t *testing.T) {
+	// Browser frames may have different toolbar heights after tiling. Mapping
+	// through their whole outer rectangles would move page wheel input into
+	// browser chrome; render-to-render mapping keeps the same page proportion.
+	x, y, ok := mapScreenPointBetweenRects(500, 300, 0, 100, 1000, 700, 200, 80, 700, 380)
+	if !ok || x != 450 || y != 180 {
+		t.Fatalf("render map got %d,%d,%v; want 450,180,true", x, y, ok)
+	}
+}
+
 func TestTitleSimilarityJaccard(t *testing.T) {
 	if titleSimilarityJaccard("MetaMask", "MetaMask") != 1 {
 		t.Fatal("exact match")

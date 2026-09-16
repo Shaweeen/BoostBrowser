@@ -17,10 +17,17 @@ frame control. A persisted HWND could also be stale after a close/reopen.
 
 The new path resolves the selected profile IDs through the live process tree at
 sync start. Each follower is mapped independently from its current client
-width, render-child top and DPI. Page points use the render child. Native
-toolbar points keep their row and use left/right anchoring. A native mouse-down
-captures the exact target HWND and point for its matching mouse-up. A popup that
-cannot be matched is dropped rather than sent to the browser underneath it.
+width, render-child top and DPI. Page points (including wheel fallback) use the
+render child. Native toolbar points keep their row; left/right control clusters
+keep their edge inset while the central omnibox follows the selected follower's
+actual width. A native mouse-down captures the exact target HWND and point for
+its matching mouse-up. A popup that cannot be matched is dropped rather than
+sent to the browser underneath it.
+
+Address typing is replayed through the focused native omnibox after its click;
+the committed navigation is then matched by each follower's DevTools target.
+Ctrl+wheel measures the master page's final CSS scale and converges each
+follower to that scale instead of applying a relative wheel delta.
 
 No data is deleted or rewritten in browser profiles, cookies, extension stores,
 wallet stores or login state.
@@ -47,6 +54,12 @@ selected environment:
 5. Close and reopen one follower while sync remains active, refresh the sync
    list, and repeat the wallet-icon click. The reopened environment must use its
    new live window handle; no old handle may receive input.
+6. Click the middle and right side of the master address bar, type a URL, edit
+   it with selection/backspace, then press Enter. Each follower must show the
+   same omnibox text while typing and navigate only to the committed URL.
+7. With differently sized selected windows, use Ctrl+wheel up/down over a page.
+   Followers must converge to the master page scale; repeat after a layout
+   change without restarting synchronization.
 
 The Mac test host can run the platform-neutral geometry and target-planning
 tests, but it cannot prove Win32 hit-testing or actual wallet popup behavior.

@@ -39,6 +39,22 @@ func TestToolbarExtensionClickDoesNotScaleIntoCaption(t *testing.T) {
 	}
 }
 
+func TestToolbarAddressBarUsesSelectedFollowerWidth(t *testing.T) {
+	// The omnibox is neither a left navigation control nor a right extension
+	// icon. Its point must follow the actual follower width so its click focuses
+	// the follower omnibox before native key replay starts.
+	x, y, ok := mapChromeToolbarPoint(700, 65, 1400, 460, 100, 100, 96, 96)
+	if !ok || x != 230 || y != 65 {
+		t.Fatalf("omnibox map got %d,%d,%v; want 230,65,true", x, y, ok)
+	}
+	// A right-side address-bar point remains proportional until it is close
+	// enough to be inside the dynamically bounded extension/menu cluster.
+	x, y, ok = mapChromeToolbarPoint(1000, 65, 1400, 460, 100, 100, 96, 96)
+	if !ok || x != 329 || y != 65 {
+		t.Fatalf("right omnibox map got %d,%d,%v; want 329,65,true", x, y, ok)
+	}
+}
+
 func TestToolbarMappingDPIAndBounds(t *testing.T) {
 	tests := []struct {
 		name                         string
@@ -51,7 +67,7 @@ func TestToolbarMappingDPIAndBounds(t *testing.T) {
 		{"left navigation", 40, 64, 1400, 460, 100, 100, 96, 96, 40, 64, true},
 		{"content excluded", 100, 100, 1400, 460, 100, 100, 96, 96, 0, 0, false},
 		{"nonclient excluded", 100, -1, 1400, 460, 100, 100, 96, 96, 0, 0, false},
-		{"cannot fit", 710, 65, 1400, 460, 100, 100, 96, 96, 0, 0, false},
+		{"central toolbar fits", 710, 65, 1400, 460, 100, 100, 96, 96, 233, 65, true},
 		{"missing render", 1320, 65, 1400, 460, 100, 0, 96, 96, 0, 0, false},
 	}
 	for _, tt := range tests {

@@ -1947,11 +1947,19 @@ func mapCoordsViaClientArea(screenX, screenY int, masterHwnd, followerHwnd windo
 	return MAKELONG(uint16(int16(clientX)), uint16(int16(clientY))), true
 }
 
-// mapScreenPointToFollower maps a master screen point to follower screen coords
-// for WM_MOUSEWHEEL (screen lParam). Uses outer-rect CM calibration with
-// same-size absolute mapping so wheel targets match click mapping.
+// mapScreenPointToFollower maps a page point for WM_MOUSEWHEEL fallback through
+// the actual render widgets. Browser frame/toolbars may have different heights
+// after an arbitrary user-selected layout, so outer-window proportions are not
+// a valid page coordinate system.
 func mapScreenPointToFollower(screenX, screenY int, masterHwnd, followerHwnd windows.HWND) (int, int, bool) {
-	return mapScreenPointBetweenInputSurfaces(screenX, screenY, masterHwnd, followerHwnd)
+	masterRender := findChromeRenderChild(masterHwnd)
+	followerRender := findChromeRenderChild(followerHwnd)
+	if masterRender == 0 || followerRender == 0 {
+		return 0, 0, false
+	}
+	ml, mt, mr, mb := getWindowRect(masterRender)
+	fl, ft, fr, fb := getWindowRect(followerRender)
+	return mapScreenPointBetweenRects(screenX, screenY, int(ml), int(mt), int(mr), int(mb), int(fl), int(ft), int(fr), int(fb))
 }
 
 var procEnumChildWindows = user32dll.NewProc("EnumChildWindows")

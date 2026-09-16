@@ -77,6 +77,17 @@ func chromeManagerMapPoint(screenX, screenY, mLeft, mTop, mRight, mBottom, fW, f
 	return clientX, clientY, true
 }
 
+// mapScreenPointBetweenRects maps a point from one concrete surface rectangle
+// to another. It preserves the target surface origin, so callers can use it
+// for render widgets rather than incorrectly scaling the whole browser frame.
+func mapScreenPointBetweenRects(screenX, screenY, mLeft, mTop, mRight, mBottom, fLeft, fTop, fRight, fBottom int) (targetX, targetY int, ok bool) {
+	cx, cy, ok := chromeManagerMapPoint(screenX, screenY, mLeft, mTop, mRight, mBottom, fRight-fLeft, fBottom-fTop)
+	if !ok {
+		return 0, 0, false
+	}
+	return fLeft + cx, fTop + cy, true
+}
+
 // titleSimilarityJaccard is Chrome-Manager's title_similarity (character-set Jaccard).
 // Returns 0..1 where 1 is identical (empty/empty => 1).
 func titleSimilarityJaccard(title1, title2 string) float64 {
