@@ -663,10 +663,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 			// One-shot main environment frame size on this user start only.
 			// Popups/extensions are never forced; sync tile/stack uses user layout.
 			enforceMainEnvironmentWindowOnStart(profile.Pid)
-			// Publish this environment's verified main frame to the window-sync
-			// registry so the assistant and tile prefer it instead of re-guessing
-			// from window heuristics (avoids tiling a wallet/OAuth popup).
-			a.publishProfileRuntimeSnapshotAsync(profileId, profile.Pid)
 			// crashprobe: 临时停用实例启动后的 Turnstile 自动点击监控，继续收缩每实例后台
 			// CDP 监控/注入链路，验证是否仍会出现 watchdog exit_code=2。
 			// if !isCloakSelectedCore {
@@ -762,7 +758,6 @@ func (a *App) browserInstanceStartInternal(profileId string, extraLaunchArgs []s
 		if current, exists := a.browserMgr.Profiles[profileId]; exists && current != nil && current.Running && current.Pid == cmd.Process.Pid {
 			current.RuntimeWarning = runtimeWarning
 			current.LastError = pendingStartNotice
-			a.persistBrowserRuntimeSnapshotLocked()
 			profile = copyBrowserProfileSnapshot(current)
 		}
 		a.browserMgr.Mutex.Unlock()
@@ -903,9 +898,6 @@ func (a *App) BrowserInstanceStop(profileId string) (*BrowserProfile, error) {
 	if current.Running || current.DebugPort > 0 || current.Pid > 0 || a.browserMgr.BrowserProcesses[profileId] != nil {
 		a.markProfileStoppedLocked(profileId, current)
 	}
-	// Remove this environment from the window-sync registry (stopped) so a stale
-	// main-window pointer cannot be tiled after the environment is closed.
-	a.updateBrowserRuntimeSnapshotEntryLocked(profileId, 0, 0)
 	// Prefer the confirmed flush timestamp as last-usage close/save time.
 	closedAtStr := closedAt.Format(time.RFC3339)
 	current.LastStopAt = closedAtStr
@@ -1394,7 +1386,6 @@ func (a *App) markProfileStoppedLocked(profileId string, profile *BrowserProfile
 	if a.launchServer != nil {
 		a.launchServer.ClearActiveProfile(profileId)
 	}
-	a.persistBrowserRuntimeSnapshotLocked()
 }
 
 func (a *App) openBrowserWindowForRunningProfile(profile *BrowserProfile, extraLaunchArgs []string, startURLs []string) error {

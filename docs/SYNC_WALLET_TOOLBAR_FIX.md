@@ -6,6 +6,10 @@ The synchronization assistant receives one selected master environment ID and
 the selected follower environment IDs when the user starts synchronization.
 The implementation must use that live selection as the source of truth. It
 must not assume a fixed number of environments or a fixed window size.
+It must not read or write persisted runtime HWND/PID snapshots: opening or
+refreshing the assistant derives the selectable set from live Chromium
+processes, their live debug ports, and current top-level main frames only; a
+persisted Running/PID flag is not a fallback source in the sync panel.
 
 When the user chooses horizontal, vertical, automatic grid, or custom columns
 and rows, that request is passed to the backend arrangement owner. A custom
@@ -13,6 +17,12 @@ grid that cannot hold every selected environment is rejected rather than
 silently changing its rows or dropping windows. After arrangement, input reads
 the current render/client rectangles from every selected HWND; it does not
 derive coordinates from a nominal grid size.
+The automatic grid scores every possible row/column combination using the
+current selected count, current desktop work area, and median aspect ratio of
+the live windows. It has no count bands such as “10 or more uses four columns”.
+If a real main browser frame cannot be resolved, the environment is skipped
+until a later refresh; synchronization never falls back to a wallet, OAuth, or
+other generic Chromium popup.
 
 ## Failure path fixed
 

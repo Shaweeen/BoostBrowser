@@ -130,7 +130,6 @@ func (a *App) markProfileRunningLocked(profileId string, profile *BrowserProfile
 	if debugReady && a.launchServer != nil {
 		a.launchServer.SetActiveProfile(profile)
 	}
-	a.persistBrowserRuntimeSnapshotLocked()
 	// Debounced persist: multi-open used to call SaveProfiles on every start
 	// under the manager lock, serializing N full SQLite rewrites and stretching
 	// batch start wall time dramatically.
@@ -162,7 +161,6 @@ func (a *App) setProfileDebugReady(profileId string, debugPort int) (*BrowserPro
 	changed := !profile.DebugReady || profile.RuntimeWarning != ""
 	if changed {
 		a.markProfileDebugReadyLocked(profile, debugPort)
-		a.persistBrowserRuntimeSnapshotLocked()
 	}
 	snapshot := copyBrowserProfileSnapshot(profile)
 	a.browserMgr.Mutex.Unlock()

@@ -492,8 +492,9 @@ func mapProcessTreeRoots(rootPIDs []int) map[int]int {
 // findProcessTreeWindow resolves the real Chrome *main* frame even when the
 // launcher PID hands the browser window to a child process. Prefer
 // findMainEnvironmentBrowserWindow so wallet/extension popups are not mistaken
-// for the environment frame; always fall back to legacy largest-window scoring
-// so tile/sync never hard-fail with zero HWNDs.
+// for the environment frame; non-sync callers may fall back to legacy
+// largest-window scoring when they explicitly choose availability over a
+// fail-closed main-frame guarantee.
 func findProcessTreeWindow(rootPID int) (windows.HWND, error) {
 	if hwnd := findMainEnvironmentBrowserWindow(rootPID); hwnd != 0 {
 		return hwnd, nil

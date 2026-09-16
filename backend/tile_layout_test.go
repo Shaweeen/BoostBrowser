@@ -19,24 +19,20 @@ func TestNaturalProfileNameLessNumericOrder(t *testing.T) {
 	}
 }
 
-func TestTileGridDimensionsDenseMultiOpen(t *testing.T) {
+func TestTileGridDimensionsUsesCurrentCountWorkAreaAndAspect(t *testing.T) {
 	cases := []struct {
-		n, cols, rows int
+		n, workAreaW, workAreaH, cols, rows int
+		aspect                              float64
 	}{
-		{1, 1, 1},
-		{2, 2, 1},
-		{4, 2, 2},
-		{6, 3, 2},
-		{7, 3, 3},
-		{9, 3, 3},
-		{10, 4, 3},
-		{12, 4, 3},
-		{13, 4, 4},
+		{1, 1920, 1080, 1, 1, 1.55},
+		{5, 1920, 1080, 3, 2, 1.55},
+		{20, 1920, 1080, 5, 4, 1.55},
+		{50, 1920, 1080, 8, 7, 1.55},
 	}
 	for _, tc := range cases {
-		cols, rows := tileGridDimensions(tc.n)
+		cols, rows := tileGridDimensions(tc.n, tc.workAreaW, tc.workAreaH, tc.aspect)
 		if cols != tc.cols || rows != tc.rows {
-			t.Fatalf("n=%d want %dx%d got %dx%d", tc.n, tc.cols, tc.rows, cols, rows)
+			t.Fatalf("n=%d workarea=%dx%d aspect=%.2f want %dx%d got %dx%d", tc.n, tc.workAreaW, tc.workAreaH, tc.aspect, tc.cols, tc.rows, cols, rows)
 		}
 	}
 }

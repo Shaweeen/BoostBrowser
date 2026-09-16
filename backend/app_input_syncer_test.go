@@ -3,15 +3,10 @@
 package backend
 
 import (
-	"encoding/json"
 	"os"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"boost-browser/backend/internal/browser"
-	"boost-browser/backend/internal/config"
 
 	"golang.org/x/sys/windows"
 )
@@ -100,8 +95,8 @@ func TestPlanSyncSessionTargetsRepairsClosedReopenedFollower(t *testing.T) {
 	// Follower closed and reopened: the fresh scan carries a new pid/hwnd/port,
 	// and the session must adopt them so sync continues without a restart.
 	byID := map[string]syncProfileCandidate{
-		"master":   {profileID: "master", pid: 1, debugPort: 9001, hintHWND: windows.HWND(101)},
-		"follower": {profileID: "follower", pid: 2, debugPort: 9002, hintHWND: windows.HWND(202)},
+		"master":   {profileID: "master", pid: 1, debugPort: 9001},
+		"follower": {profileID: "follower", pid: 2, debugPort: 9002},
 	}
 	resolved := map[int]windows.HWND{1: 101, 2: 202}
 	master, followers, ports, next, ok := planSyncSessionTargets("master", []string{"follower"}, nil, byID, resolved)
@@ -120,7 +115,7 @@ func TestPlanSyncSessionTargetsDropsClosedKeepsUnresolvedAlive(t *testing.T) {
 	// A closed follower must be dropped; an alive follower whose frame is
 	// temporarily unresolved keeps its previous target instead of flapping out.
 	byID := map[string]syncProfileCandidate{
-		"master": {profileID: "master", pid: 1, debugPort: 9001, hintHWND: windows.HWND(101)},
+		"master": {profileID: "master", pid: 1, debugPort: 9001},
 		"gone":   {profileID: "gone", pid: 0},                    // closed
 		"flappy": {profileID: "flappy", pid: 3, debugPort: 9003}, // alive, window unresolved
 	}
@@ -144,13 +139,12 @@ func TestPlanSyncSessionTargetsDropsClosedKeepsUnresolvedAlive(t *testing.T) {
 	}
 }
 
-func TestPlanSyncSessionTargetsDoesNotUsePersistedWindowHints(t *testing.T) {
-	// A runtime registry entry can outlive a browser frame. The live process
-	// resolution wins; an unresolved active follower may keep only its current
-	// session target, never a handle from a previous run.
+func TestPlanSyncSessionTargetsRetainsOnlyCurrentSessionTarget(t *testing.T) {
+	// Live process resolution wins. An unresolved active follower may keep only
+	// its current session target, never a handle from a previous run.
 	byID := map[string]syncProfileCandidate{
-		"master":   {profileID: "master", pid: 11, hintHWND: windows.HWND(101)},
-		"follower": {profileID: "follower", pid: 22, hintHWND: windows.HWND(202)},
+		"master":   {profileID: "master", pid: 11},
+		"follower": {profileID: "follower", pid: 22},
 	}
 	resolved := map[int]windows.HWND{11: 111}
 	master, followers, _, next, ok := planSyncSessionTargets(
@@ -733,33 +727,5 @@ func TestPageMouseButtonUpMessagePreservesButton(t *testing.T) {
 		if got := pageMouseButtonUpMessage(test.down); got != test.up {
 			t.Fatalf("button release mismatch: down=%#x got=%#x want=%#x", test.down, got, test.up)
 		}
-	}
-}
-
-func TestMainProcessPersistsBrowserRuntimeSnapshot(t *testing.T) {
-	root := t.TempDir()
-	app := NewApp(root, false)
-	app.browserMgr = browser.NewManager(config.DefaultConfig(), root)
-	app.browserMgr.Profiles["profile-1"] = &browser.Profile{
-		ProfileId: "profile-1",
-		Running:   true,
-		Pid:       4321,
-		DebugPort: 32123,
-	}
-
-	app.browserMgr.Mutex.Lock()
-	app.persistBrowserRuntimeSnapshotLocked()
-	app.browserMgr.Mutex.Unlock()
-
-	data, err := os.ReadFile(filepath.Join(root, "data", "browser-runtime.json"))
-	if err != nil {
-		t.Fatalf("read runtime snapshot: %v", err)
-	}
-	var snapshot browserRuntimeSnapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		t.Fatalf("decode runtime snapshot: %v", err)
-	}
-	if len(snapshot.Entries) != 1 || snapshot.Entries[0].ProfileID != "profile-1" || snapshot.Entries[0].PID != 4321 {
-		t.Fatalf("unexpected runtime snapshot: %+v", snapshot)
 	}
 }

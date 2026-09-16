@@ -171,7 +171,9 @@ export function WindowSyncPage() {
     // assistant opens, then refresh when the user is choosing or changing the
     // master/follower set. A background poll could replace an HWND while a
     // native toolbar press/release pair is in flight.
-    void loadProfiles()
+    // Opening the sync tool is an explicit environment-selection boundary:
+    // discover the current live set immediately, never a prior cache entry.
+    void loadProfiles(true)
     const offPauseChanged = EventsOn('window-sync:pause-changed', (payload: { paused?: boolean }) => {
       const paused = payload?.paused === true
       setSyncStatus(prev => prev ? { ...prev, paused } : prev)

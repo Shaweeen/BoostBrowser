@@ -96,22 +96,33 @@ func (a *App) RefreshSyncSnapshot() SyncSnapshot {
 }
 
 // syncProfileCandidate is one live-discovered environment in the sync panel's
-// refresh scan: identity, runtime and the best-known main-frame hint.
+// refresh scan. It contains only current process/runtime data.
 type syncProfileCandidate struct {
 	profileID   string
 	profileName string
 	pid         int
 	debugPort   int
 	badge       int
-	hintHWND    windows.HWND
+}
+
+// resolveLiveMainEnvironmentFrame accepts a candidate from the current batch
+// scan only when it is a real environment frame. A wallet/OAuth popup must
+// never become a sync target merely because it is the largest visible Chrome
+// surface at that instant.
+func resolveLiveMainEnvironmentFrame(rootPID int, candidate windows.HWND) windows.HWND {
+	if candidate != 0 && isWindow(candidate) && isMainEnvironmentBrowserFrame(candidate, getWindowTitle(candidate)) {
+		return candidate
+	}
+	return findMainEnvironmentBrowserWindow(rootPID)
 }
 
 func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 	// The panel is a separate process: re-read the profile table from SQLite so
 	// environments created in the main client become visible (throttled).
 	a.maybeReloadSyncProfilesFromDB()
-	// P1: Discover from already-started client envs (live process scan).
-	// Snapshot file is optional merge only — never wipe live discoveries.
+	// Discover from already-started client environments through the current
+	// process tree and their live debug-port files. The selected, currently
+	// open environment set is the sole source for the sync panel.
 	byID := make(map[string]syncProfileCandidate, 64)
 	rootPIDs := make([]int, 0, 64)
 
@@ -231,67 +242,30 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 		}
 	}
 
-	// 3) Soft merge snapshot HWNDs/PIDs (never call apply* wipe after live scan).
-	if runtimeSnapshot, ok := a.readBrowserRuntimeSnapshot(); ok {
-		for _, entry := range runtimeSnapshot.Entries {
-			if entry.PID <= 0 {
+	// The assistant must not use a persisted Running/PID flag as a third
+	// discovery source: a reused PID can otherwise describe a different window.
+	// Non-panel callers retain their own in-process runtime fallback for
+	// diagnostics, but the standalone sync panel is live-discovery-only.
+	if !a.panelMode {
+		for _, p := range profiles {
+			if !p.Running || p.Pid <= 0 {
 				continue
 			}
-			hwnd := validRuntimeSnapshotWindow(entry)
-			if hwnd == 0 && !isProcessAlive(entry.PID) {
+			if _, exists := byID[p.ProfileId]; exists {
 				continue
 			}
-			if existing, exists := byID[entry.ProfileID]; exists {
-				if existing.hintHWND == 0 && hwnd != 0 {
-					existing.hintHWND = hwnd
-					byID[entry.ProfileID] = existing
-				}
-				if existing.pid <= 0 {
-					existing.pid = entry.PID
-					byID[entry.ProfileID] = existing
-					rootPIDs = append(rootPIDs, entry.PID)
-				}
-				if existing.debugPort <= 0 && entry.DebugPort > 0 {
-					existing.debugPort = entry.DebugPort
-					byID[entry.ProfileID] = existing
-				}
+			if !isProcessAlive(p.Pid) {
 				continue
 			}
-			name := strings.TrimSpace(entry.ProfileName)
-			if name == "" {
-				name = entry.ProfileID
+			byID[p.ProfileId] = syncProfileCandidate{
+				profileID:   p.ProfileId,
+				profileName: p.ProfileName,
+				pid:         p.Pid,
+				debugPort:   p.DebugPort,
+				badge:       extractBadgeNumberFromName(p.ProfileName),
 			}
-			byID[entry.ProfileID] = syncProfileCandidate{
-				profileID:   entry.ProfileID,
-				profileName: name,
-				pid:         entry.PID,
-				debugPort:   entry.DebugPort,
-				badge:       extractBadgeNumberFromName(name),
-				hintHWND:    hwnd,
-			}
-			rootPIDs = append(rootPIDs, entry.PID)
+			rootPIDs = append(rootPIDs, p.Pid)
 		}
-	}
-
-	// 4) Panel/local Running still alive.
-	for _, p := range profiles {
-		if !p.Running || p.Pid <= 0 {
-			continue
-		}
-		if _, exists := byID[p.ProfileId]; exists {
-			continue
-		}
-		if !isProcessAlive(p.Pid) {
-			continue
-		}
-		byID[p.ProfileId] = syncProfileCandidate{
-			profileID:   p.ProfileId,
-			profileName: p.ProfileName,
-			pid:         p.Pid,
-			debugPort:   p.DebugPort,
-			badge:       extractBadgeNumberFromName(p.ProfileName),
-		}
-		rootPIDs = append(rootPIDs, p.Pid)
 	}
 
 	pidSeen := map[int]struct{}{}
@@ -308,27 +282,20 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 	}
 
 	resolvedWindows := findProcessTreeWindows(uniquePIDs)
+	for _, pid := range uniquePIDs {
+		resolvedWindows[pid] = resolveLiveMainEnvironmentFrame(pid, resolvedWindows[pid])
+	}
 	missing := 0
 	for _, c := range byID {
-		if c.pid > 0 && resolvedWindows[c.pid] == 0 && c.hintHWND == 0 {
+		if c.pid > 0 && resolvedWindows[c.pid] == 0 {
 			missing++
 		}
 	}
 	if missing > 0 && (missing >= 2 || missing*3 >= len(byID)+1) {
 		time.Sleep(220 * time.Millisecond)
 		resolvedWindows = findProcessTreeWindows(uniquePIDs)
-		// Last resort per-PID main-frame resolve for stubborn misses.
-		for _, c := range byID {
-			if c.pid <= 0 || resolvedWindows[c.pid] != 0 {
-				continue
-			}
-			if hwnd := findMainEnvironmentBrowserWindow(c.pid); hwnd != 0 {
-				resolvedWindows[c.pid] = hwnd
-				continue
-			}
-			if hwnd, err := findProcessTreeWindow(c.pid); err == nil && hwnd != 0 {
-				resolvedWindows[c.pid] = hwnd
-			}
+		for _, pid := range uniquePIDs {
+			resolvedWindows[pid] = resolveLiveMainEnvironmentFrame(pid, resolvedWindows[pid])
 		}
 	}
 
@@ -390,9 +357,6 @@ func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
 		hwnd := windows.HWND(0)
 		if c.pid > 0 {
 			hwnd = resolvedWindows[c.pid]
-		}
-		if hwnd == 0 {
-			hwnd = c.hintHWND
 		}
 		if hwnd != 0 && isWindow(hwnd) {
 			info.Hwnd = int64(hwnd)
@@ -603,19 +567,13 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 		rootPIDs = append(rootPIDs, candidate.profile.Pid)
 	}
 	resolvedWindows := findProcessTreeWindows(rootPIDs)
-	masterHwnd := resolvedWindows[masterSnapshot.Pid]
-	if masterHwnd == 0 {
-		masterHwnd = findMainEnvironmentBrowserWindow(masterSnapshot.Pid)
-	}
+	masterHwnd := resolveLiveMainEnvironmentFrame(masterSnapshot.Pid, resolvedWindows[masterSnapshot.Pid])
 	if masterHwnd == 0 {
 		return fmt.Errorf("未找到主控实例窗口")
 	}
 	resolved := make([]followerWindow, len(followers))
 	for i, candidate := range followers {
-		hwnd := resolvedWindows[candidate.profile.Pid]
-		if hwnd == 0 {
-			hwnd = findMainEnvironmentBrowserWindow(candidate.profile.Pid)
-		}
+		hwnd := resolveLiveMainEnvironmentFrame(candidate.profile.Pid, resolvedWindows[candidate.profile.Pid])
 		resolved[i] = followerWindow{hwnd: hwnd, debugPort: candidate.profile.DebugPort}
 	}
 
@@ -851,18 +809,9 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 		}()
 	}
 
-	// Window-sync registry (persisted by the main client at start/stop).
-	// The verified main frame recorded at start wins over any heuristic, so a
-	// second browser window or a wallet/OAuth popup is never tiled as the env.
-	registryEntries := make(map[string]browserRuntimeSnapshotEntry)
-	if snap, ok := a.readBrowserRuntimeSnapshot(); ok {
-		for _, entry := range snap.Entries {
-			registryEntries[entry.ProfileID] = entry
-		}
-	}
-
-	// Hint HWNDs from the active sync session, but re-validate as *main* frames.
-	// Under multi-open, a stored handle can be a wallet popup after focus shift.
+	// The active session may already own current target handles. They are only
+	// short-lived in-session hints and are always re-validated below; no
+	// persisted HWND or old layout data participates in arranging windows.
 	activeWindows := make(map[string]windows.HWND)
 	activeMasterID := ""
 	syncState.mu.Lock()
@@ -892,31 +841,12 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	seenProfileIDs := make(map[string]struct{}, len(profileIds))
 	seenWindows := make(map[windows.HWND]struct{}, len(profileIds))
 
-	resolveMainHWND := func(profileID string, profile *BrowserProfile, hinted windows.HWND) windows.HWND {
-		// Authoritative window-sync registry first: the start path recorded the
-		// verified main frame, so a second window or popup can never win. The
-		// handle is re-validated (still a window, same owner PID, still a main
-		// frame) before being trusted. A minimized registry frame is also valid:
-		// it is the main client’s launch-time identity and must be restored by an
-		// explicit arrange request rather than discarded as "no window".
-		if entry, ok := registryEntries[profileID]; ok {
-			if hwnd := validRuntimeSnapshotWindow(entry); hwnd != 0 {
-				if isMainEnvironmentBrowserFrame(hwnd, getWindowTitle(hwnd)) {
-					return hwnd
-				}
-			}
-		}
-		// Prefer live main-frame resolution so we do not tile a wallet popup.
-		// Always keep hard fallbacks: over-strict filters must not make tile
-		// return "没有可用的运行实例窗口" when Chrome is clearly open.
+	resolveMainHWND := func(profile *BrowserProfile, hinted windows.HWND) windows.HWND {
+		// Resolve the main frame from this environment's current process tree so
+		// a wallet/OAuth popup can never become a tile target. This is fail-closed:
+		// an unresolved environment is omitted until the user refreshes it.
 		if profile != nil && profile.Pid > 0 {
 			if hwnd := findMainEnvironmentBrowserWindow(profile.Pid); hwnd != 0 {
-				return hwnd
-			}
-			if hwnd, err := findProcessTreeWindow(profile.Pid); err == nil && hwnd != 0 {
-				return hwnd
-			}
-			if hwnd, err := findProcessWindow(profile.Pid); err == nil && hwnd != 0 {
 				return hwnd
 			}
 		}
@@ -925,8 +855,6 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 			if isMainEnvironmentBrowserFrame(hinted, title) {
 				return hinted
 			}
-			// Sync-session handle still better than giving up entirely.
-			return hinted
 		}
 		return 0
 	}
@@ -944,7 +872,7 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 		if !profileExists || profile == nil || !profile.Running {
 			continue
 		}
-		hwnd := resolveMainHWND(pid, profile, activeWindows[pid])
+		hwnd := resolveMainHWND(profile, activeWindows[pid])
 		if hwnd == 0 {
 			continue
 		}
@@ -1018,6 +946,21 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	}
 
 	n := len(wins)
+	windowAspects := make([]float64, 0, n)
+	for _, win := range wins {
+		if width, height, ok := getClientSize(win.hwnd); ok && width > 0 && height > 0 {
+			windowAspects = append(windowAspects, float64(width)/float64(height))
+		}
+	}
+	preferredWindowAspect := 1.0
+	if len(windowAspects) > 0 {
+		sort.Float64s(windowAspects)
+		middle := len(windowAspects) / 2
+		preferredWindowAspect = windowAspects[middle]
+		if len(windowAspects)%2 == 0 {
+			preferredWindowAspect = (windowAspects[middle-1] + preferredWindowAspect) / 2
+		}
+	}
 	requestedLayout := strings.TrimSpace(strings.ToLower(layoutMode))
 	requestedCols, requestedRows, customLayout := parseCustomTileLayout(requestedLayout)
 	if strings.HasPrefix(requestedLayout, "custom:") && !customLayout {
@@ -1037,9 +980,6 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 		default:
 			resolvedLayout = "grid"
 		}
-		if resolvedLayout == "grid" && n <= 2 {
-			resolvedLayout = "horizontal"
-		}
 	}
 
 	var cols, rows int
@@ -1054,7 +994,7 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 			cols = 1
 			rows = n
 		default:
-			cols, rows = tileGridDimensions(n)
+			cols, rows = tileGridDimensions(n, screenW, screenH, preferredWindowAspect)
 		}
 	}
 
@@ -1296,17 +1236,7 @@ func (a *App) addFollowerToSyncLocal(profileId string) error {
 
 	// 解析窗口句柄
 	resolvedWindows := findProcessTreeWindows([]int{profileSnapshot.Pid})
-	hwnd := resolvedWindows[profileSnapshot.Pid]
-	if hwnd == 0 {
-		if snapshot, ok := a.readBrowserRuntimeSnapshot(); ok {
-			for _, snapEntry := range snapshot.Entries {
-				if snapEntry.ProfileID == profileId {
-					hwnd = validRuntimeSnapshotWindow(snapEntry)
-					break
-				}
-			}
-		}
-	}
+	hwnd := resolveLiveMainEnvironmentFrame(profileSnapshot.Pid, resolvedWindows[profileSnapshot.Pid])
 	if hwnd == 0 {
 		return fmt.Errorf("未找到环境 %s 的窗口", profileId)
 	}
@@ -1344,7 +1274,7 @@ func (a *App) addFollowerToSyncLocal(profileId string) error {
 			continue
 		}
 		resolved := findProcessTreeWindows([]int{fp.Pid})
-		fHwnd := resolved[fp.Pid]
+		fHwnd := resolveLiveMainEnvironmentFrame(fp.Pid, resolved[fp.Pid])
 		if fHwnd == 0 {
 			continue
 		}

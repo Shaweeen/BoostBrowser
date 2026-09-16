@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"unicode"
@@ -100,25 +101,44 @@ func naturalProfileNameLess(nameA, idA, nameB, idB string) bool {
 	return idA < idB
 }
 
-// tileGridDimensions returns cols/rows for the standard multi-open grid.
-// 7–9 use 3×3 (larger cells on 1080p); 10+ use 4 columns.
-func tileGridDimensions(n int) (cols, rows int) {
+// tileGridDimensions chooses the automatic grid from the current selected
+// environment count, current work area, and the live window aspect ratio. It
+// intentionally has no fixed count bands: a 5-, 20-, or 50-environment session
+// is laid out from the same rule, while an explicit custom grid stays exact.
+func tileGridDimensions(n, workAreaW, workAreaH int, preferredAspect float64) (cols, rows int) {
 	if n <= 0 {
 		return 0, 0
 	}
-	if n <= 2 {
-		return n, 1
+	if workAreaW <= 0 || workAreaH <= 0 {
+		workAreaW, workAreaH = 1, 1
 	}
-	if n <= 4 {
-		return 2, (n + 1) / 2
+	if preferredAspect <= 0 || math.IsNaN(preferredAspect) || math.IsInf(preferredAspect, 0) {
+		preferredAspect = 1
 	}
-	if n <= 6 {
-		return 3, 2
+
+	bestCols, bestRows := 1, n
+	bestDistance := math.Inf(1)
+	bestEmpty := n - 1
+	bestCellArea := 0
+	for candidateCols := 1; candidateCols <= n; candidateCols++ {
+		candidateRows := (n + candidateCols - 1) / candidateCols
+		cellW := workAreaW / candidateCols
+		cellH := workAreaH / candidateRows
+		if cellW <= 0 || cellH <= 0 {
+			continue
+		}
+		cellAspect := float64(cellW) / float64(cellH)
+		distance := math.Abs(math.Log(cellAspect / preferredAspect))
+		empty := candidateCols*candidateRows - n
+		cellArea := cellW * cellH
+		if distance < bestDistance-1e-9 ||
+			(math.Abs(distance-bestDistance) <= 1e-9 && (empty < bestEmpty ||
+				(empty == bestEmpty && cellArea > bestCellArea))) {
+			bestCols, bestRows = candidateCols, candidateRows
+			bestDistance, bestEmpty, bestCellArea = distance, empty, cellArea
+		}
 	}
-	if n <= 9 {
-		return 3, 3
-	}
-	return 4, (n + 3) / 4
+	return bestCols, bestRows
 }
 
 // defaultTileGapPx is the fixed pixel gap between adjacent tiled environments.
