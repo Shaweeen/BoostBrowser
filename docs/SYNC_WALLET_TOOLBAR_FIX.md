@@ -7,6 +7,13 @@ the selected follower environment IDs when the user starts synchronization.
 The implementation must use that live selection as the source of truth. It
 must not assume a fixed number of environments or a fixed window size.
 
+When the user chooses horizontal, vertical, automatic grid, or custom columns
+and rows, that request is passed to the backend arrangement owner. A custom
+grid that cannot hold every selected environment is rejected rather than
+silently changing its rows or dropping windows. After arrangement, input reads
+the current render/client rectangles from every selected HWND; it does not
+derive coordinates from a nominal grid size.
+
 ## Failure path fixed
 
 The old native fallback converted a master toolbar point by the ratio of the

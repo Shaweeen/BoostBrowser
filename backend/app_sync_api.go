@@ -804,7 +804,7 @@ type TileWindowsResult struct {
 
 // SyncTileWindows 平铺所有已选中实例的窗口
 // masterProfileId: 主控实例ID，主控窗口始终放在最左边（index 0）
-// layoutMode: grid | horizontal | vertical
+// layoutMode: grid | horizontal | vertical | custom:<columns>x<rows>
 func (a *App) SyncTileWindows(profileIds []string, masterProfileId string, layoutMode string) (*TileWindowsResult, error) {
 	return a.syncTileWindowsLocal(profileIds, masterProfileId, layoutMode)
 }
@@ -1018,26 +1018,44 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	}
 
 	n := len(wins)
-	resolvedLayout := layoutMode
-	switch resolvedLayout {
-	case "horizontal", "vertical", "grid":
-	default:
-		resolvedLayout = "grid"
+	requestedLayout := strings.TrimSpace(strings.ToLower(layoutMode))
+	requestedCols, requestedRows, customLayout := parseCustomTileLayout(requestedLayout)
+	if strings.HasPrefix(requestedLayout, "custom:") && !customLayout {
+		return nil, fmt.Errorf("自定义排列格式无效，应为 custom:<列数>x<行数>")
 	}
-	if resolvedLayout == "grid" && n <= 2 {
-		resolvedLayout = "horizontal"
+	if customLayout && !tileLayoutFitsCount(n, requestedCols, requestedRows) {
+		return nil, fmt.Errorf("自定义排列 %d×%d 容纳不足：已选择 %d 个环境", requestedCols, requestedRows, n)
+	}
+	resolvedLayout := layoutMode
+	if customLayout {
+		// Result stays "grid" for the existing UI status type; the exact
+		// user-selected dimensions have already been consumed below.
+		resolvedLayout = "grid"
+	} else {
+		switch resolvedLayout {
+		case "horizontal", "vertical", "grid":
+		default:
+			resolvedLayout = "grid"
+		}
+		if resolvedLayout == "grid" && n <= 2 {
+			resolvedLayout = "horizontal"
+		}
 	}
 
 	var cols, rows int
-	switch resolvedLayout {
-	case "horizontal":
-		cols = n
-		rows = 1
-	case "vertical":
-		cols = 1
-		rows = n
-	default:
-		cols, rows = tileGridDimensions(n)
+	if customLayout {
+		cols, rows = requestedCols, requestedRows
+	} else {
+		switch resolvedLayout {
+		case "horizontal":
+			cols = n
+			rows = 1
+		case "vertical":
+			cols = 1
+			rows = n
+		default:
+			cols, rows = tileGridDimensions(n)
+		}
 	}
 
 	// Fixed 1px gap + identical cell size for every window (including last row).

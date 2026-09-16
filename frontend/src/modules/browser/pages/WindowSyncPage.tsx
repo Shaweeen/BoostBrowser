@@ -42,6 +42,7 @@ type FilterMode = 'all' | 'selected' | 'master' | 'followers'
 type ToolbarMenu = 'layout' | null
 // Delay is OFF by default (immediate sync). Only "random" is an explicit opt-in.
 type DelayPreset = 'off' | 'random'
+type TileLayoutRequest = TileLayoutMode | `custom:${number}x${number}`
 
 const FILTER_OPTIONS: Array<{ value: FilterMode; label: string }> = [
   { value: 'all', label: '全部实例' },
@@ -557,7 +558,7 @@ export function WindowSyncPage() {
     setSyncStatus(prev => prev ? { ...prev, randomDelayEnabled: true, randomDelayMinMs: minMs, randomDelayMaxMs: maxMs } : prev)
   }
 
-  const handleTile = async (layout: TileLayoutMode = tileLayout, _toastLabel?: string) => {
+  const handleTile = async (layout: TileLayoutRequest = tileLayout, _toastLabel?: string) => {
     const ids = isSyncing ? activeSyncIds : Array.from(selectedIds)
     if (ids.length === 0) {
       toast.error('请先选择要排列的环境')
@@ -574,12 +575,16 @@ export function WindowSyncPage() {
   const handleApplyCustomLayout = async () => {
     const cols = Number(customCols)
     const rows = Number(customRows)
-    if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols <= 0 || rows <= 0) {
-      toast.error('自定义排列的行列数必须大于 0')
+    if (!Number.isSafeInteger(cols) || !Number.isSafeInteger(rows) || cols <= 0 || rows <= 0) {
+      toast.error('自定义排列的行列数必须是正整数')
       return
     }
-    const nextLayout: TileLayoutMode = rows === 1 ? 'horizontal' : cols === 1 ? 'vertical' : 'grid'
-    await handleTile(nextLayout, `按 ${cols}×${rows} 自定义排列`)
+    const ids = isSyncing ? activeSyncIds : Array.from(selectedIds)
+    if (ids.length > cols * rows) {
+      toast.error(`自定义 ${cols}×${rows} 只能容纳 ${cols * rows} 个环境，当前已选择 ${ids.length} 个`)
+      return
+    }
+    await handleTile(`custom:${cols}x${rows}`, `按 ${cols}×${rows} 自定义排列`)
   }
 
   const handleExitAssistant = async () => {

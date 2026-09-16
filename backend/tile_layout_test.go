@@ -41,6 +41,24 @@ func TestTileGridDimensionsDenseMultiOpen(t *testing.T) {
 	}
 }
 
+func TestCustomTileLayoutUsesExactUserDimensions(t *testing.T) {
+	cols, rows, ok := parseCustomTileLayout("custom:5x3")
+	if !ok || cols != 5 || rows != 3 {
+		t.Fatalf("custom layout parse got %dx%d ok=%v", cols, rows, ok)
+	}
+	if !tileLayoutFitsCount(15, cols, rows) {
+		t.Fatal("exact custom grid should fit its selected environments")
+	}
+	if tileLayoutFitsCount(16, cols, rows) {
+		t.Fatal("custom grid must not silently discard an extra environment")
+	}
+	for _, raw := range []string{"grid", "custom:", "custom:0x3", "custom:3x0", "custom:3xno"} {
+		if _, _, ok := parseCustomTileLayout(raw); ok {
+			t.Fatalf("invalid custom layout accepted: %q", raw)
+		}
+	}
+}
+
 func TestComputeUniformTileRectsFlushGapAndLastSameSize(t *testing.T) {
 	// 10 windows, 4×3, gap=0: every cell identical; last incomplete-row cell
 	// must NOT stretch to remaining width.

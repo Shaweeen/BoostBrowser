@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -8,6 +9,37 @@ import (
 // tileLayoutRect is one environment window outer rect in screen pixels.
 type tileLayoutRect struct {
 	X, Y, W, H int
+}
+
+// parseCustomTileLayout accepts the explicit layout request emitted by the
+// sync panel. Rows and columns remain user choices; this helper only validates
+// and transports them to the one window-arrangement owner.
+func parseCustomTileLayout(raw string) (cols, rows int, ok bool) {
+	const prefix = "custom:"
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if !strings.HasPrefix(raw, prefix) {
+		return 0, 0, false
+	}
+	parts := strings.Split(strings.TrimPrefix(raw, prefix), "x")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	cols, errCols := strconv.Atoi(strings.TrimSpace(parts[0]))
+	rows, errRows := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if errCols != nil || errRows != nil || cols <= 0 || rows <= 0 {
+		return 0, 0, false
+	}
+	return cols, rows, true
+}
+
+func tileLayoutFitsCount(count, cols, rows int) bool {
+	if count <= 0 {
+		return true
+	}
+	if cols <= 0 || rows <= 0 {
+		return false
+	}
+	return rows >= (count+cols-1)/cols
 }
 
 // naturalProfileNameLess orders environments by display name with numeric

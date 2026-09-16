@@ -95,6 +95,7 @@ export async function updateSyncRandomDelay(enabled: boolean, minMs: number, max
 }
 
 export type TileLayoutMode = 'grid' | 'horizontal' | 'vertical'
+type TileLayoutRequest = TileLayoutMode | `custom:${number}x${number}`
 
 export interface TileWindowsResult {
   count: number
@@ -168,7 +169,7 @@ export async function updateSyncConfig(mouseEnabled: boolean, keyEnabled: boolea
 export async function syncTileWindows(
   profileIds: string[],
   masterProfileId?: string,
-  layoutMode: TileLayoutMode = 'grid',
+  layoutMode: TileLayoutRequest = 'grid',
 ): Promise<TileWindowsResult | null> {
   const bindings: any = await getBindings()
   if (bindings?.SyncTileWindows) {
