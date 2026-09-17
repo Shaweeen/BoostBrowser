@@ -20,6 +20,12 @@ behavior is intentionally retired.
 | --- | --- | --- | --- | --- | --- | --- |
 | CLEAN-118 | Per-existing-follower `findProcessTreeWindows` rebuilds during Add/Remove follower operations in `backend/app_sync_api.go` | `v1.7.138` (`3954537`) | A user adding or removing one follower caused every retained follower to be rediscovered. A transient process/window enumeration miss could silently remove an otherwise active follower from the dispatch set. | Add resolves only the one explicitly selected environment, then appends its HWND/debug-port pair to the active session. Remove deletes only its exact existing pair. Refresh/Start remain the sole authoritative live-discovery boundaries. | Alignment regressions for closed followers and follower removal; full Go tests; Windows amd64 test compilation/vet; frontend production build; packaging tests. | Inspect `git show 3954537:backend/app_sync_api.go`. Restore discovery only for the explicitly added environment; never restore a rebuild/scan of retained followers. |
 
+## v1.7.140 live DevTools-root PID resolution
+
+| ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
+| --- | --- | --- | --- | --- | --- | --- |
+| CLEAN-119 | Command-line process PID as the unconditional root for runtime sync discovery in `backend/browser_runtime_recovery_windows.go` | `v1.7.139` (`7092817`) | Chromium child processes can inherit both user-data-dir and remote-debugging-port arguments. Treating an arbitrary matching child as the root makes process-tree window lookup return no main HWND, even while the environment is visibly open. | The same explicit discovery pass now maps each debug port to its live Windows listening PID and uses that browser root for the HWND process tree; command-line PID remains the compatibility fallback when no listener lookup is available. | DevTools-listener PID regression; full Go tests; Windows amd64 test compilation/vet; frontend production build; packaging tests. | Inspect `git show 7092817:backend/browser_runtime_recovery_windows.go`. Restore command-line PID only as an explicit fallback; never remove the listener-root preference while Chrome inherits launcher flags. |
+
 ## v1.7.33 cleanup
 
 | ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |

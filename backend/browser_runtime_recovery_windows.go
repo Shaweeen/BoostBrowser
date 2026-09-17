@@ -29,9 +29,10 @@ type browserRuntimeProcess struct {
 }
 
 type winProcessSnapshot struct {
-	ProcessId      int    `json:"ProcessId"`
-	ExecutablePath string `json:"ExecutablePath"`
-	CommandLine    string `json:"CommandLine"`
+	ProcessId          int    `json:"ProcessId"`
+	ListeningProcessId int    `json:"ListeningProcessId"`
+	ExecutablePath     string `json:"ExecutablePath"`
+	CommandLine        string `json:"CommandLine"`
 }
 
 var (
@@ -314,6 +315,12 @@ func discoverBoostBrowserProcesses(appRoot string) ([]browserRuntimeProcess, err
 $root = %s
 $chromeRoot = [System.IO.Path]::GetFullPath((Join-Path $root 'chrome'))
 $dataRoot = [System.IO.Path]::GetFullPath((Join-Path $root 'data'))
+$listeners = @{}
+Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
+  if ($_.LocalPort -gt 0 -and -not $listeners.ContainsKey([int]$_.LocalPort)) {
+    $listeners[[int]$_.LocalPort] = [int]$_.OwningProcess
+  }
+}
 $items = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
   if (-not $_.CommandLine) { return $false }
   $cmd = $_.CommandLine
@@ -322,7 +329,21 @@ $items = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Obj
   $exeHit = $exe -and $exe.StartsWith($chromeRoot, [System.StringComparison]::OrdinalIgnoreCase)
   $dataHit = $cmd.IndexOf($dataRoot, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
   return ($exeHit -or $dataHit)
-} | Select-Object ProcessId, ExecutablePath, CommandLine
+} | ForEach-Object {
+  $port = 0
+  if ($_.CommandLine -match '(?i)(?:^|\s)"?--remote-debugging-port=(\d+)"?') {
+    $port = [int]$matches[1]
+  }
+  [PSCustomObject]@{
+    ProcessId = [int]$_.ProcessId
+    # A Chromium child can inherit the debug-port flag. The process actually
+    # listening on that port is the browser root and owns (or parents) the
+    # visible frame; use it when available instead of an arbitrary child PID.
+    ListeningProcessId = if ($port -gt 0 -and $listeners.ContainsKey($port)) { [int]$listeners[$port] } else { 0 }
+    ExecutablePath = [string]$_.ExecutablePath
+    CommandLine = [string]$_.CommandLine
+  }
+}
 @($items) | ConvertTo-Json -Depth 3 -Compress
 `, psSingleQuoted(root))
 
@@ -363,7 +384,7 @@ $items = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Obj
 			continue
 		}
 		processes = append(processes, browserRuntimeProcess{
-			PID:            item.ProcessId,
+			PID:            runtimeBrowserRootPID(item),
 			ExecutablePath: item.ExecutablePath,
 			CommandLine:    item.CommandLine,
 			UserDataDir:    userDataDir,
@@ -372,6 +393,18 @@ $items = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Obj
 	}
 	sort.Slice(processes, func(i, j int) bool { return processes[i].PID < processes[j].PID })
 	return processes, nil
+}
+
+// runtimeBrowserRootPID prefers the PID that is listening on the selected
+// DevTools port. Chromium propagates launch flags to child processes, so a
+// command-line-only scan can otherwise associate a profile with a renderer
+// that has no top-level frame. The listener is a live, action-time fact and
+// does not introduce persisted runtime handles or a background watcher.
+func runtimeBrowserRootPID(item winProcessSnapshot) int {
+	if item.ListeningProcessId > 0 {
+		return item.ListeningProcessId
+	}
+	return item.ProcessId
 }
 
 func parseChromeRuntimeCommandLine(commandLine string) (string, int) {

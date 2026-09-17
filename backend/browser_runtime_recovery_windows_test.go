@@ -33,3 +33,12 @@ func TestNormalizeRuntimePathKeyIgnoresCaseAndQuotes(t *testing.T) {
 		t.Fatalf("normalized keys differ: %q vs %q", left, right)
 	}
 }
+
+func TestRuntimeBrowserRootPIDPrefersDevToolsListener(t *testing.T) {
+	if got := runtimeBrowserRootPID(winProcessSnapshot{ProcessId: 3111, ListeningProcessId: 2444}); got != 2444 {
+		t.Fatalf("root PID=%d want listener PID 2444", got)
+	}
+	if got := runtimeBrowserRootPID(winProcessSnapshot{ProcessId: 3111}); got != 3111 {
+		t.Fatalf("root PID=%d want command-line PID 3111 fallback", got)
+	}
+}
