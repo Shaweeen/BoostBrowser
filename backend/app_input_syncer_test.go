@@ -4,6 +4,7 @@ package backend
 
 import (
 	"os"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -155,6 +156,42 @@ func TestPlanSyncSessionTargetsRetainsOnlyCurrentSessionTarget(t *testing.T) {
 	}
 	if len(followers) != 1 || followers[0] != windows.HWND(303) || next[0] != windows.HWND(303) {
 		t.Fatalf("followers=%v next=%v; active session target should be retained", followers, next)
+	}
+}
+
+func TestAlignSessionFollowerTargetsDoesNotShiftClosedFollower(t *testing.T) {
+	aligned := alignSessionFollowerTargets(
+		windows.HWND(100),
+		[]windows.HWND{0, 202, 303, 202},
+		func(hwnd windows.HWND) bool { return hwnd == 202 || hwnd == 303 },
+	)
+	want := []windows.HWND{0, 202, 303, 0}
+	if len(aligned) != len(want) {
+		t.Fatalf("aligned=%v want=%v", aligned, want)
+	}
+	for i := range want {
+		if aligned[i] != want[i] {
+			t.Fatalf("aligned=%v want=%v", aligned, want)
+		}
+	}
+}
+
+func TestRemoveSessionFollowerTargetKeepsRemainingPortPairs(t *testing.T) {
+	followers, ports := removeSessionFollowerTarget(
+		[]windows.HWND{101, 202, 303},
+		[]int{9101, 9202, 9303},
+		202,
+	)
+	if !reflect.DeepEqual(followers, []windows.HWND{101, 303}) {
+		t.Fatalf("followers=%v", followers)
+	}
+	if !reflect.DeepEqual(ports, []int{9101, 9303}) {
+		t.Fatalf("ports=%v", ports)
+	}
+
+	followers, ports = removeSessionFollowerTarget(followers, ports, 0)
+	if !reflect.DeepEqual(followers, []windows.HWND{101, 303}) || !reflect.DeepEqual(ports, []int{9101, 9303}) {
+		t.Fatalf("zero target must preserve active targets: followers=%v ports=%v", followers, ports)
 	}
 }
 

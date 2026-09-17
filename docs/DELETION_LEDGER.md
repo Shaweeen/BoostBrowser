@@ -14,6 +14,12 @@ behavior is intentionally retired.
    release wholesale because that can overwrite user data and unrelated fixes.
 5. Large deletions without an entry in this ledger fail the release health check.
 
+## v1.7.139 synchronization membership stability
+
+| ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |
+| --- | --- | --- | --- | --- | --- | --- |
+| CLEAN-118 | Per-existing-follower `findProcessTreeWindows` rebuilds during Add/Remove follower operations in `backend/app_sync_api.go` | `v1.7.138` (`3954537`) | A user adding or removing one follower caused every retained follower to be rediscovered. A transient process/window enumeration miss could silently remove an otherwise active follower from the dispatch set. | Add resolves only the one explicitly selected environment, then appends its HWND/debug-port pair to the active session. Remove deletes only its exact existing pair. Refresh/Start remain the sole authoritative live-discovery boundaries. | Alignment regressions for closed followers and follower removal; full Go tests; Windows amd64 test compilation/vet; frontend production build; packaging tests. | Inspect `git show 3954537:backend/app_sync_api.go`. Restore discovery only for the explicitly added environment; never restore a rebuild/scan of retained followers. |
+
 ## v1.7.33 cleanup
 
 | ID | Removed path | Last known revision | Reason | Replacement | Verification | Precise recovery |

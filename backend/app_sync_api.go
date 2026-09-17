@@ -449,7 +449,7 @@ func (a *App) repairActiveSyncSessionTargets(byID map[string]syncProfileCandidat
 	if !active || syncer == nil || masterID == "" {
 		return
 	}
-	master, followers, ports, _, ok := planSyncSessionTargets(masterID, followerIDs, prevTargets, byID, resolvedWindows)
+	master, followers, ports, nextTargets, ok := planSyncSessionTargets(masterID, followerIDs, prevTargets, byID, resolvedWindows)
 	if !ok {
 		// Master closed or unresolved: keep the old session; the user restarts.
 		return
@@ -458,23 +458,13 @@ func (a *App) repairActiveSyncSessionTargets(byID map[string]syncProfileCandidat
 	// comparison below is accurate and the session never churns on a stale keep.
 	filtered, filteredPorts := syncFollowerTargetsAligned(master, followers, ports, isWindow)
 	curMaster, curFollowers, curPorts := syncer.CurrentTargets()
-	if master == curMaster && slices.Equal(filtered, curFollowers) && slices.Equal(filteredPorts, curPorts) {
-		return
+	if master != curMaster || !slices.Equal(filtered, curFollowers) || !slices.Equal(filteredPorts, curPorts) {
+		syncer.ReplaceWindowTargets(master, filtered, filteredPorts)
 	}
-	syncer.ReplaceWindowTargets(master, filtered, filteredPorts)
-	// Publish the repaired targets back into syncState (master hint + the
-	// followerId-aligned target list) so the next repair can fall back to them.
-	kept := make([]windows.HWND, len(followerIDs))
-	idx := 0
-	for i, id := range followerIDs {
-		if strings.TrimSpace(id) == masterID {
-			continue
-		}
-		if idx < len(filtered) {
-			kept[i] = filtered[idx]
-			idx++
-		}
-	}
+	// Persist a profile-ID-aligned hint list. The compact dispatch list omits a
+	// closed follower; writing it back by position would shift follower #2 into
+	// follower #1's slot and could route a later repair to the wrong window.
+	kept := alignSessionFollowerTargets(master, nextTargets, isWindow)
 	syncState.mu.Lock()
 	if isWindow(master) {
 		syncState.masterHwnd = master
@@ -482,6 +472,45 @@ func (a *App) repairActiveSyncSessionTargets(byID map[string]syncProfileCandidat
 	syncState.followerTargets = kept
 	syncState.mu.Unlock()
 	a.lifecycleLog("sync-session-repair", fmt.Sprintf("followers=%d", len(filtered)))
+}
+
+func alignSessionFollowerTargets(master windows.HWND, candidates []windows.HWND, alive func(windows.HWND) bool) []windows.HWND {
+	aligned := make([]windows.HWND, len(candidates))
+	seen := map[windows.HWND]struct{}{master: {}}
+	for i, hwnd := range candidates {
+		if hwnd == 0 || hwnd == master || (alive != nil && !alive(hwnd)) {
+			continue
+		}
+		if _, duplicate := seen[hwnd]; duplicate {
+			continue
+		}
+		seen[hwnd] = struct{}{}
+		aligned[i] = hwnd
+	}
+	return aligned
+}
+
+// removeSessionFollowerTarget removes one exact HWND while retaining the port
+// paired with every surviving active target. A zero target means the profile
+// was already absent from the dispatch set, so nothing else may be removed.
+func removeSessionFollowerTarget(followers []windows.HWND, ports []int, removed windows.HWND) ([]windows.HWND, []int) {
+	if removed == 0 {
+		return append([]windows.HWND(nil), followers...), append([]int(nil), ports...)
+	}
+	keptFollowers := make([]windows.HWND, 0, len(followers))
+	keptPorts := make([]int, 0, len(followers))
+	for i, hwnd := range followers {
+		if hwnd == removed {
+			continue
+		}
+		keptFollowers = append(keptFollowers, hwnd)
+		port := 0
+		if i < len(ports) {
+			port = ports[i]
+		}
+		keptPorts = append(keptPorts, port)
+	}
+	return keptFollowers, keptPorts
 }
 
 // StartInputSync 启动输入同步
@@ -533,6 +562,7 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	followers := make([]followerCandidate, 0, len(followerProfileIds))
 	seenFollowerIDs := make(map[string]struct{}, len(followerProfileIds))
 	seenFollowerPIDs := map[int]struct{}{masterSnapshot.Pid: {}}
+	invalidFollowerIDs := make([]string, 0)
 	for _, rawFollowerID := range followerProfileIds {
 		fid := strings.TrimSpace(rawFollowerID)
 		if fid == "" {
@@ -548,15 +578,20 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 		seenFollowerIDs[fid] = struct{}{}
 		fp, ok := a.browserMgr.Profiles[fid]
 		if !ok || !fp.Running || fp.Pid <= 0 {
+			invalidFollowerIDs = append(invalidFollowerIDs, fid)
 			continue
 		}
 		if _, duplicateProcess := seenFollowerPIDs[fp.Pid]; duplicateProcess {
+			invalidFollowerIDs = append(invalidFollowerIDs, fid)
 			continue
 		}
 		seenFollowerPIDs[fp.Pid] = struct{}{}
 		followers = append(followers, followerCandidate{id: fid, profile: *fp})
 	}
 	a.browserMgr.Mutex.Unlock()
+	if len(invalidFollowerIDs) > 0 {
+		return fmt.Errorf("所选跟随环境已不在运行清单或窗口重复：%s；请刷新后重新选择", strings.Join(invalidFollowerIDs, "、"))
+	}
 
 	type followerWindow struct {
 		hwnd      windows.HWND
@@ -574,6 +609,9 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	resolved := make([]followerWindow, len(followers))
 	for i, candidate := range followers {
 		hwnd := resolveLiveMainEnvironmentFrame(candidate.profile.Pid, resolvedWindows[candidate.profile.Pid])
+		if hwnd == 0 {
+			return fmt.Errorf("所选跟随环境没有可用主窗口：%s；请刷新后重新选择", candidate.id)
+		}
 		resolved[i] = followerWindow{hwnd: hwnd, debugPort: candidate.profile.DebugPort}
 	}
 
@@ -586,7 +624,7 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 			continue
 		}
 		if _, duplicateWindow := seenFollowerWindows[item.hwnd]; duplicateWindow {
-			continue
+			return fmt.Errorf("所选跟随环境窗口重复：%s；请刷新后重新选择", followers[i].id)
 		}
 		seenFollowerWindows[item.hwnd] = struct{}{}
 		followerHwnds = append(followerHwnds, item.hwnd)
@@ -1255,37 +1293,32 @@ func (a *App) addFollowerToSyncLocal(profileId string) error {
 			return fmt.Errorf("环境 %s 已在跟随列表中", profileId)
 		}
 	}
-	syncState.followerIds = append(syncState.followerIds, profileId)
-	syncState.followerTargets = append(syncState.followerTargets, hwnd)
-	// 构建新的 follower HWNDs 和 ports
-	newFollowerIds := append([]string(nil), syncState.followerIds...)
+	syncer := syncState.syncer
 	syncState.mu.Unlock()
 
-	// 重建 follower HWNDs 和 ports
-	followerHwnds := make([]windows.HWND, 0, len(newFollowerIds))
-	followerPorts := make([]int, 0, len(newFollowerIds))
-	a.browserMgr.Mutex.Lock()
-	for _, fid := range newFollowerIds {
-		if fid == masterId {
-			continue
+	// A membership edit must not re-discover every existing follower: a brief
+	// process-enumeration miss would otherwise silently drop an already synced
+	// window. Keep the active dispatch set and append only the user-selected,
+	// freshly resolved environment.
+	curMaster, curFollowers, curPorts := syncer.CurrentTargets()
+	for _, current := range curFollowers {
+		if current == hwnd {
+			return fmt.Errorf("环境 %s 的窗口已在同步列表中", profileId)
 		}
-		fp, ok := a.browserMgr.Profiles[fid]
-		if !ok || fp == nil || !fp.Running || fp.Pid <= 0 {
-			continue
-		}
-		resolved := findProcessTreeWindows([]int{fp.Pid})
-		fHwnd := resolveLiveMainEnvironmentFrame(fp.Pid, resolved[fp.Pid])
-		if fHwnd == 0 {
-			continue
-		}
-		followerHwnds = append(followerHwnds, fHwnd)
-		followerPorts = append(followerPorts, fp.DebugPort)
 	}
-	a.browserMgr.Mutex.Unlock()
+	curFollowers = append(curFollowers, hwnd)
+	curPorts = append(curPorts, profileSnapshot.DebugPort)
 
-	// 更新同步器目标
-	curMaster, _, _ := syncState.syncer.CurrentTargets()
-	syncState.syncer.ReplaceWindowTargets(curMaster, followerHwnds, followerPorts)
+	syncState.mu.Lock()
+	if !syncState.active || syncState.syncer != syncer {
+		syncState.mu.Unlock()
+		return fmt.Errorf("同步已停止")
+	}
+	syncState.followerIds = append(syncState.followerIds, profileId)
+	syncState.followerTargets = append(syncState.followerTargets, hwnd)
+	newFollowerIds := append([]string(nil), syncState.followerIds...)
+	syncState.mu.Unlock()
+	syncer.ReplaceWindowTargets(curMaster, curFollowers, curPorts)
 
 	atomic.AddUint64(&syncSnapshotGeneration, 1)
 	log.Info("已添加跟随环境",
@@ -1319,17 +1352,20 @@ func (a *App) removeFollowerFromSyncLocal(profileId string) error {
 		syncState.mu.Unlock()
 		return fmt.Errorf("同步未启动")
 	}
-	masterId := strings.TrimSpace(syncState.masterId)
 	oldFollowerIds := syncState.followerIds
 	oldFollowerTargets := syncState.followerTargets
 
 	// 查找并移除
 	found := false
+	removedTarget := windows.HWND(0)
 	newFollowerIds := make([]string, 0, len(oldFollowerIds))
 	newTargets := make([]windows.HWND, 0, len(oldFollowerIds))
 	for i, fid := range oldFollowerIds {
 		if fid == profileId {
 			found = true
+			if i < len(oldFollowerTargets) {
+				removedTarget = oldFollowerTargets[i]
+			}
 			continue
 		}
 		newFollowerIds = append(newFollowerIds, fid)
@@ -1345,30 +1381,10 @@ func (a *App) removeFollowerFromSyncLocal(profileId string) error {
 	syncState.followerTargets = newTargets
 	syncState.mu.Unlock()
 
-	// 重建 follower HWNDs 和 ports
-	followerHwnds := make([]windows.HWND, 0, len(newFollowerIds))
-	followerPorts := make([]int, 0, len(newFollowerIds))
-	a.browserMgr.Mutex.Lock()
-	for _, fid := range newFollowerIds {
-		if fid == masterId {
-			continue
-		}
-		fp, ok := a.browserMgr.Profiles[fid]
-		if !ok || fp == nil || !fp.Running || fp.Pid <= 0 {
-			continue
-		}
-		resolved := findProcessTreeWindows([]int{fp.Pid})
-		fHwnd := resolved[fp.Pid]
-		if fHwnd == 0 {
-			continue
-		}
-		followerHwnds = append(followerHwnds, fHwnd)
-		followerPorts = append(followerPorts, fp.DebugPort)
-	}
-	a.browserMgr.Mutex.Unlock()
-
-	// 更新同步器目标
-	curMaster, _, _ := syncState.syncer.CurrentTargets()
+	// Removing a follower is a pure session-state operation. Do not rescan the
+	// remaining windows: their active HWND/port pairs stay untouched.
+	curMaster, curFollowers, curPorts := syncState.syncer.CurrentTargets()
+	followerHwnds, followerPorts := removeSessionFollowerTarget(curFollowers, curPorts, removedTarget)
 	syncState.syncer.ReplaceWindowTargets(curMaster, followerHwnds, followerPorts)
 
 	atomic.AddUint64(&syncSnapshotGeneration, 1)
