@@ -4,12 +4,9 @@ package backend
 
 import (
 	"fmt"
-	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -32,40 +29,30 @@ var syncState struct {
 	masterId    string
 	active      bool
 
-	// followerTargets mirrors the syncer's dispatch list, aligned 1:1 with
-	// followerIds (0 = env currently not dispatched). Maintained by the sync
-	// start/stop, tile and live-repair paths so a follower whose process is
-	// alive but whose frame is temporarily unresolved keeps its previous target
-	// instead of flapping out of the session for one poll.
+	// followerTargets mirrors the fixed collection used by this session. It is
+	// changed only by an explicit user add/remove action, never by scanning.
 	followerTargets []windows.HWND
+	followerPorts   []int
 }
 
 var syncSessionMu sync.Mutex
-var syncSnapshotGeneration uint64
-
-// maybeReloadSyncProfilesFromDB throttles the panel's periodic SQLite
-// profile-table reload. The assistant is a separate process whose in-memory
-// profile map is only loaded once; without this, environments created in the
-// main client after the assistant started never appear in the sync list. The
-// main client's map is already authoritative and must not be re-read here.
-func (a *App) maybeReloadSyncProfilesFromDB() {
-	if a == nil || !a.panelMode || a.browserMgr == nil || a.browserMgr.ProfileDAO == nil {
-		return
-	}
-	if time.Since(a.syncProfileReloadAt) < 5*time.Second {
-		return
-	}
-	a.syncProfileReloadAt = time.Now()
-	a.browserMgr.ReloadProfilesFromDAO()
-}
 
 func (a *App) GetSyncSnapshot() SyncSnapshot {
+	if a.panelMode {
+		return a.requestMainSyncCollection(false)
+	}
+	return a.collectSyncSnapshotForPanel(false)
+}
+
+func (a *App) collectSyncSnapshotForPanel(_ bool) SyncSnapshot {
 	syncSessionMu.Lock()
 	defer syncSessionMu.Unlock()
+	profiles := a.getSyncProfilesLocal()
+	generation := a.syncCollection.replace(profiles)
 	return SyncSnapshot{
-		Profiles:   a.getSyncProfilesLocal(),
+		Profiles:   profiles,
 		Status:     a.getSyncStatusLocal(),
-		Generation: atomic.LoadUint64(&syncSnapshotGeneration),
+		Generation: generation,
 	}
 }
 
@@ -79,30 +66,13 @@ func (a *App) GetSyncProfiles() []SyncProfileInfo {
 	return a.getSyncProfilesLocal()
 }
 
-// RefreshSyncSnapshot is the explicit-refresh entry for the assistant UI. It
-// bypasses the short-lived process-scan cache so a just-started environment is
-// visible immediately instead of returning the stale list from the previous
-// 2-second window. The cache is invalidated once; getSyncProfilesLocal then
-// performs exactly one fresh scan.
+// RefreshSyncSnapshot asks the main client for one new complete collection.
+// It never changes an already-running sync session's target handles.
 func (a *App) RefreshSyncSnapshot() SyncSnapshot {
-	invalidateBrowserProcessDiscoveryCache()
-	syncSessionMu.Lock()
-	defer syncSessionMu.Unlock()
-	return SyncSnapshot{
-		Profiles:   a.getSyncProfilesLocal(),
-		Status:     a.getSyncStatusLocal(),
-		Generation: atomic.LoadUint64(&syncSnapshotGeneration),
+	if a.panelMode {
+		return a.requestMainSyncCollection(true)
 	}
-}
-
-// syncProfileCandidate is one live-discovered environment in the sync panel's
-// refresh scan. It contains only current process/runtime data.
-type syncProfileCandidate struct {
-	profileID   string
-	profileName string
-	pid         int
-	debugPort   int
-	badge       int
+	return a.collectSyncSnapshotForPanel(true)
 }
 
 // resolveLiveMainEnvironmentFrame accepts a candidate from the current batch
@@ -117,371 +87,57 @@ func resolveLiveMainEnvironmentFrame(rootPID int, candidate windows.HWND) window
 }
 
 func (a *App) getSyncProfilesLocal() []SyncProfileInfo {
-	// The panel is a separate process: re-read the profile table from SQLite so
-	// environments created in the main client become visible (throttled).
-	a.maybeReloadSyncProfilesFromDB()
-	// Discover from already-started client environments through the current
-	// process tree and their live debug-port files. The selected, currently
-	// open environment set is the sole source for the sync panel.
-	byID := make(map[string]syncProfileCandidate, 64)
-	rootPIDs := make([]int, 0, 64)
-
-	// NOTE: do not hold browserMgr.Mutex here — List() locks internally.
-	profiles := a.browserMgr.List()
-	profileByDataDir := make(map[string]BrowserProfile, len(profiles))
-	profileByFolder := make(map[string]BrowserProfile, len(profiles))
-	for _, p := range profiles {
-		ud := a.browserMgr.ResolveUserDataDir(&p)
-		key := normalizeRuntimePathKey(ud)
-		if key != "" {
-			profileByDataDir[key] = p
-			folder := strings.ToLower(filepath.Base(key))
-			if folder != "" && folder != "." {
-				// Last write wins if folders collide; full path match preferred first.
-				if _, exists := profileByFolder[folder]; !exists {
-					profileByFolder[folder] = p
-				}
-			}
-		}
-	}
-
-	matchProfile := func(userDataDir string) (BrowserProfile, bool) {
-		key := normalizeRuntimePathKey(userDataDir)
-		if key == "" {
-			return BrowserProfile{}, false
-		}
-		if p, ok := profileByDataDir[key]; ok {
-			return p, true
-		}
-		// Fallback: folder name match (path prefix/suffix drift across roots).
-		if p, ok := profileByFolder[strings.ToLower(filepath.Base(key))]; ok {
-			return p, true
-		}
-		return BrowserProfile{}, false
-	}
-
-	// 1) Primary: live Chromium process scan (user-data-dir + debug port).
-	// The sync panel is a separate process whose only runtime source is this
-	// scan. The main client already owns authoritative runtime state (set by
-	// its start/stop paths); running the PowerShell CIM query on every
-	// sync-page poll inside the main Wails host is the same background-work
-	// class implicated in the exit_code=2 watchdog history, so it is skipped
-	// outside panel mode (the main client's own map + DevTools port files cover
-	// the same environments).
-	var liveProcesses []browserRuntimeProcess
 	if a.panelMode {
-		liveProcesses, _ = discoverBoostBrowserProcessesCached(a.appRoot)
+		_, profiles := a.syncCollection.snapshot()
+		return profiles
 	}
-	byDataDir := make(map[string][]browserRuntimeProcess)
-	portToPID := make(map[int]int, len(liveProcesses))
-	for _, proc := range liveProcesses {
-		key := normalizeRuntimePathKey(proc.UserDataDir)
-		if key != "" {
-			byDataDir[key] = append(byDataDir[key], proc)
-		}
-		if proc.DebugPort > 0 && proc.PID > 0 {
-			if _, ok := portToPID[proc.DebugPort]; !ok {
-				portToPID[proc.DebugPort] = proc.PID
-			}
-		}
-	}
-	for key, list := range byDataDir {
-		p, ok := matchProfile(key)
-		if !ok {
-			// Try raw key as path for matchProfile
-			p, ok = matchProfile(list[0].UserDataDir)
-		}
-		if !ok {
-			continue
-		}
-		proc := list[0]
-		for _, item := range list[1:] {
-			if item.PID > 0 && item.DebugPort > 0 && (proc.PID <= 0 || item.PID < proc.PID) {
-				proc = item
-			}
-		}
-		if proc.PID <= 0 {
-			continue
-		}
-		byID[p.ProfileId] = syncProfileCandidate{
-			profileID:   p.ProfileId,
-			profileName: p.ProfileName,
-			pid:         proc.PID,
-			debugPort:   proc.DebugPort,
-			badge:       extractBadgeNumberFromName(p.ProfileName),
-		}
-		rootPIDs = append(rootPIDs, proc.PID)
-	}
+	return a.collectMainClientSyncProfiles()
 
-	// 2) Secondary: DevToolsActivePort for every configured profile dir.
-	for _, p := range profiles {
-		if _, exists := byID[p.ProfileId]; exists {
+}
+
+// collectMainClientSyncProfiles takes exactly one main-client-owned snapshot.
+// It trusts the runtime state maintained by BrowserManager and resolves HWNDs
+// in one bounded batch. It does not enumerate unrelated Chromium processes,
+// reload SQLite, or run on a timer.
+func (a *App) collectMainClientSyncProfiles() []SyncProfileInfo {
+	if a == nil || a.browserMgr == nil {
+		return nil
+	}
+	profiles := a.browserMgr.List()
+	running := make([]BrowserProfile, 0, len(profiles))
+	pids := make([]int, 0, len(profiles))
+	seenPIDs := make(map[int]struct{}, len(profiles))
+	for _, profile := range profiles {
+		if !profile.Running || profile.Pid <= 0 || !isProcessAlive(profile.Pid) {
 			continue
 		}
-		userDataDir := a.browserMgr.ResolveUserDataDir(&p)
-		port, err := readBrowserDebugPortFile(userDataDir)
-		if err != nil || port <= 0 {
-			continue
-		}
-		if !canConnectDebugPort(port, 180*time.Millisecond) {
-			continue
-		}
-		pid := portToPID[port]
-		if pid <= 0 && p.Pid > 0 && isProcessAlive(p.Pid) {
-			pid = p.Pid
-		}
-		byID[p.ProfileId] = syncProfileCandidate{
-			profileID:   p.ProfileId,
-			profileName: p.ProfileName,
-			pid:         pid,
-			debugPort:   port,
-			badge:       extractBadgeNumberFromName(p.ProfileName),
-		}
-		if pid > 0 {
-			rootPIDs = append(rootPIDs, pid)
+		running = append(running, profile)
+		if _, exists := seenPIDs[profile.Pid]; !exists {
+			seenPIDs[profile.Pid] = struct{}{}
+			pids = append(pids, profile.Pid)
 		}
 	}
-
-	// The assistant must not use a persisted Running/PID flag as a third
-	// discovery source: a reused PID can otherwise describe a different window.
-	// Non-panel callers retain their own in-process runtime fallback for
-	// diagnostics, but the standalone sync panel is live-discovery-only.
-	if !a.panelMode {
-		for _, p := range profiles {
-			if !p.Running || p.Pid <= 0 {
-				continue
-			}
-			if _, exists := byID[p.ProfileId]; exists {
-				continue
-			}
-			if !isProcessAlive(p.Pid) {
-				continue
-			}
-			byID[p.ProfileId] = syncProfileCandidate{
-				profileID:   p.ProfileId,
-				profileName: p.ProfileName,
-				pid:         p.Pid,
-				debugPort:   p.DebugPort,
-				badge:       extractBadgeNumberFromName(p.ProfileName),
-			}
-			rootPIDs = append(rootPIDs, p.Pid)
-		}
+	resolved := findProcessTreeWindows(pids)
+	for _, pid := range pids {
+		resolved[pid] = resolveLiveMainEnvironmentFrame(pid, resolved[pid])
 	}
-
-	pidSeen := map[int]struct{}{}
-	uniquePIDs := make([]int, 0, len(rootPIDs))
-	for _, pid := range rootPIDs {
-		if pid <= 0 {
-			continue
-		}
-		if _, ok := pidSeen[pid]; ok {
-			continue
-		}
-		pidSeen[pid] = struct{}{}
-		uniquePIDs = append(uniquePIDs, pid)
-	}
-
-	resolvedWindows := findProcessTreeWindows(uniquePIDs)
-	for _, pid := range uniquePIDs {
-		resolvedWindows[pid] = resolveLiveMainEnvironmentFrame(pid, resolvedWindows[pid])
-	}
-	missing := 0
-	for _, c := range byID {
-		if c.pid > 0 && resolvedWindows[c.pid] == 0 {
-			missing++
-		}
-	}
-	if missing > 0 && (missing >= 2 || missing*3 >= len(byID)+1) {
-		time.Sleep(220 * time.Millisecond)
-		resolvedWindows = findProcessTreeWindows(uniquePIDs)
-		for _, pid := range uniquePIDs {
-			resolvedWindows[pid] = resolveLiveMainEnvironmentFrame(pid, resolvedWindows[pid])
-		}
-	}
-
-	// Authoritative write-back: only live-discovered envs are Running. The sync
-	// panel is a separate process whose in-memory map is otherwise stale, so the
-	// live scan is its sole runtime owner. The main client keeps the runtime
-	// state its own start/stop paths set — a transient scan miss there must
-	// never flip a live environment to stopped.
-	if a.browserMgr != nil && a.panelMode {
-		a.browserMgr.Mutex.Lock()
-		for id, p := range a.browserMgr.Profiles {
-			if p == nil {
-				continue
-			}
-			if _, ok := byID[id]; !ok {
-				// A process-discovery miss is not proof that an environment
-				// stopped. Preserve the last known runtime while Chromium is
-				// still alive so an empty/slow CIM scan cannot poison sync.
-				if p.Running && p.Pid > 0 && isProcessAlive(p.Pid) {
-					continue
-				}
-				p.Running = false
-				p.Pid = 0
-				p.DebugPort = 0
-				p.DebugReady = false
-			}
-		}
-		for id, c := range byID {
-			p := a.browserMgr.Profiles[id]
-			if p == nil {
-				p = &BrowserProfile{ProfileId: id, ProfileName: c.profileName}
-				a.browserMgr.Profiles[id] = p
-			}
-			p.Running = true
-			if c.pid > 0 {
-				p.Pid = c.pid
-			}
-			if c.debugPort > 0 {
-				p.DebugPort = c.debugPort
-				p.DebugReady = true
-			}
-			if strings.TrimSpace(p.ProfileName) == "" {
-				p.ProfileName = c.profileName
-			}
-		}
-		a.browserMgr.Mutex.Unlock()
-	}
-
-	result := make([]SyncProfileInfo, 0, len(byID))
-	for _, c := range byID {
+	result := make([]SyncProfileInfo, 0, len(running))
+	for _, profile := range running {
 		info := SyncProfileInfo{
-			ProfileId:   c.profileID,
-			ProfileName: c.profileName,
-			Pid:         c.pid,
-			DebugPort:   c.debugPort,
-			Running:     true,
-			BadgeNumber: c.badge,
+			ProfileId: profile.ProfileId, ProfileName: profile.ProfileName,
+			Pid: profile.Pid, DebugPort: profile.DebugPort, Running: true,
+			BadgeNumber: extractBadgeNumberFromName(profile.ProfileName), Status: "no_window",
 		}
-		hwnd := windows.HWND(0)
-		if c.pid > 0 {
-			hwnd = resolvedWindows[c.pid]
-		}
-		if hwnd != 0 && isWindow(hwnd) {
+		if hwnd := resolved[profile.Pid]; hwnd != 0 && isWindow(hwnd) {
 			info.Hwnd = int64(hwnd)
 			info.Status = "running"
-		} else {
-			info.Status = "no_window"
 		}
 		result = append(result, info)
 	}
-
-	// Keep an active sync session pointed at the live environment set: if a
-	// follower was closed and reopened (new PID/HWND/debug port), repair the
-	// session targets now so sync continues without a restart or re-tile.
-	a.repairActiveSyncSessionTargets(byID, resolvedWindows)
-
+	sort.SliceStable(result, func(i, j int) bool {
+		return naturalProfileNameLess(result[i].ProfileName, result[i].ProfileId, result[j].ProfileName, result[j].ProfileId)
+	})
 	return result
-}
-
-// planSyncSessionTargets computes the next master/follower dispatch targets for
-// an active session from a fresh live scan. Followers whose environment is gone
-// are dropped; followers whose process is alive but whose frame is temporarily
-// unresolved keep their previous target (prevTargets, aligned with followerIds)
-// so a single transient scan miss never flaps them out. Returns ok=false when
-// the master is gone or unresolved — the session must be restarted by the user.
-func planSyncSessionTargets(
-	masterID string,
-	followerIDs []string,
-	prevTargets []windows.HWND,
-	byID map[string]syncProfileCandidate,
-	resolvedWindows map[int]windows.HWND,
-) (master windows.HWND, followers []windows.HWND, ports []int, nextTargets []windows.HWND, ok bool) {
-	resolveOne := func(id string, prev windows.HWND) (windows.HWND, int) {
-		c, found := byID[id]
-		if !found || c.pid <= 0 {
-			return 0, 0 // environment closed
-		}
-		hwnd := resolvedWindows[c.pid]
-		if hwnd == 0 {
-			// A single scan can miss a frame while Chromium is moving between
-			// processes. Keep only the target already owned by this active session;
-			// never substitute a persisted HWND from another run.
-			hwnd = prev
-		}
-		return hwnd, c.debugPort
-	}
-	master, _ = resolveOne(masterID, 0)
-	if master == 0 {
-		return 0, nil, nil, nil, false
-	}
-	nextTargets = make([]windows.HWND, len(followerIDs))
-	followers = make([]windows.HWND, 0, len(followerIDs))
-	ports = make([]int, 0, len(followerIDs))
-	for i, id := range followerIDs {
-		if strings.TrimSpace(id) == masterID {
-			continue
-		}
-		prev := windows.HWND(0)
-		if i < len(prevTargets) {
-			prev = prevTargets[i]
-		}
-		hwnd, port := resolveOne(id, prev)
-		nextTargets[i] = hwnd
-		if hwnd == 0 {
-			continue
-		}
-		followers = append(followers, hwnd)
-		ports = append(ports, port)
-	}
-	return master, followers, ports, nextTargets, true
-}
-
-// repairActiveSyncSessionTargets re-resolves the active session's master and
-// follower windows from the freshest live scan. A closed-and-reopened follower
-// gets its new HWND and debug port so input + CDP URL sync keep working
-// without stopping and restarting the session. The session member list
-// (masterId/followerIds) is never changed here; the same isWindow filter the
-// syncer applies is run before the change comparison so a kept-stale target is
-// dropped consistently and never churns on every poll.
-func (a *App) repairActiveSyncSessionTargets(byID map[string]syncProfileCandidate, resolvedWindows map[int]windows.HWND) {
-	if a == nil || !a.panelMode {
-		return
-	}
-	syncState.mu.Lock()
-	syncer := syncState.syncer
-	active := syncState.active
-	masterID := strings.TrimSpace(syncState.masterId)
-	followerIDs := append([]string(nil), syncState.followerIds...)
-	prevTargets := append([]windows.HWND(nil), syncState.followerTargets...)
-	syncState.mu.Unlock()
-	if !active || syncer == nil || masterID == "" {
-		return
-	}
-	master, followers, ports, _, ok := planSyncSessionTargets(masterID, followerIDs, prevTargets, byID, resolvedWindows)
-	if !ok {
-		// Master closed or unresolved: keep the old session; the user restarts.
-		return
-	}
-	// Run the same dead-window filter ReplaceWindowTargets applies so the change
-	// comparison below is accurate and the session never churns on a stale keep.
-	filtered, filteredPorts := syncFollowerTargetsAligned(master, followers, ports, isWindow)
-	curMaster, curFollowers, curPorts := syncer.CurrentTargets()
-	if master == curMaster && slices.Equal(filtered, curFollowers) && slices.Equal(filteredPorts, curPorts) {
-		return
-	}
-	syncer.ReplaceWindowTargets(master, filtered, filteredPorts)
-	// Publish the repaired targets back into syncState (master hint + the
-	// followerId-aligned target list) so the next repair can fall back to them.
-	kept := make([]windows.HWND, len(followerIDs))
-	idx := 0
-	for i, id := range followerIDs {
-		if strings.TrimSpace(id) == masterID {
-			continue
-		}
-		if idx < len(filtered) {
-			kept[i] = filtered[idx]
-			idx++
-		}
-	}
-	syncState.mu.Lock()
-	if isWindow(master) {
-		syncState.masterHwnd = master
-	}
-	syncState.followerTargets = kept
-	syncState.mu.Unlock()
-	a.lifecycleLog("sync-session-repair", fmt.Sprintf("followers=%d", len(filtered)))
 }
 
 // StartInputSync 启动输入同步
@@ -498,109 +154,72 @@ func (a *App) StartInputSync(masterProfileId string, followerProfileIds []string
 func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []string) error {
 	syncSessionMu.Lock()
 	defer syncSessionMu.Unlock()
-	log := logger.New("SyncAPI")
-	// Live scan from already-started client envs (same as GetSyncProfiles).
-	// The selected profile IDs are the session source of truth. Resolve their
-	// current main frames from the live process tree below; do not reuse a
-	// persisted HWND here because a closed/reopened environment can leave that
-	// handle alive long enough for the first toolbar click to hit the wrong
-	// window. Sync is input-only — never closes user work tabs.
-	_ = a.getSyncProfilesLocal()
+	return a.startInputSyncFromCollection(masterProfileId, followerProfileIds)
 
-	masterProfileId = strings.TrimSpace(masterProfileId)
-	if masterProfileId == "" {
+}
+
+func (a *App) startInputSyncFromCollection(masterProfileID string, followerProfileIDs []string) error {
+	log := logger.New("SyncAPI")
+	generation, profiles := a.syncCollection.snapshot()
+	if generation == 0 {
+		return fmt.Errorf("尚未从主客户端获取窗口数据，请点击刷新")
+	}
+	byID := make(map[string]SyncProfileInfo, len(profiles))
+	for _, profile := range profiles {
+		byID[profile.ProfileId] = profile
+	}
+	validate := func(id, role string) (SyncProfileInfo, windows.HWND, error) {
+		profile, ok := byID[id]
+		if !ok || !profile.Running || profile.Pid <= 0 || profile.Hwnd == 0 {
+			return SyncProfileInfo{}, 0, fmt.Errorf("%s环境窗口数据无效：%s，请点击刷新", role, id)
+		}
+		hwnd := windows.HWND(profile.Hwnd)
+		if !isWindow(hwnd) || !isMainEnvironmentBrowserFrame(hwnd, getWindowTitle(hwnd)) {
+			return SyncProfileInfo{}, 0, fmt.Errorf("%s环境窗口已失效：%s，请点击刷新", role, id)
+		}
+		return profile, hwnd, nil
+	}
+
+	masterProfileID = strings.TrimSpace(masterProfileID)
+	if masterProfileID == "" {
 		return fmt.Errorf("必须且只能指定一个主控实例")
 	}
-
-	// 查找唯一主控实例
-	a.browserMgr.Mutex.Lock()
-	masterProfile, ok := a.browserMgr.Profiles[masterProfileId]
-	if !ok {
-		a.browserMgr.Mutex.Unlock()
-		return fmt.Errorf("未找到主控实例：%s", masterProfileId)
+	master, masterHWND, err := validate(masterProfileID, "主控")
+	if err != nil {
+		return err
 	}
-	if !masterProfile.Running || masterProfile.Pid <= 0 {
-		a.browserMgr.Mutex.Unlock()
-		return fmt.Errorf("主控实例未在运行：%s（请确认该环境已在主客户端启动）", masterProfileId)
-	}
-	masterSnapshot := *masterProfile
-
-	// 收集跟随窗口
-	type followerCandidate struct {
-		id      string
-		profile BrowserProfile
-	}
-	followers := make([]followerCandidate, 0, len(followerProfileIds))
-	seenFollowerIDs := make(map[string]struct{}, len(followerProfileIds))
-	seenFollowerPIDs := map[int]struct{}{masterSnapshot.Pid: {}}
-	for _, rawFollowerID := range followerProfileIds {
-		fid := strings.TrimSpace(rawFollowerID)
-		if fid == "" {
+	seenIDs := map[string]struct{}{masterProfileID: {}}
+	seenHWNDs := map[windows.HWND]struct{}{masterHWND: {}}
+	followerIDs := make([]string, 0, len(followerProfileIDs))
+	followerHWNDs := make([]windows.HWND, 0, len(followerProfileIDs))
+	followerPorts := make([]int, 0, len(followerProfileIDs))
+	for _, rawID := range followerProfileIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
 			continue
 		}
-		if fid == masterProfileId {
-			a.browserMgr.Mutex.Unlock()
-			return fmt.Errorf("主控实例不能同时出现在跟随列表：%s", fid)
-		}
-		if _, duplicate := seenFollowerIDs[fid]; duplicate {
+		if _, duplicate := seenIDs[id]; duplicate {
+			if id == masterProfileID {
+				return fmt.Errorf("主控实例不能同时出现在跟随列表：%s", id)
+			}
 			continue
 		}
-		seenFollowerIDs[fid] = struct{}{}
-		fp, ok := a.browserMgr.Profiles[fid]
-		if !ok || !fp.Running || fp.Pid <= 0 {
-			continue
+		seenIDs[id] = struct{}{}
+		profile, hwnd, validateErr := validate(id, "跟随")
+		if validateErr != nil {
+			return validateErr
 		}
-		if _, duplicateProcess := seenFollowerPIDs[fp.Pid]; duplicateProcess {
-			continue
+		if _, duplicate := seenHWNDs[hwnd]; duplicate {
+			return fmt.Errorf("窗口数据冲突：环境 %s 与其他环境指向同一窗口，请点击刷新", id)
 		}
-		seenFollowerPIDs[fp.Pid] = struct{}{}
-		followers = append(followers, followerCandidate{id: fid, profile: *fp})
+		seenHWNDs[hwnd] = struct{}{}
+		followerIDs = append(followerIDs, id)
+		followerHWNDs = append(followerHWNDs, hwnd)
+		followerPorts = append(followerPorts, profile.DebugPort)
 	}
-	a.browserMgr.Mutex.Unlock()
-
-	type followerWindow struct {
-		hwnd      windows.HWND
-		debugPort int
-	}
-	rootPIDs := []int{masterSnapshot.Pid}
-	for _, candidate := range followers {
-		rootPIDs = append(rootPIDs, candidate.profile.Pid)
-	}
-	resolvedWindows := findProcessTreeWindows(rootPIDs)
-	masterHwnd := resolveLiveMainEnvironmentFrame(masterSnapshot.Pid, resolvedWindows[masterSnapshot.Pid])
-	if masterHwnd == 0 {
-		return fmt.Errorf("未找到主控实例窗口")
-	}
-	resolved := make([]followerWindow, len(followers))
-	for i, candidate := range followers {
-		hwnd := resolveLiveMainEnvironmentFrame(candidate.profile.Pid, resolvedWindows[candidate.profile.Pid])
-		resolved[i] = followerWindow{hwnd: hwnd, debugPort: candidate.profile.DebugPort}
-	}
-
-	var followerHwnds []windows.HWND
-	var followerDebugPorts []int
-	validFollowerIds := make([]string, 0, len(followers))
-	seenFollowerWindows := map[windows.HWND]struct{}{masterHwnd: {}}
-	for i, item := range resolved {
-		if item.hwnd == 0 {
-			continue
-		}
-		if _, duplicateWindow := seenFollowerWindows[item.hwnd]; duplicateWindow {
-			continue
-		}
-		seenFollowerWindows[item.hwnd] = struct{}{}
-		followerHwnds = append(followerHwnds, item.hwnd)
-		followerDebugPorts = append(followerDebugPorts, item.debugPort)
-		validFollowerIds = append(validFollowerIds, followers[i].id)
-	}
-
-	if len(followerHwnds) == 0 {
+	if len(followerHWNDs) == 0 {
 		return fmt.Errorf("没有可用的跟随实例")
 	}
-
-	// Input sync only — never close/navigate user tabs or extension pages.
-	// (AdsPower/MoreLogin-style: profile owns session; sync does not wipe work.)
-	masterDebugPort := masterSnapshot.DebugPort
 
 	syncState.mu.Lock()
 	oldSyncer := syncState.syncer
@@ -610,8 +229,6 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 	if oldSyncer != nil {
 		oldSyncer.Stop()
 	}
-
-	// 创建并启动同步器（带 CDP URL 同步，URL 同步默认由崩溃隔离开关关闭）
 	syncer := NewInputSyncerWithLogger(func(event string, fields ...string) {
 		a.lifecycleLog(event, fields...)
 	})
@@ -623,32 +240,21 @@ func (a *App) startInputSyncLocal(masterProfileId string, followerProfileIds []s
 			wailsruntime.EventsEmit(a.ctx, "window-sync:pause-changed", map[string]interface{}{"paused": paused})
 		}
 	})
-	if err := syncer.StartWithURLSync(masterHwnd, followerHwnds, masterSnapshot.Pid, masterDebugPort, followerDebugPorts); err != nil {
+	if err := syncer.StartWithURLSync(masterHWND, followerHWNDs, master.Pid, master.DebugPort, followerPorts); err != nil {
 		return fmt.Errorf("启动同步失败：%v", err)
 	}
-	// Hard guarantee: starting sync is always immediate. Random delay is only
-	// applied after the user explicitly enables it in the assistant UI.
 	syncer.SetRandomDelay(false, 0, 0)
-
 	syncState.mu.Lock()
 	syncState.syncer = syncer
-	syncState.masterHwnd = masterHwnd
-	syncState.masterId = masterProfileId
-	syncState.followerIds = validFollowerIds
-	syncState.followerTargets = append([]windows.HWND(nil), followerHwnds...)
+	syncState.masterHwnd = masterHWND
+	syncState.masterId = masterProfileID
+	syncState.followerIds = followerIDs
+	syncState.followerTargets = append([]windows.HWND(nil), followerHWNDs...)
+	syncState.followerPorts = append([]int(nil), followerPorts...)
 	syncState.active = true
 	syncState.mu.Unlock()
-	atomic.AddUint64(&syncSnapshotGeneration, 1)
-
-	log.Info("输入同步已启动",
-		logger.F("master", masterProfileId),
-		logger.F("followers", fmt.Sprintf("%v", validFollowerIds)),
-	)
-	// Keep the management client out of the tiled workspace as soon as sync is
-	// enabled, even when the user has not pressed a separate layout button yet.
-	// The dedicated sync assistant remains visible because it uses another title.
+	log.Info("输入同步已从固定窗口批次启动", logger.F("master", masterProfileID), logger.F("followers", fmt.Sprintf("%v", followerIDs)))
 	minimizeMainClientWindow()
-
 	return nil
 }
 
@@ -670,12 +276,12 @@ func (a *App) stopInputSyncLocal() error {
 	syncState.masterId = ""
 	syncState.followerIds = nil
 	syncState.followerTargets = nil
+	syncState.followerPorts = nil
 	syncState.mu.Unlock()
 
 	if syncer != nil {
 		syncer.Stop()
 	}
-	atomic.AddUint64(&syncSnapshotGeneration, 1)
 
 	log.Info("输入同步已停止")
 	return nil
@@ -771,10 +377,13 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	syncSessionMu.Lock()
 	defer syncSessionMu.Unlock()
 
-	// Refresh live runtime state first: the panel map otherwise lags one poll,
-	// so environments opened (or closed/reopened) right before this arrange call
-	// would be missing from the tile. Same authoritative boundary as sync start.
-	_ = a.getSyncProfilesLocal()
+	// Arrangement consumes the last explicit open/refresh collection. It must
+	// not rescan or silently replace targets while sync is active.
+	_, collected := a.syncCollection.snapshot()
+	collectedByID := make(map[string]SyncProfileInfo, len(collected))
+	for _, profile := range collected {
+		collectedByID[profile.ProfileId] = profile
+	}
 
 	// The main management client is a separate process from the sync assistant.
 	// Minimise it before arranging browser windows so it cannot cover the grid.
@@ -809,21 +418,15 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 		}()
 	}
 
-	// The active session may already own current target handles. They are only
-	// short-lived in-session hints and are always re-validated below; no
-	// persisted HWND or old layout data participates in arranging windows.
-	activeWindows := make(map[string]windows.HWND)
 	activeMasterID := ""
+	activeWindows := make(map[string]windows.HWND)
 	syncState.mu.Lock()
 	if syncState.active && syncState.masterHwnd != 0 {
 		activeMasterID = syncState.masterId
 		activeWindows[syncState.masterId] = syncState.masterHwnd
-		if syncState.syncer != nil {
-			followerWindows := syncState.syncer.getFollowerSnapshot()
-			for i, id := range syncState.followerIds {
-				if i < len(followerWindows) {
-					activeWindows[id] = followerWindows[i]
-				}
+		for i, id := range syncState.followerIds {
+			if i < len(syncState.followerTargets) {
+				activeWindows[id] = syncState.followerTargets[i]
 			}
 		}
 	}
@@ -841,20 +444,20 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	seenProfileIDs := make(map[string]struct{}, len(profileIds))
 	seenWindows := make(map[windows.HWND]struct{}, len(profileIds))
 
-	resolveMainHWND := func(profile *BrowserProfile, hinted windows.HWND) windows.HWND {
-		// Resolve the main frame from this environment's current process tree so
-		// a wallet/OAuth popup can never become a tile target. This is fail-closed:
-		// an unresolved environment is omitted until the user refreshes it.
-		if profile != nil && profile.Pid > 0 {
-			if hwnd := findMainEnvironmentBrowserWindow(profile.Pid); hwnd != 0 {
+	resolveMainHWND := func(profileID string) windows.HWND {
+		if hwnd := activeWindows[profileID]; hwnd != 0 {
+			if isWindow(hwnd) && isMainEnvironmentBrowserFrame(hwnd, getWindowTitle(hwnd)) {
 				return hwnd
 			}
+			return 0
 		}
-		if hinted != 0 && isWindow(hinted) {
-			title := getWindowTitle(hinted)
-			if isMainEnvironmentBrowserFrame(hinted, title) {
-				return hinted
-			}
+		info, ok := collectedByID[profileID]
+		if !ok || !info.Running || info.Hwnd == 0 {
+			return 0
+		}
+		hwnd := windows.HWND(info.Hwnd)
+		if isWindow(hwnd) && isMainEnvironmentBrowserFrame(hwnd, getWindowTitle(hwnd)) {
+			return hwnd
 		}
 		return 0
 	}
@@ -870,11 +473,11 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 		seenProfileIDs[pid] = struct{}{}
 		profile, profileExists := a.browserMgr.Profiles[pid]
 		if !profileExists || profile == nil || !profile.Running {
-			continue
+			return nil, fmt.Errorf("环境 %s 不在当前窗口批次中，请点击刷新", pid)
 		}
-		hwnd := resolveMainHWND(profile, activeWindows[pid])
+		hwnd := resolveMainHWND(pid)
 		if hwnd == 0 {
-			continue
+			return nil, fmt.Errorf("环境 %s 的窗口已失效，请点击刷新", pid)
 		}
 		if _, duplicate := seenWindows[hwnd]; duplicate {
 			// Two profiles resolved to the same frame — skip second (prevents
@@ -1059,14 +662,12 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	}
 
 	tiledIds := make([]string, 0, n)
-	idToHwnd := make(map[string]windows.HWND, n)
 	var masterHandle windows.HWND
 	for i, w := range wins {
 		if i >= len(rects) {
 			break
 		}
 		tiledIds = append(tiledIds, w.profileId)
-		idToHwnd[w.profileId] = w.hwnd
 		if w.profileId == effectiveMaster {
 			masterHandle = w.hwnd
 		}
@@ -1074,66 +675,6 @@ func (a *App) syncTileWindowsLocal(profileIds []string, masterProfileId string, 
 	if masterHandle == 0 && len(wins) > 0 {
 		masterHandle = wins[0].hwnd
 	}
-
-	// Keep sync engine HWND snapshot aligned with the frames we just moved.
-	// Rebuild followers in syncState.followerIds order so CDP debug ports stay
-	// index-aligned (tile natural-sort must not reorder input/URL targets).
-	if layoutActive && layoutSyncer != nil {
-		syncState.mu.Lock()
-		fids := append([]string(nil), syncState.followerIds...)
-		syncState.mu.Unlock()
-		followerHandles := make([]windows.HWND, 0, len(fids))
-		followerPorts := make([]int, 0, len(fids))
-		seenFollower := make(map[windows.HWND]struct{}, len(fids))
-		// Debug ports must stay index-aligned with the HWND list so CDP URL/key
-		// dispatch never targets the wrong environment after a closed follower
-		// is dropped or a reopened one replaces a stale handle.
-		portForID := func(id string) int {
-			if p, ok := a.browserMgr.Profiles[id]; ok && p != nil {
-				return p.DebugPort
-			}
-			return 0
-		}
-		for _, id := range fids {
-			h := idToHwnd[id]
-			if h == 0 || h == masterHandle {
-				continue
-			}
-			if _, dup := seenFollower[h]; dup {
-				continue
-			}
-			seenFollower[h] = struct{}{}
-			followerHandles = append(followerHandles, h)
-			followerPorts = append(followerPorts, portForID(id))
-		}
-		// Tiled non-master not listed in followerIds (rare) — append last.
-		for _, w := range wins {
-			if w.hwnd == 0 || w.hwnd == masterHandle {
-				continue
-			}
-			if _, ok := seenFollower[w.hwnd]; ok {
-				continue
-			}
-			seenFollower[w.hwnd] = struct{}{}
-			followerHandles = append(followerHandles, w.hwnd)
-			followerPorts = append(followerPorts, portForID(w.profileId))
-		}
-		layoutSyncer.ReplaceWindowTargets(masterHandle, followerHandles, followerPorts)
-	}
-	syncState.mu.Lock()
-	if syncState.active {
-		if masterHandle != 0 {
-			syncState.masterHwnd = masterHandle
-		}
-		// Keep the followerId-aligned target list in sync so a live repair can
-		// fall back to the frames this tile pass just moved.
-		targets := make([]windows.HWND, len(syncState.followerIds))
-		for i, id := range syncState.followerIds {
-			targets[i] = idToHwnd[id]
-		}
-		syncState.followerTargets = targets
-	}
-	syncState.mu.Unlock()
 
 	if effectiveMaster != "" && masterHandle != 0 {
 		procSetForegroundWindow := user32dll.NewProc("SetForegroundWindow")
@@ -1192,106 +733,51 @@ func (a *App) AddFollowerToSync(profileId string) error {
 func (a *App) addFollowerToSyncLocal(profileId string) error {
 	syncSessionMu.Lock()
 	defer syncSessionMu.Unlock()
-	log := logger.New("SyncAPI")
+	return a.addFollowerFromCollection(profileId)
 
-	profileId = strings.TrimSpace(profileId)
-	if profileId == "" {
+}
+
+func (a *App) addFollowerFromCollection(profileID string) error {
+	profileID = strings.TrimSpace(profileID)
+	if profileID == "" {
 		return fmt.Errorf("环境 ID 不能为空")
 	}
+	_, profiles := a.syncCollection.snapshot()
+	byID := make(map[string]SyncProfileInfo, len(profiles))
+	for _, profile := range profiles {
+		byID[profile.ProfileId] = profile
+	}
+	info, ok := byID[profileID]
+	if !ok || !info.Running || info.Hwnd == 0 {
+		return fmt.Errorf("环境 %s 不在当前窗口批次中，请点击刷新", profileID)
+	}
+	hwnd := windows.HWND(info.Hwnd)
+	if !isWindow(hwnd) || !isMainEnvironmentBrowserFrame(hwnd, getWindowTitle(hwnd)) {
+		return fmt.Errorf("环境 %s 的窗口已失效，请点击刷新", profileID)
+	}
 
-	// 获取当前同步状态（一次性读取，避免竞态）
 	syncState.mu.Lock()
+	defer syncState.mu.Unlock()
 	if !syncState.active || syncState.syncer == nil {
-		syncState.mu.Unlock()
 		return fmt.Errorf("同步未启动")
 	}
-	masterId := strings.TrimSpace(syncState.masterId)
-	followerIds := append([]string(nil), syncState.followerIds...)
-	syncState.mu.Unlock()
-
-	if profileId == masterId {
+	if profileID == syncState.masterId {
 		return fmt.Errorf("主控环境不能同时作为跟随者")
 	}
-
-	// 检查是否已在跟随列表
-	for _, fid := range followerIds {
-		if fid == profileId {
-			return fmt.Errorf("环境 %s 已在跟随列表中", profileId)
+	for _, id := range syncState.followerIds {
+		if id == profileID {
+			return fmt.Errorf("环境 %s 已在跟随列表中", profileID)
 		}
 	}
-
-	// 查找环境并验证状态
-	a.browserMgr.Mutex.Lock()
-	profile, ok := a.browserMgr.Profiles[profileId]
-	if !ok || profile == nil {
-		a.browserMgr.Mutex.Unlock()
-		return fmt.Errorf("未找到环境：%s", profileId)
-	}
-	if !profile.Running || profile.Pid <= 0 {
-		a.browserMgr.Mutex.Unlock()
-		return fmt.Errorf("环境 %s 未在运行", profileId)
-	}
-	profileSnapshot := *profile
-	a.browserMgr.Mutex.Unlock()
-
-	// 解析窗口句柄
-	resolvedWindows := findProcessTreeWindows([]int{profileSnapshot.Pid})
-	hwnd := resolveLiveMainEnvironmentFrame(profileSnapshot.Pid, resolvedWindows[profileSnapshot.Pid])
-	if hwnd == 0 {
-		return fmt.Errorf("未找到环境 %s 的窗口", profileId)
-	}
-
-	// 原子更新同步状态：一次性获取锁，完成所有更新
-	syncState.mu.Lock()
-	// 再次检查状态（可能在等待锁期间被其他操作修改）
-	if !syncState.active || syncState.syncer == nil {
-		syncState.mu.Unlock()
-		return fmt.Errorf("同步已停止")
-	}
-	// 再次检查是否已存在（避免竞态）
-	for _, fid := range syncState.followerIds {
-		if fid == profileId {
-			syncState.mu.Unlock()
-			return fmt.Errorf("环境 %s 已在跟随列表中", profileId)
+	for _, target := range syncState.followerTargets {
+		if target == hwnd {
+			return fmt.Errorf("环境 %s 与现有跟随窗口冲突，请点击刷新", profileID)
 		}
 	}
-	syncState.followerIds = append(syncState.followerIds, profileId)
+	syncState.followerIds = append(syncState.followerIds, profileID)
 	syncState.followerTargets = append(syncState.followerTargets, hwnd)
-	// 构建新的 follower HWNDs 和 ports
-	newFollowerIds := append([]string(nil), syncState.followerIds...)
-	syncState.mu.Unlock()
-
-	// 重建 follower HWNDs 和 ports
-	followerHwnds := make([]windows.HWND, 0, len(newFollowerIds))
-	followerPorts := make([]int, 0, len(newFollowerIds))
-	a.browserMgr.Mutex.Lock()
-	for _, fid := range newFollowerIds {
-		if fid == masterId {
-			continue
-		}
-		fp, ok := a.browserMgr.Profiles[fid]
-		if !ok || fp == nil || !fp.Running || fp.Pid <= 0 {
-			continue
-		}
-		resolved := findProcessTreeWindows([]int{fp.Pid})
-		fHwnd := resolveLiveMainEnvironmentFrame(fp.Pid, resolved[fp.Pid])
-		if fHwnd == 0 {
-			continue
-		}
-		followerHwnds = append(followerHwnds, fHwnd)
-		followerPorts = append(followerPorts, fp.DebugPort)
-	}
-	a.browserMgr.Mutex.Unlock()
-
-	// 更新同步器目标
-	curMaster, _, _ := syncState.syncer.CurrentTargets()
-	syncState.syncer.ReplaceWindowTargets(curMaster, followerHwnds, followerPorts)
-
-	atomic.AddUint64(&syncSnapshotGeneration, 1)
-	log.Info("已添加跟随环境",
-		logger.F("profile_id", profileId),
-		logger.F("total_followers", fmt.Sprintf("%d", len(newFollowerIds)-1)),
-	)
+	syncState.followerPorts = append(syncState.followerPorts, info.DebugPort)
+	syncState.syncer.ReplaceWindowTargets(syncState.masterHwnd, append([]windows.HWND(nil), syncState.followerTargets...), append([]int(nil), syncState.followerPorts...))
 	return nil
 }
 
@@ -1306,76 +792,44 @@ func (a *App) RemoveFollowerFromSync(profileId string) error {
 func (a *App) removeFollowerFromSyncLocal(profileId string) error {
 	syncSessionMu.Lock()
 	defer syncSessionMu.Unlock()
-	log := logger.New("SyncAPI")
+	return a.removeFollowerFromCollection(profileId)
 
-	profileId = strings.TrimSpace(profileId)
-	if profileId == "" {
+}
+
+func (a *App) removeFollowerFromCollection(profileID string) error {
+	profileID = strings.TrimSpace(profileID)
+	if profileID == "" {
 		return fmt.Errorf("环境 ID 不能为空")
 	}
-
-	// 原子更新同步状态：一次性获取锁，完成查找和更新
 	syncState.mu.Lock()
+	defer syncState.mu.Unlock()
 	if !syncState.active || syncState.syncer == nil {
-		syncState.mu.Unlock()
 		return fmt.Errorf("同步未启动")
 	}
-	masterId := strings.TrimSpace(syncState.masterId)
-	oldFollowerIds := syncState.followerIds
-	oldFollowerTargets := syncState.followerTargets
-
-	// 查找并移除
+	ids := make([]string, 0, len(syncState.followerIds))
+	targets := make([]windows.HWND, 0, len(syncState.followerTargets))
+	ports := make([]int, 0, len(syncState.followerPorts))
 	found := false
-	newFollowerIds := make([]string, 0, len(oldFollowerIds))
-	newTargets := make([]windows.HWND, 0, len(oldFollowerIds))
-	for i, fid := range oldFollowerIds {
-		if fid == profileId {
+	for i, id := range syncState.followerIds {
+		if id == profileID {
 			found = true
 			continue
 		}
-		newFollowerIds = append(newFollowerIds, fid)
-		if i < len(oldFollowerTargets) {
-			newTargets = append(newTargets, oldFollowerTargets[i])
+		ids = append(ids, id)
+		if i < len(syncState.followerTargets) {
+			targets = append(targets, syncState.followerTargets[i])
+		}
+		if i < len(syncState.followerPorts) {
+			ports = append(ports, syncState.followerPorts[i])
 		}
 	}
 	if !found {
-		syncState.mu.Unlock()
-		return fmt.Errorf("环境 %s 不在跟随列表中", profileId)
+		return fmt.Errorf("环境 %s 不在跟随列表中", profileID)
 	}
-	syncState.followerIds = newFollowerIds
-	syncState.followerTargets = newTargets
-	syncState.mu.Unlock()
-
-	// 重建 follower HWNDs 和 ports
-	followerHwnds := make([]windows.HWND, 0, len(newFollowerIds))
-	followerPorts := make([]int, 0, len(newFollowerIds))
-	a.browserMgr.Mutex.Lock()
-	for _, fid := range newFollowerIds {
-		if fid == masterId {
-			continue
-		}
-		fp, ok := a.browserMgr.Profiles[fid]
-		if !ok || fp == nil || !fp.Running || fp.Pid <= 0 {
-			continue
-		}
-		resolved := findProcessTreeWindows([]int{fp.Pid})
-		fHwnd := resolved[fp.Pid]
-		if fHwnd == 0 {
-			continue
-		}
-		followerHwnds = append(followerHwnds, fHwnd)
-		followerPorts = append(followerPorts, fp.DebugPort)
-	}
-	a.browserMgr.Mutex.Unlock()
-
-	// 更新同步器目标
-	curMaster, _, _ := syncState.syncer.CurrentTargets()
-	syncState.syncer.ReplaceWindowTargets(curMaster, followerHwnds, followerPorts)
-
-	atomic.AddUint64(&syncSnapshotGeneration, 1)
-	log.Info("已移除跟随环境",
-		logger.F("profile_id", profileId),
-		logger.F("total_followers", fmt.Sprintf("%d", len(newFollowerIds))),
-	)
+	syncState.followerIds = ids
+	syncState.followerTargets = targets
+	syncState.followerPorts = ports
+	syncState.syncer.ReplaceWindowTargets(syncState.masterHwnd, append([]windows.HWND(nil), targets...), ports)
 	return nil
 }
 

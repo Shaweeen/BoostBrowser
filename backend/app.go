@@ -72,10 +72,11 @@ type App struct {
 	finalizeOnce        sync.Once
 	updateMu            sync.Mutex
 	verifiedUpdatePath  string
-	// syncProfileReloadAt throttles the sync assistant's periodic SQLite
-	// profile-table reload (the panel process is a separate process whose
-	// in-memory profile map only loads once).
-	syncProfileReloadAt time.Time
+	syncCollection      syncCollection
+	syncHandoffMu       sync.Mutex
+	syncHandoffToken    string
+	syncClientToken     string
+	syncHandoffStop     func()
 }
 
 // NewApp 创建新的应用实例
@@ -92,7 +93,7 @@ func NewApp(appRoot string, args ...interface{}) *App {
 			}
 		}
 	}
-	return &App{
+	app := &App{
 		appRoot:           strings.TrimSpace(appRoot),
 		panelMode:         panelMode,
 		version:           version,
@@ -100,6 +101,8 @@ func NewApp(appRoot string, args ...interface{}) *App {
 		rabbyImports:      make(map[string]*rabbyWalletImportSession),
 		rabbyImportActive: make(map[string]bool),
 	}
+	app.syncClientToken = syncCollectionTokenFromArgs(os.Args[1:])
+	return app
 }
 
 func (a *App) appName() string {
@@ -435,6 +438,7 @@ func (a *App) applyRuntimeConfig(cfg config.RuntimeConfig) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	a.StopSyncPanelHandoff()
 	log := logger.New("App")
 	a.rabbyImportMu.Lock()
 	for sessionID := range a.rabbyImports {

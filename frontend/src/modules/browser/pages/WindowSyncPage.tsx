@@ -100,8 +100,8 @@ export function WindowSyncPage() {
     const seq = ++loadProfilesSeq.current
     setRefreshing(true)
     const request = (async () => {
-      // force = explicit refresh: bypass the backend's 2s process-scan cache so
-      // a just-started environment is visible immediately.
+      // force is used only by the Refresh button. Opening reads the complete
+      // batch the main client collected immediately before launching this panel.
       const snapshot = force ? await refreshSyncSnapshot() : await getSyncSnapshot()
       const list = snapshot.profiles
       const status = snapshot.status
@@ -171,9 +171,9 @@ export function WindowSyncPage() {
     // assistant opens, then refresh when the user is choosing or changing the
     // master/follower set. A background poll could replace an HWND while a
     // native toolbar press/release pair is in flight.
-    // Opening the sync tool is an explicit environment-selection boundary:
-    // discover the current live set immediately, never a prior cache entry.
-    void loadProfiles(true)
+    // The main client already collected the opening batch before this process
+    // was launched. Read that batch without triggering a second collection.
+    void loadProfiles(false)
     const offPauseChanged = EventsOn('window-sync:pause-changed', (payload: { paused?: boolean }) => {
       const paused = payload?.paused === true
       setSyncStatus(prev => prev ? { ...prev, paused } : prev)

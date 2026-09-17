@@ -3,6 +3,7 @@ module boost-browser
 go 1.25.0
 
 require (
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/energye/systray v1.0.3
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3

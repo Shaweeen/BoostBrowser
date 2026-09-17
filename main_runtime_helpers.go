@@ -62,11 +62,15 @@ func (a *App) SaveNativeMainWindowBounds(bounds MainWindowBounds) bool {
 // OpenWindowSyncPanel launches a second process in the lightweight sync-panel
 // mode. Single-instance handling keeps only one panel alive.
 func (a *App) OpenWindowSyncPanel() error {
+	token, err := a.PrepareSyncPanelHandoff()
+	if err != nil {
+		return err
+	}
 	exePath, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(exePath, "--sync-panel")
+	cmd := exec.Command(exePath, "--sync-panel", "--sync-collection-token="+token)
 	cmd.Dir = appRoot
 	if err := cmd.Start(); err != nil {
 		return err
